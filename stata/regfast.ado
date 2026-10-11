@@ -184,6 +184,7 @@ program Estimate, eclass
 
 	ParseDOF, `dofadjustments'
 	local dofmethod `s(dofadjustments)'
+	local dofmethod : list retokenize dofmethod
 	local dofkey : subinstr local dofmethod " " ",", all
 	if ("`dofkey'" == "") local dofkey none
 

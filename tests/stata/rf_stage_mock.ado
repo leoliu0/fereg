@@ -1,10 +1,11 @@
 *! regfast test helper: stage the current reghdfe e() for the mock plugin (tests/stata/mock)
-* rf_stage_mock, indepvars(varlist|_none) status(numlist)
+* rf_stage_mock, indepvars(varlist|_none) [status(numlist)]
 *   __mock_b/__mock_V: e(b)/e(V) restricted to the regressors regfast sends to the plugin
 *                      (fvexpand'ed terms that are not base/omitted levels, then _cons)
 *   __mock_doft:       e(dof_table)
 *   __mock_<scalar>:   every e() scalar
-*   $rfmock_status:    status codes the mock returns (one per sent regressor)
+*   $rfmock_status:    status codes the mock returns (one per sent regressor); by default 2 for sent
+*                      regressors that reghdfe omitted (o. in e(b)) and 0 otherwise
 program rf_stage_mock
 	version 16
 	syntax, indepvars(string) [status(string)]
@@ -36,6 +37,18 @@ program rf_stage_mock
 	local sc : e(scalars)
 	foreach s of local sc {
 		scalar __mock_`s' = e(`s')
+	}
+	if ("`status'" == "" & "`indepvars'" != "_none") {
+		local bnames : colnames e(b)
+		local j 0
+		foreach m of local mask {
+			local ++j
+			local name : word `j' of `bnames'
+			if (`m' & "`name'" != "_cons") {
+				_ms_parse_parts `name'
+				local status `status' `=cond(r(omit), 2, 0)'
+			}
+		}
 	}
 	global rfmock_status `status'
 end
