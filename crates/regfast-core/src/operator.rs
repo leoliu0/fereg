@@ -7,6 +7,8 @@
 //! large-block scatters are pulls along the level-sorted cell lists, so results are bit-identical
 //! for any number of threads (plan D3).
 
+use std::sync::Mutex;
+
 use rayon::prelude::*;
 
 use crate::error::RfError;
@@ -72,6 +74,59 @@ impl SegAgg {
     fn seg(&self, s: usize) -> (&[u32], &[f64]) {
         let r = self.off[s] as usize..self.off[s + 1] as usize;
         (&self.codes[r.clone()], &self.sums[r])
+    }
+
+    /// Σ_s d_s·l_s, with d_s the codes of segment s and l_s those ≥ `first_large` (the walk of
+    /// the large-coordinate rows of the joint assembly; codes are global coordinates).
+    pub fn large_work(&self, first_large: usize) -> u64 {
+        (0..self.off.len() - 1)
+            .map(|s| {
+                let hs = self.seg(s).0;
+                let l = hs.len() - hs.partition_point(|&h| (h as usize) < first_large);
+                (hs.len() * l) as u64
+            })
+            .sum()
+    }
+}
+
+/// Structural lookups of the joint assembly (weight independent).
+pub struct JointCells {
+    /// Block of every reduced coordinate.
+    coord_block: Vec<u32>,
+    /// Segment of every cell.
+    cell_seg: Vec<u32>,
+}
+
+impl JointCells {
+    /// Cells (ascending) whose code in the coordinate's (large) block is coordinate `k`.
+    fn cells<'a>(&'a self, st: &'a Structure, k: usize) -> &'a [u32] {
+        let blk = &st.blocks[self.coord_block[k] as usize];
+        let g = k - blk.off;
+        &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize]
+    }
+}
+
+/// Accumulator, marks and touched list of one row.
+type Scratch = (Vec<f64>, Vec<u32>, Vec<u32>);
+
+/// Row-assembly scratch per pool thread, allocated on a thread's first use. Each row stamps the
+/// marks with its own id, so stale contents never affect a result, and results do not depend on
+/// which thread computes a row.
+struct RowScratch {
+    len: usize,
+    slots: Vec<Mutex<Option<Scratch>>>,
+}
+
+impl RowScratch {
+    fn new(len: usize, pool: &Pool) -> RowScratch {
+        RowScratch { len, slots: (0..pool.threads().max(1)).map(|_| Mutex::new(None)).collect() }
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut [f64], &mut [u32], &mut Vec<u32>) -> T) -> T {
+        let i = rayon::current_thread_index().unwrap_or(0) % self.slots.len();
+        let mut slot = self.slots[i].lock().unwrap_or_else(|e| e.into_inner());
+        let (acc, mark, touched) = slot.get_or_insert_with(|| (vec![0.0; self.len], vec![u32::MAX; self.len], Vec::new()));
+        f(acc, mark, touched)
     }
 }
 
@@ -640,6 +695,25 @@ impl Ops<'_> {
     /// Per-segment aggregated codes of block `b`.
     pub fn seg_agg(&self, b: usize, pool: &Pool) -> Result<SegAgg, RfError> {
         let (st, ws) = (self.st, self.ws);
+        self.agg_segments(pool, |c, out| out.push((st.codes(c)[b], ws.cw(c))))
+    }
+
+    /// Per-segment aggregated reduced coordinates of all blocks (`codes` are global coordinates,
+    /// ascending since block offsets increase with the block index).
+    pub fn joint_seg_agg(&self, pool: &Pool) -> Result<SegAgg, RfError> {
+        let (st, ws) = (self.st, self.ws);
+        self.agg_segments(pool, |c, out| {
+            let w = ws.cw(c);
+            for (blk, &code) in st.blocks.iter().zip(st.codes(c)) {
+                out.push(((blk.off as u32) + code, w));
+            }
+        })
+    }
+
+    /// Per segment: the distinct keys pushed by `push` for its cells (ascending) with their summed
+    /// weights, in segment order (fixed parts; thread-count invariant).
+    fn agg_segments(&self, pool: &Pool, push: impl Fn(usize, &mut Vec<(u32, f64)>) + Sync) -> Result<SegAgg, RfError> {
+        let st = self.st;
         let lists: Vec<(Vec<u32>, Vec<u32>, Vec<f64>)> = pool.install(|| {
             (0..st.nparts())
                 .into_par_iter()
@@ -648,7 +722,9 @@ impl Ops<'_> {
                     let mut tmp: Vec<(u32, f64)> = Vec::new();
                     for s in st.parts[p] as usize..st.parts[p + 1] as usize {
                         tmp.clear();
-                        tmp.extend(st.cells_of(s).map(|c| (st.codes(c)[b], ws.cw(c))));
+                        for c in st.cells_of(s) {
+                            push(c, &mut tmp);
+                        }
                         tmp.sort_unstable_by_key(|e| e.0);
                         let before = codes.len();
                         for &(g, w) in &tmp {
@@ -683,6 +759,200 @@ impl Ops<'_> {
             sums.extend(w);
         }
         Ok(SegAgg { off, codes, sums, work })
+    }
+
+    /// Block of every reduced coordinate and segment of every cell (structural; for the joint
+    /// assembly, whose rows of large coordinates walk the blocks' level-sorted cell lists).
+    pub fn joint_cells(&self, pool: &Pool) -> Result<JointCells, RfError> {
+        let st = self.st;
+        let mut coord_block = alloc_vec(st.m, 0u32)?;
+        for (b, blk) in st.blocks.iter().enumerate() {
+            coord_block[blk.off..blk.off + blk.g].iter_mut().for_each(|v| *v = b as u32);
+        }
+        Ok(JointCells { coord_block, cell_seg: st.cell_segments(pool)? })
+    }
+
+    /// Structural nonzeros of the rows of large coordinates of the joint S (diagonal included):
+    /// the union of the coordinates of every segment containing the row's coordinate (cell
+    /// co-occurrences are a subset); 0 for small coordinates. Also returns the total nonzeros of
+    /// the full joint matrix (small rows mirror the small columns of the large rows, plus a dense
+    /// bound m_s² for the small-small block) and of the large-coordinate submatrix (AMD input).
+    /// Cost ≈ Σ_s d_s·(d_s − small codes of s).
+    pub fn joint_row_nnz(&self, agg: &SegAgg, jc: &JointCells, pool: &Pool) -> (Vec<u32>, u64, u64) {
+        let (m, ms) = (self.st.m, self.st.m_small);
+        let scratch = RowScratch::new(m, pool);
+        let counts: Vec<(u32, u32)> = pool.install(|| {
+            (0..m)
+                .into_par_iter()
+                .map(|row| {
+                    if row < ms {
+                        return (0, 0);
+                    }
+                    scratch.with(|_, mark, _| {
+                        let (mut cnt, mut cnt_small) = (0u32, 0u32);
+                        let mut last = u32::MAX;
+                        for &c in jc.cells(self.st, row) {
+                            let s = jc.cell_seg[c as usize];
+                            if s == last {
+                                continue;
+                            }
+                            last = s;
+                            for &h in agg.seg(s as usize).0 {
+                                if mark[h as usize] != row as u32 {
+                                    mark[h as usize] = row as u32;
+                                    cnt += 1;
+                                    cnt_small += u32::from((h as usize) < ms);
+                                }
+                            }
+                        }
+                        (cnt, cnt_small)
+                    })
+                })
+                .collect()
+        });
+        let all: u64 = counts.iter().map(|c| u64::from(c.0)).sum();
+        let small: u64 = counts.iter().map(|c| u64::from(c.1)).sum();
+        let total = all + small + (ms * ms) as u64;
+        (counts.into_iter().map(|c| c.0).collect(), total, all - small)
+    }
+
+    /// Exact joint S over the kept coordinates `keep_idx` (global, ascending) of all blocks, as a
+    /// full CSR: S_kl = Σ_c W_c [k, l ∈ codes(c)] − Σ_s c_k(s) c_l(s) / n1(s), i.e. the cell
+    /// co-occurrence weights A_RR (diagonal n_k) minus the FE1 elimination term. The diagonal is
+    /// computed directly (the Laplacian row-sum identity does not hold across blocks).
+    ///
+    /// Rows of large coordinates are accumulated row by row in a fixed order (cells ascending).
+    /// Rows of small coordinates are not walked (they touch almost every segment): their
+    /// small-small part is the dense S_SS ([`Ops::assemble_small`]) and their small-large part
+    /// mirrors the small columns of the large rows (exact symmetry). Values never depend on the
+    /// thread count. `row_nnz` are the capacities from [`Ops::joint_row_nnz`].
+    pub fn assemble_joint(&self, agg: &SegAgg, jc: &JointCells, row_nnz: &[u32], keep_idx: &[u32], pool: &Pool) -> Result<Csr, RfError> {
+        let (st, ws) = (self.st, self.ws);
+        let (m, ms) = (st.m, st.m_small);
+        let mut newid = vec![u32::MAX; m];
+        for (k, &l) in keep_idx.iter().enumerate() {
+            newid[l as usize] = k as u32;
+        }
+        let nk = keep_idx.len();
+        let sk = keep_idx.partition_point(|&k| (k as usize) < ms);
+        let large = &keep_idx[sk..];
+        let nl = large.len();
+        let mut lptr = alloc_vec(nl + 1, 0u32)?;
+        for (i, &l) in large.iter().enumerate() {
+            lptr[i + 1] = lptr[i] + row_nnz[l as usize];
+        }
+        let cap = lptr[nl] as usize;
+        let mut lcol = alloc_vec(cap, 0u32)?;
+        let mut lval = alloc_vec(cap, 0.0)?;
+        let mut lused = alloc_vec(nl, 0u32)?;
+        let scratch = RowScratch::new(m, pool);
+        {
+            let bounds: Vec<usize> = lptr.iter().map(|&p| p as usize).collect();
+            let cp = split_bounds(&mut lcol, &bounds);
+            let vp = split_bounds(&mut lval, &bounds);
+            pool.install(|| {
+                cp.into_par_iter().zip(vp).zip(lused.par_iter_mut()).enumerate().for_each(|(k, ((cols, vals), used))| {
+                    scratch.with(|acc, mark, touched| {
+                        let row = large[k] as usize;
+                        touched.clear();
+                        let mut add = |h: usize, v: f64| {
+                            if mark[h] != row as u32 {
+                                mark[h] = row as u32;
+                                acc[h] = 0.0;
+                                touched.push(h as u32);
+                            }
+                            acc[h] += v;
+                        };
+                        // Cells of the row's coordinate, grouped by segment (cells ascending).
+                        let cells = jc.cells(st, row);
+                        let mut i = 0;
+                        while i < cells.len() {
+                            let s = jc.cell_seg[cells[i] as usize];
+                            let mut ck = 0.0;
+                            while i < cells.len() && jc.cell_seg[cells[i] as usize] == s {
+                                let c = cells[i] as usize;
+                                let w = ws.cw(c);
+                                ck += w;
+                                // A_RR: every coordinate of the cell (the row's own gives n_k).
+                                for (blk, &code) in st.blocks.iter().zip(st.codes(c)) {
+                                    add(blk.off + code as usize, w);
+                                }
+                                i += 1;
+                            }
+                            let f = ck / ws.n1[s as usize];
+                            let (hs, cs) = agg.seg(s as usize);
+                            for (&h, &ch) in hs.iter().zip(cs) {
+                                add(h as usize, -f * ch);
+                            }
+                        }
+                        // Columns ascending (kept ids preserve the global order).
+                        touched.sort_unstable();
+                        let mut i = 0;
+                        for &h in touched.iter() {
+                            let hn = newid[h as usize];
+                            if hn != u32::MAX {
+                                cols[i] = hn;
+                                vals[i] = acc[h as usize];
+                                i += 1;
+                            }
+                        }
+                        *used = i as u32;
+                    })
+                })
+            });
+        }
+        // Small rows: dense S_SS over the kept small coordinates, then the mirrored small
+        // columns of the large rows (large rows ascending, so columns stay sorted).
+        let dense = if sk > 0 { self.assemble_small(pool)? } else { Vec::new() };
+        let small_cols = |r: usize| {
+            let a = lptr[r] as usize;
+            let row = &lcol[a..a + lused[r] as usize];
+            a..a + row.partition_point(|&c| (c as usize) < sk)
+        };
+        let mut ptr = alloc_vec(nk + 1, 0u32)?;
+        let mut cnt = alloc_vec(sk, 0u32)?;
+        for i in 0..sk {
+            let gi = keep_idx[i] as usize;
+            cnt[i] = (0..sk).filter(|&j| j == i || dense[gi * ms + keep_idx[j] as usize] != 0.0).count() as u32;
+        }
+        for r in 0..nl {
+            for e in small_cols(r) {
+                cnt[lcol[e] as usize] += 1;
+            }
+        }
+        for i in 0..sk {
+            ptr[i + 1] = ptr[i] + cnt[i];
+        }
+        for r in 0..nl {
+            ptr[sk + r + 1] = ptr[sk + r] + lused[r];
+        }
+        let total = ptr[nk] as usize;
+        let mut col = alloc_vec(total, 0u32)?;
+        let mut val = alloc_vec(total, 0.0)?;
+        let mut cur: Vec<usize> = ptr[..sk].iter().map(|&p| p as usize).collect();
+        for i in 0..sk {
+            let gi = keep_idx[i] as usize;
+            for j in 0..sk {
+                let v = dense[gi * ms + keep_idx[j] as usize];
+                if j == i || v != 0.0 {
+                    col[cur[i]] = j as u32;
+                    val[cur[i]] = v;
+                    cur[i] += 1;
+                }
+            }
+        }
+        for r in 0..nl {
+            for e in small_cols(r) {
+                let i = lcol[e] as usize;
+                col[cur[i]] = (sk + r) as u32;
+                val[cur[i]] = lval[e];
+                cur[i] += 1;
+            }
+            let (a, u, b) = (lptr[r] as usize, lused[r] as usize, ptr[sk + r] as usize);
+            col[b..b + u].copy_from_slice(&lcol[a..a + u]);
+            val[b..b + u].copy_from_slice(&lval[a..a + u]);
+        }
+        Ok(Csr { n: nk, ptr, col, val })
     }
 
     /// Number of structural nonzeros of each row of S_bb (diagonal included). Cost ≈ E_b.

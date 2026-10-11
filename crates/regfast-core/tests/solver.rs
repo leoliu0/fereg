@@ -1,10 +1,11 @@
 //! FeSolver (plan D5) against the dense explicit-dummy oracle (plan §2.5).
 
 use regfast_core::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts};
+use regfast_core::cg::PROBE_AT;
 use regfast_core::gather::{gather_rows, to_kept_order};
 use regfast_core::par::with_pool;
 use regfast_core::rng::SplitMix64;
-use regfast_core::solve::{FeSolver, SolverConfig};
+use regfast_core::solve::{FeSolver, JointPolicy, SolverConfig};
 use regfast_core::{AbsorbTerm, AbsorberKind, Ctx, Family, FactorValues, Prep, RfError, Session, Vce, WeightKind};
 
 struct Data {
@@ -104,11 +105,18 @@ fn max_rel(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Checks `cfg` and the same configuration with large blocks scattered through the M×R scratch
-/// (`acc_bytes_max = 0`); returns the info of `cfg`.
+/// Checks `cfg`, the same configuration with large blocks scattered through the M×R scratch
+/// (`acc_bytes_max = 0`), and with the joint factor off / always (block-Jacobi escalation and
+/// joint paths both exercised); returns the info of `cfg`.
 fn check(d: &Data, cfg: SolverConfig, r: usize) -> SolveInfo {
     let mut first = None;
-    for c in [cfg, SolverConfig { acc_bytes_max: 0, ..cfg }] {
+    let variants = [
+        cfg,
+        SolverConfig { acc_bytes_max: 0, ..cfg },
+        SolverConfig { joint: JointPolicy::Off, ..cfg },
+        SolverConfig { joint: JointPolicy::Always, ..cfg },
+    ];
+    for c in variants {
         let mut p = setup(d, c, r);
         let (f, dn, info, _) = run(&mut p, None);
         let err = max_rel(&f, &dn);
@@ -116,6 +124,10 @@ fn check(d: &Data, cfg: SolverConfig, r: usize) -> SolveInfo {
         first.get_or_insert(info);
     }
     first.expect("ran")
+}
+
+fn joint_off(cfg: SolverConfig) -> SolverConfig {
+    SolverConfig { joint: JointPolicy::Off, ..cfg }
 }
 
 fn random_codes(n: usize, g: usize, rng: &mut SplitMix64) -> Vec<f64> {
@@ -183,9 +195,13 @@ fn weighted_observations() {
 #[test]
 fn ring_graph_escalates_and_converges_fast() {
     let d = ring(400, 800);
-    let info = check(&d, all_large(), 2);
+    // Per-block escalation (block-Jacobi with the exact block).
+    let info = check(&d, joint_off(all_large()), 2);
     assert!(info.escalated, "ring graph must escalate");
     assert!(info.iterations <= 30, "ring graph took {} iterations", info.iterations);
+    // The cost model takes the joint factor at a probe: exact afterwards.
+    let info = check(&d, all_large(), 2);
+    assert!(info.escalated && info.iterations <= PROBE_AT + 1, "joint path took {} iterations", info.iterations);
 }
 
 /// The approx-chol escalations: on the exact block (sparse Cholesky disabled) and on the
@@ -226,12 +242,60 @@ fn band(nfirm: usize, nindiv: usize, width: usize, nyear: usize, weighted: bool)
 #[test]
 fn band_graph_with_year_escalates() {
     let d = band(400, 800, 3, 10, false);
-    let info = check(&d, limit(50), 3);
+    let info = check(&d, joint_off(limit(50)), 3);
     assert!(info.escalated, "band graph must escalate ({} iterations)", info.iterations);
     assert!(info.iterations <= 60, "band graph took {} iterations", info.iterations);
     check(&d, all_large(), 2);
     check(&d, SolverConfig::default(), 2);
     check(&band(400, 800, 3, 10, true), limit(50), 2);
+}
+
+/// Two coupled large blocks (firm, occupation) plus a small block (year), weighted, with a second
+/// connected component and a nested (redundant) term: the joint factor makes M = S, so PCG stops
+/// after one iteration, and the grounded null directions (one per non-FE1 block and component)
+/// leave the residualized columns equal to the dense oracle's.
+fn coupled(seed: u64) -> Data {
+    let mut rng = SplitMix64::new(seed);
+    let (mut indiv, mut firm, mut occ, mut year, mut group) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for side in 0..2usize {
+        let (ni, nf, no) = if side == 0 { (500, 120, 60) } else { (150, 40, 25) };
+        for i in 0..ni {
+            let f0 = rng.next_u64() as usize % nf;
+            for t in 0..4 {
+                indiv.push((side * 1000 + i) as f64);
+                let moved = t >= 2 && i % 3 == 0;
+                firm.push((side * 1000 + if moved { (f0 + 1 + i % 5) % nf } else { f0 }) as f64);
+                occ.push((side * 1000 + (f0 * 7 + t + i % 4) % no) as f64);
+                year.push((rng.next_u64() % 6) as f64);
+                group.push((side * 1000 + i / 10) as f64);
+            }
+        }
+    }
+    let n = indiv.len();
+    let w = Some((0..n).map(|_| 0.5 + rng.next_f64()).collect());
+    Data { factors: vec![indiv, firm, occ, year, group], terms: vec![vec![0], vec![1], vec![2], vec![3], vec![4]], w, seed }
+}
+
+#[test]
+fn joint_factor_with_coupled_large_blocks() {
+    for seed in [41, 42] {
+        let d = coupled(seed);
+        // year (6 levels) small; group (nested in indiv: redundant), firm and occupation large.
+        let cfg = limit(10);
+        let info = check(&d, SolverConfig { joint: JointPolicy::Always, ..cfg }, 3);
+        assert!(info.escalated && info.iterations == 1, "joint factor: {} iterations", info.iterations);
+        let p = setup(&d, cfg, 1);
+        assert!(p.fast.structure().blocks.iter().filter(|b| !b.small).count() >= 2, "two large blocks expected");
+        // Auto: the cost model accepts the (tiny) joint factor at the latest at the probe.
+        let mut p = setup(&d, cfg, 2);
+        let (f, dn, info, _) = run(&mut p, None);
+        assert!(max_rel(&f, &dn) <= 1e-9);
+        assert_eq!(p.fast.precond_kinds(), vec!["joint"]);
+        assert!(info.iterations <= PROBE_AT + 1, "{} iterations", info.iterations);
+        // Block-Jacobi with both large blocks escalated needs many more iterations.
+        let info_off = check(&d, joint_off(cfg), 2);
+        assert!(info_off.iterations > 1);
+    }
 }
 
 #[test]
@@ -298,8 +362,11 @@ fn set_weights_with_warm_start() {
         (bipartite(1500, &[150, 20, 60], false, 18), all_large()),
         (difficult(150, 10, 300, false), z_path),
         // Escalates on the first solve; later solves run with the stale factor / refactor.
-        (ring(400, 800), all_large()),
+        (ring(400, 800), joint_off(all_large())),
         (band(400, 800, 3, 10, false), SolverConfig { max_block_nnz: 0, ..limit(50) }),
+        // Joint factor: refreshed numerically after set_weights (cost model) or kept stale.
+        (coupled(43), limit(10)),
+        (coupled(44), SolverConfig { joint: JointPolicy::Always, ..limit(10) }),
     ];
     for (d, cfg) in designs {
         let mut p = setup(&d, cfg, 2);

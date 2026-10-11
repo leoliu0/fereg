@@ -1,6 +1,8 @@
 //! Block-Jacobi preconditioner over the reduced system S (plan D5): an exact dense factor of
 //! the small super-block, and per large block either Jacobi or (after escalation) an exact
-//! sparse Cholesky or an approximate Cholesky of the block Laplacian.
+//! sparse Cholesky or an approximate Cholesky of the block Laplacian. Alternatively a single
+//! exact sparse Cholesky of the joint S over all blocks (cross-block coupling included), which
+//! replaces the block-Jacobi preconditioner entirely.
 
 pub mod approx_chol;
 pub mod dense;
@@ -48,17 +50,30 @@ impl BlockPrecond {
     }
 }
 
+/// Exact sparse Cholesky of the joint S over the kept (non-redundant) coordinates of all blocks.
+pub struct Joint {
+    /// Kept global coordinates (ascending).
+    pub keep: Vec<u32>,
+    pub f: Box<sparse_chol::SparseChol>,
+}
+
 pub struct Precond {
     pub small: Option<dense::Dense>,
     /// 1/diag(S) (0 for redundant coordinates); used by Jacobi blocks.
     pub inv_diag: Vec<f64>,
     /// One entry per large block (blocks `ns..nb` of the structure).
     pub large: Vec<BlockPrecond>,
+    /// When set, M = the joint factor (the block preconditioners are unused).
+    pub joint: Option<Joint>,
 }
 
 impl Precond {
     /// z = M⁻¹ r for row-major m × w blocks.
     pub fn apply(&self, st: &Structure, r: &[f64], z: &mut [f64], w: usize, pool: &Pool) {
+        if let Some(j) = &self.joint {
+            apply_joint(j, r, z, w, pool);
+            return;
+        }
         jacobi::apply(&self.inv_diag, r, z, w, pool);
         if let Some(d) = &self.small {
             d.apply(r, z, st.m_small, w, pool);
@@ -116,6 +131,32 @@ impl Precond {
                 for (i, &k) in keep.iter().enumerate() {
                     z[(off + k as usize) * w + c] = sol[j * keep.len() + i];
                 }
+            }
+        }
+    }
+}
+
+/// z = joint⁻¹ r on the kept coordinates (redundant ones get 0). Column groups of
+/// [`SOLVE_COLS`] are solved sequentially in concurrent tasks (thread-count invariant).
+fn apply_joint(j: &Joint, r: &[f64], z: &mut [f64], w: usize, pool: &Pool) {
+    let keep = &j.keep;
+    let groups: Vec<Range<usize>> = (0..w.div_ceil(SOLVE_COLS)).map(|c| c * SOLVE_COLS..((c + 1) * SOLVE_COLS).min(w)).collect();
+    let sols: Vec<Mat<f64>> = pool.install(|| {
+        groups
+            .par_iter()
+            .map(|cols| {
+                let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, jj| r[keep[i] as usize * w + cols.start + jj]);
+                j.f.solve(&mut rhs);
+                rhs
+            })
+            .collect()
+    });
+    z.iter_mut().for_each(|v| *v = 0.0);
+    for (cols, sol) in groups.iter().zip(&sols) {
+        for (i, &k) in keep.iter().enumerate() {
+            let zr = &mut z[k as usize * w..(k as usize + 1) * w];
+            for (jj, c) in cols.clone().enumerate() {
+                zr[c] = sol[(i, jj)];
             }
         }
     }

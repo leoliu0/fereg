@@ -5,10 +5,13 @@
 //! column) falls below max(tol²·SS_k, (1e-13)²·SS₀). With an exact preconditioner (M = S on the
 //! whole reduced space) ρ_k = ‖x* − x_k‖²_S exactly and is used directly. Independently, a
 //! column stops once ρ_k ≤ (1e-13)²·SS₀: the recursive residual has reached roundoff, and further
-//! steps break down (γ explodes) before a tight window could be satisfied. A single escalation
-//! probe at iteration 12 may strengthen the preconditioner, after which PCG restarts from the
-//! current x. Converged columns are frozen (their direction is zeroed so the shared matvec
-//! leaves them untouched). Dot products use the fixed-chunk reduction (thread-count invariant).
+//! steps break down (γ explodes) before a tight window could be satisfied. At iterations 6 and
+//! 12 after the start and after every restart the system is probed ([`CgSystem::probe`]) with
+//! the observed contraction and the projected remaining iterations, and may strengthen the
+//! preconditioner (default rule at iteration 12: escalate once when the contraction is slow),
+//! after which PCG restarts from the current x.
+//! Converged columns are frozen (their direction is zeroed so the shared matvec leaves them
+//! untouched). Dot products use the fixed-chunk reduction (thread-count invariant).
 
 use rayon::prelude::*;
 
@@ -26,6 +29,24 @@ pub const PROBE_AT: usize = 12;
 pub const PROBE_FROM: usize = 7;
 /// Escalate when the per-iteration contraction ρ̂ of some active column exceeds this.
 pub const PROBE_RATIO: f64 = 0.6;
+/// Earlier probe (no default rule; only systems with a cost model act on it), with
+/// ρ̂ = (ρ_6/ρ_3)^{1/3}. The early contraction is faster than the asymptotic one, so the
+/// remaining-iteration estimate is low (conservative): ~33 instead of 56 on the AKM panels.
+pub const EARLY_PROBE_AT: usize = 6;
+pub const EARLY_PROBE_FROM: usize = 3;
+
+/// State of the iteration at a probe ([`CgSystem::probe`]).
+pub struct Probe {
+    /// Iterations done since the start: [`EARLY_PROBE_AT`] or [`PROBE_AT`].
+    pub k: usize,
+    /// Largest contraction estimate ρ̂ = (ρ_k/ρ_from)^{1/(k−from)} over the active columns
+    /// (from = [`EARLY_PROBE_FROM`] or [`PROBE_FROM`]).
+    pub rho_hat: f64,
+    /// Estimated further iterations with the current preconditioner:
+    /// max_j ln(ρ_k,j / thr_j) / ln(1/ρ̂_j) over the active columns (thr_j the stopping
+    /// threshold; capped by the remaining `maxiter`).
+    pub remaining: f64,
+}
 
 /// The reduced system as seen by PCG.
 pub trait CgSystem {
@@ -39,6 +60,13 @@ pub trait CgSystem {
     fn can_escalate(&self) -> bool;
     /// Builds the stronger preconditioner; `Ok(true)` when it changed.
     fn escalate(&mut self, pool: &Pool, ctx: &Ctx) -> Result<bool, RfError>;
+    /// Policy hook at k = [`EARLY_PROBE_AT`] and k = [`PROBE_AT`] after the start and after
+    /// every restart. `Ok(Some(changed))` is the system's own decision; `Ok(None)` applies the
+    /// default rule (at [`PROBE_AT`] only: [`CgSystem::escalate`] when ρ̂ > [`PROBE_RATIO`] and
+    /// [`CgSystem::can_escalate`]). Implementations must not report a change indefinitely.
+    fn probe(&mut self, _p: &Probe, _pool: &Pool, _ctx: &Ctx) -> Result<Option<bool>, RfError> {
+        Ok(None)
+    }
 }
 
 pub struct CgOutcome {
@@ -84,6 +112,7 @@ pub fn pcg(
     let mut iterations = 0usize;
     let mut escalated = false;
     let floor: Vec<f64> = ss0.iter().map(|s| 1e-26 * s).collect();
+    let mut thr = vec![0.0; w];
 
     'restart: loop {
         // r = rhs − S x, z = M⁻¹ r, p = z, ρ = r'z.
@@ -107,6 +136,7 @@ pub fn pcg(
         let exact = sys.exact();
         let mut ring = vec![[0.0f64; WINDOW]; w];
         let mut rho_from = vec![f64::NAN; w];
+        let mut rho_early = vec![f64::NAN; w];
         let mut k = 0usize;
         loop {
             if !active.iter().any(|a| *a) {
@@ -142,7 +172,8 @@ pub fn pcg(
                 }
                 ring[j][(k - 1) % WINDOW] = gamma[j] * rho[j];
                 let ssk = ss1[j] - (xb[j] + xr[j]);
-                let thr = (tol * tol * ssk).max(floor[j]);
+                thr[j] = (tol * tol * ssk).max(floor[j]);
+                let thr = thr[j];
                 let done = if exact {
                     rho_new[j] <= thr
                 } else {
@@ -155,14 +186,28 @@ pub fn pcg(
                     active[j] = false;
                 }
             }
+            if k == EARLY_PROBE_FROM {
+                rho_early.copy_from_slice(&rho_new);
+            }
             if k == PROBE_FROM {
                 rho_from.copy_from_slice(&rho_new);
             }
-            if k == PROBE_AT && !escalated && sys.can_escalate() {
-                let slow = (0..w).any(|j| {
-                    active[j] && rho_from[j] > 0.0 && (rho_new[j] / rho_from[j]).powf(1.0 / (PROBE_AT - PROBE_FROM) as f64) > PROBE_RATIO
-                });
-                if slow && sys.escalate(pool, ctx)? {
+            if k == EARLY_PROBE_AT || k == PROBE_AT {
+                let (from, refv) = if k == PROBE_AT { (PROBE_FROM, &rho_from) } else { (EARLY_PROBE_FROM, &rho_early) };
+                let span = (k - from) as f64;
+                let (mut rho_hat, mut remaining) = (0.0f64, 0.0f64);
+                let left = maxiter.saturating_sub(iterations) as f64;
+                for j in (0..w).filter(|&j| active[j] && refv[j] > 0.0) {
+                    let rh = (rho_new[j] / refv[j]).powf(1.0 / span);
+                    rho_hat = rho_hat.max(rh);
+                    let rem = if rh < 1.0 { (rho_new[j] / thr[j]).ln().max(0.0) / (1.0 / rh).ln() } else { left };
+                    remaining = remaining.max(rem.min(left));
+                }
+                let changed = match sys.probe(&Probe { k, rho_hat, remaining }, pool, ctx)? {
+                    Some(changed) => changed,
+                    None => k == PROBE_AT && rho_hat > PROBE_RATIO && sys.can_escalate() && sys.escalate(pool, ctx)?,
+                };
+                if changed {
                     escalated = true;
                     continue 'restart;
                 }
