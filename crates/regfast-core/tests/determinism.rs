@@ -4,6 +4,7 @@ use regfast_core::absorber::{Absorber, SolveOpts};
 use regfast_core::gather::gather_rows;
 use regfast_core::par::with_pool;
 use regfast_core::rng::SplitMix64;
+use regfast_core::slopes::SlopeSolver;
 use regfast_core::solve::{FeSolver, SolverConfig};
 use regfast_core::{AbsorbTerm, Ctx, Family, FactorValues, Prep, Session, Vce, WeightKind};
 
@@ -11,6 +12,8 @@ struct Data {
     factors: Vec<Vec<f64>>,
     w: Option<Vec<f64>>,
     cols: Vec<Vec<f64>>,
+    /// When set, the last term is `factor##c.x` with these slope values.
+    slope: Option<Vec<f64>>,
 }
 
 fn normal(rng: &mut SplitMix64) -> f64 {
@@ -26,7 +29,7 @@ fn finish(factors: Vec<Vec<f64>>, weighted: bool, r: usize, seed: u64) -> Data {
         .map(|_| (0..n).map(|i| normal(&mut rng) + factors.iter().zip(&effects).map(|(f, e)| e[f[i] as usize]).sum::<f64>()).collect())
         .collect();
     let w = weighted.then(|| (0..n).map(|_| 0.5 + rng.next_f64()).collect());
-    Data { factors, w, cols }
+    Data { factors, w, cols, slope: None }
 }
 
 fn random(n: usize, gs: &[usize], weighted: bool, seed: u64) -> Data {
@@ -50,11 +53,19 @@ fn band(nfirm: usize, nindiv: usize, width: usize) -> Data {
 }
 
 fn prep(d: &Data) -> Prep<'_> {
+    let nf = d.factors.len();
     Prep {
         n: d.factors[0].len(),
         factors: d.factors.iter().map(|f| FactorValues::Num(f)).collect(),
-        absorb: (0..d.factors.len()).map(|q| AbsorbTerm { factors: vec![q], intercept: true, slopes: vec![], save: false }).collect(),
-        slope_vars: vec![],
+        absorb: (0..nf)
+            .map(|q| AbsorbTerm {
+                factors: vec![q],
+                intercept: true,
+                slopes: if d.slope.is_some() && q == nf - 1 { vec![0] } else { vec![] },
+                save: false,
+            })
+            .collect(),
+        slope_vars: d.slope.iter().map(Vec::as_slice).collect(),
         weights: d.w.as_deref(),
         weight_kind: if d.w.is_some() { WeightKind::Pweight } else { WeightKind::None },
         vce: Vce::Unadjusted,
@@ -73,7 +84,11 @@ fn run(d: &Data, cfg: SolverConfig, threads: usize) -> (Vec<u32>, Vec<u64>, Vec<
     let refs: Vec<&[f64]> = kept.iter().map(Vec::as_slice).collect();
     let r = refs.len();
     with_pool(threads, |pool| {
-        let mut fs = FeSolver::new(s.terms(), s.weights(), s.n(), cfg, pool, &ctx).unwrap();
+        let mut fs: Box<dyn Absorber> = if d.slope.is_some() {
+            Box::new(SlopeSolver::new(s.terms(), s.weights(), s.n(), cfg, pool, &ctx).unwrap())
+        } else {
+            Box::new(FeSolver::new(s.terms(), s.weights(), s.n(), cfg, pool, &ctx).unwrap())
+        };
         let mut rows = gather_rows(fs.row_order(), &refs, pool).unwrap();
         let o = SolveOpts { tol: 1e-10, maxiter: 10_000, want_coefs: true };
         let info = fs.residualize(&mut rows, r, &o, None, pool, &ctx).unwrap();
@@ -124,5 +139,17 @@ fn band_graph_with_escalation() {
 fn weighted_three_fe_with_repeated_cells() {
     let d = random(300_000, &[2_000, 8, 30], true, 3);
     check(&d, SolverConfig::default());
+    check(&d, SolverConfig { small_limit: 0, acc_bytes_max: 0, ..SolverConfig::default() });
+}
+
+#[test]
+fn band_graph_with_firm_slopes() {
+    let mut d = band(2_000, 40_000, 5);
+    let mut rng = SplitMix64::new(91);
+    d.slope = Some((0..d.factors[0].len()).map(|_| normal(&mut rng)).collect());
+    d.w = Some((0..d.factors[0].len()).map(|_| 0.5 + rng.next_f64()).collect());
+    check(&d, SolverConfig::default());
+    let (_, escalated) = check(&d, SolverConfig { small_limit: 0, ..SolverConfig::default() });
+    assert!(escalated, "the slope band should exercise the escalated preconditioner");
     check(&d, SolverConfig { small_limit: 0, acc_bytes_max: 0, ..SolverConfig::default() });
 }

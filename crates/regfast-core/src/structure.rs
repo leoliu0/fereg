@@ -171,10 +171,10 @@ fn bits_for(g: usize) -> u32 {
 }
 
 /// Builds the structure for intercept-only `terms` over `n` kept observations; small blocks
-/// jointly hold at most `small_limit` levels.
+/// jointly hold at most `small_limit` levels. Designs with slopes use [`crate::slopes`].
 pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Result<Structure, RfError> {
     if terms.iter().any(|t| !t.slopes.is_empty() || !t.intercept) {
-        return Err(RfError::InvalidInput("slopes not yet supported".into()));
+        return Err(RfError::Internal("structure::build: slope terms belong to slopes::SlopeSolver".into()));
     }
     let fe1 = fe1_index(terms);
     let (g1, code1): (usize, Option<&[u32]>) = match fe1 {
@@ -364,7 +364,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
 }
 
 /// Segment boundaries grouping consecutive segments into ≳ CHUNK rows (for parallel passes).
-fn obs_groups(seg_obs_off: &[u32]) -> Vec<u32> {
+pub(crate) fn obs_groups(seg_obs_off: &[u32]) -> Vec<u32> {
     let g = seg_obs_off.len() - 1;
     let mut out = vec![0u32];
     let mut next = CHUNK;
@@ -379,7 +379,7 @@ fn obs_groups(seg_obs_off: &[u32]) -> Vec<u32> {
 }
 
 /// Counting sort of observation ids by `codes` (parallel; order within a level is arbitrary).
-fn scatter_by_code(codes: &[u32], g: usize, pool: &Pool) -> Result<(Vec<u32>, Vec<u32>), RfError> {
+pub(crate) fn scatter_by_code(codes: &[u32], g: usize, pool: &Pool) -> Result<(Vec<u32>, Vec<u32>), RfError> {
     let n = codes.len();
     let cnt: Vec<AtomicU32> = (0..g).map(|_| AtomicU32::new(0)).collect();
     pool.install(|| {
