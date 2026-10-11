@@ -1,8 +1,8 @@
 //! Safe wrappers over `c/glue.c`, the only code that calls the Stata plugin interface.
 //!
-//! Every function here must be called on Stata's thread, except [`read_rows`] and
-//! [`read_sample`], which the parallel-read path (plan §4.3) calls concurrently on disjoint
-//! observation ranges.
+//! Every function here must be called on Stata's thread, except [`read_rows`],
+//! [`count_sample`] and [`read_sample`], which the parallel-read path (plan §4.3) calls
+//! concurrently on disjoint observation ranges.
 //! Indices are 1-based (Stata convention).
 
 use std::ffi::{CString, c_char, c_int, c_void};
@@ -112,8 +112,8 @@ pub fn count_sample(touse: i32, o1: i32, o2: i32) -> Result<usize, RfError> {
 }
 
 /// Sample scan of observations `o1..=o2`: the c-th observation whose `touse` value is not 0
-/// goes to `obs_out[c]` and its value of `vars[j]` to `cols[j][c]` (NaN for missing). Fails
-/// unless exactly `obs_out.len()` such observations are found (the count of [`count_sample`]).
+/// goes to `obs_out[c]` and its value of `vars[j]` to `cols[j][c]` (NaN for missing). Returns
+/// the number of such observations; fails when there are more than `obs_out.len()`.
 pub fn read_sample(
     touse: i32,
     vars: &[i32],
@@ -121,7 +121,7 @@ pub fn read_sample(
     o2: i32,
     obs_out: &mut [MaybeUninit<i32>],
     cols: &mut [&mut [MaybeUninit<f64>]],
-) -> Result<(), RfError> {
+) -> Result<usize, RfError> {
     let cap = obs_out.len();
     assert!(cap <= MAX_CALL && cols.len() == vars.len() && cols.iter().all(|c| c.len() == cap));
     let ptrs: Vec<*mut f64> = cols.iter_mut().map(|c| c.as_mut_ptr().cast()).collect();
@@ -129,8 +129,8 @@ pub fn read_sample(
         rf_read_sample(touse, vars.as_ptr(), vars.len() as c_int, o1, o2, cap as c_int, obs_out.as_mut_ptr().cast(), ptrs.as_ptr())
     };
     match c {
-        c if c >= 0 && c as usize == cap => Ok(()),
-        c if c >= 0 || c == -9999 => Err(RfError::Internal("the estimation sample changed while it was read".into())),
+        c if c >= 0 => Ok(c as usize),
+        -9999 => Err(RfError::Internal("the estimation sample changed while it was read".into())),
         c => Err(rc_err(-c, "reading the estimation sample")),
     }
 }
