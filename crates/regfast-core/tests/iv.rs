@@ -12,7 +12,7 @@ use regfast_core::{
     AbsorbTerm, AbsorberKind, Ctx, EstResult, Family, FactorValues, IvOptions, Layout, Prep, RfError, Session, Spec, Vce, WeightKind,
 };
 
-const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense];
+const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense, AbsorberKind::Fast];
 
 // ---------------------------------------------------------------------------------------------
 // Minimal JSON reader (fixtures are flat objects of numbers, strings, arrays and null).

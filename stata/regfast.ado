@@ -604,18 +604,26 @@ program Estimate, eclass
 		ereturn scalar num_singletons = `num_singletons'
 		ereturn scalar N_full = scalar(__rf_N_full)
 
-		* Macros (ivreghdfe names); X = expanded list, X0 = with dropped variables marked o., X1 = used
+		* Macros (ivreghdfe names); X = expanded list, X0 = the same with dropped variables marked
+		* omitted (base levels stay), X1 = used
 		local endog0
 		local exog0
 		local inst0
 		foreach grp in exog endog inst {
-			local list = cond("`grp'" == "exog", "sent_full", "`grp'_sent_full")
+			local list = cond("`grp'" == "exog", "fullvarlist", "`grp'_full")
+			local mlist = cond("`grp'" == "exog", "mask", "`grp'_mask")
 			local i 0
+			local k 0
 			foreach v of local `list' {
 				local ++i
-				local st : word `i' of `stat_`grp''
-				if (`st' == 0) local `grp'0 ``grp'0' `v'
-				else local `grp'0 ``grp'0' o.`v'
+				if (`: word `i' of ``mlist''' == 1) {
+					local ++k
+					if (`: word `k' of `stat_`grp''' != 0) {
+						_ms_put_omit `v'
+						local v `s(ospec)'
+					}
+				}
+				local `grp'0 ``grp'0' `v'
 			}
 		}
 		ereturn local cmd regfast
@@ -1030,7 +1038,7 @@ program ReplayIV, rclass
 	if ("`first'" != "") DispFirstIV
 	if ("`first'`ffirst'" != "") DispFFirstIV
 	if ("`header'" == "") DispHeaderIV
-	if ("`table'" == "") _coef_table, `options'
+	if ("`table'" == "") NoClustNote _coef_table, `options'
 	return add
 	if ("`footnote'" == "") {
 		DispFooterIV
@@ -1052,8 +1060,21 @@ program ReplayFirst, rclass
 			di as text "Number of clusters (`e(clustvar2)') = " _col(33) as res %6.0f e(N_clust2)
 		}
 	}
-	_coef_table, `options'
+	* e(k_eq) = K1 as ivreghdfe posts it; one equation is shown (as ivreghdfe's DispSFirst)
+	NoClustNote ereturn display, neq(1) `options'
 	return add
+end
+
+
+* NoClustNote <display command> : runs it with e(clustvar) cleared, as ivreg2 does to suppress
+* the "Std. err. adjusted for # clusters" line (the header already reports the clusters)
+program NoClustNote, eclass
+	local cluster `e(clustvar)'
+	ereturn local clustvar
+	capture noisily `0'
+	local rc = _rc
+	ereturn local clustvar `cluster'
+	exit `rc'
 end
 
 
