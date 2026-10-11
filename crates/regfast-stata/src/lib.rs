@@ -125,7 +125,7 @@ impl Phases {
     fn mark(&mut self, what: &str) {
         if self.on {
             let now = Instant::now();
-            spi::display(&format!("{{txt}}regfast: {what}: {:.3} s\n", (now - self.t).as_secs_f64()));
+            spi::display(&format!("{{txt}}regfast: {what}: {:.4} s\n", (now - self.t).as_secs_f64()));
             self.t = now;
         }
     }

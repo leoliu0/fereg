@@ -266,6 +266,9 @@ program Estimate, eclass
 // --------------------------------------------------------------------------
 	* if + in + weight + regression variables + cluster variables, then absorbed and slope variables
 	local varlist `depvar' `indepvars' `endogvars' `instvars' `base_clustervars'
+	* Drop the previous e(sample) before touse exists: Stata rewrites every observation when it
+	* drops a variable that is not the last one. Kept when -if- may reference e().
+	if (!strpos(`"`if'"', "e(")) ereturn clear
 	marksample touse, strok
 
 	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables
