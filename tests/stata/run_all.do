@@ -5,7 +5,7 @@ version 16
 clear all
 set more off
 local here `c(pwd)'
-foreach t in test_parse test_ols {
+foreach t in test_parse test_ols test_iv {
 	di as text _n "{hline 78}" _n "running `t'.do" _n "{hline 78}"
 	quietly cd "`here'"
 	do `t'.do

@@ -225,10 +225,7 @@ impl Session {
         {
             return Err(RfError::Code(198, "regfast: IV supports at most two cluster variables".into()));
         }
-        // Small-n rule: no more threads than CHUNK-sized work items (results are thread-count
-        // invariant). Switch to `par::threads_for(ctx.threads, n)` once it lands on main.
-        let threads = par::resolve_threads(ctx.threads).min(self.n().div_ceil(par::CHUNK)).max(1);
-        par::with_pool(threads, |pool| self.iv_in_pool(rows, lay, s, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.iv_in_pool(rows, lay, s, ctx, pool))?
     }
 
     fn iv_in_pool(&mut self, mut rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {

@@ -126,7 +126,7 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
         spi::local_save("_rf_token", &token.to_string())?;
         if ctx.verbose >= 1 {
             ctx.log(&format!(
-                "{{txt}}regfast: {} of {n} observations kept ({} singletons, {} fe-separated); row order {}\n",
+                "{{txt}}regfast: {} of {n} observations kept ({} singletons, {} fe-separated); row order {}",
                 session.n(),
                 session.num_singletons(),
                 session.num_fe_separated(),
