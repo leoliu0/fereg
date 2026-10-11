@@ -5,3 +5,4 @@ bench/results/raw/
 stata/*.plugin
 tests/stata/*.log
 tests/stata/*.smcl
+tests/stata/mock/*.plugin
