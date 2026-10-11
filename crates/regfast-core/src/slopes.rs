@@ -380,18 +380,8 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
             (off, pi, true)
         }
         None => {
-            let (seg_off, mut pi) = scatter_by_code(&te.codes, ge, pool)?;
-            let parts = obs_groups(&seg_off);
-            let row_bounds: Vec<usize> = parts.iter().map(|&s| seg_off[s as usize] as usize).collect();
-            let pp = split_bounds(&mut pi, &row_bounds);
-            pool.install(|| {
-                pp.into_par_iter().enumerate().for_each(|(k, pis)| {
-                    let base = row_bounds[k];
-                    for s in parts[k] as usize..parts[k + 1] as usize {
-                        pis[seg_off[s] as usize - base..seg_off[s + 1] as usize - base].sort_unstable();
-                    }
-                })
-            });
+            // Stable counting sort: ids ascend within each level.
+            let (seg_off, pi) = scatter_by_code(&te.codes, ge, pool)?;
             (seg_off, pi, false)
         }
     };
@@ -519,18 +509,7 @@ fn build_index(st: &SlopeStructure, pool: &Pool) -> Result<LevelIndex, RfError> 
     let (mut perms, mut offs) = (Vec::new(), Vec::new());
     for q in st.nsmall..st.nb {
         let col: Vec<u32> = pool.install(|| (0..st.n).into_par_iter().map(|i| st.code(i, q) as u32).collect());
-        let (poff, mut perm) = scatter_by_code(&col, st.blocks[q].g, pool)?;
-        let lg = obs_groups(&poff);
-        let lb: Vec<usize> = lg.iter().map(|&g| poff[g as usize] as usize).collect();
-        let pieces = split_bounds(&mut perm, &lb);
-        pool.install(|| {
-            pieces.into_par_iter().enumerate().for_each(|(k, p)| {
-                let base = lb[k];
-                for g in lg[k] as usize..lg[k + 1] as usize {
-                    p[poff[g] as usize - base..poff[g + 1] as usize - base].sort_unstable();
-                }
-            })
-        });
+        let (poff, perm) = scatter_by_code(&col, st.blocks[q].g, pool)?;
         perms.push(perm);
         offs.push(poff);
     }
