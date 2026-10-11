@@ -46,50 +46,53 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
         return Err(RfError::InvalidInput("regfast plugin: touse must be numeric".into()));
     }
 
+    // Every numeric variable is read in one pass over the sample; string factors afterwards.
+    let mut scan_vars = Vec::with_capacity(nvars - 1);
+    for (f, t) in factype.bytes().enumerate() {
+        let var = f as i32 + 1;
+        let is_str = spi::is_str(var);
+        if is_str != (t == b's') {
+            return Err(RfError::InvalidInput(format!(
+                "regfast plugin: factor {} is {} but factype says {}",
+                f + 1,
+                if is_str { "string" } else { "numeric" },
+                t as char
+            )));
+        }
+        if !is_str {
+            scan_vars.push(var);
+        }
+    }
+    let extras = (0..nslope).map(|_| "slope").chain(has_w.then_some("weight")).chain(has_y.then_some("dependent"));
+    for (i, what) in extras.enumerate() {
+        let var = (nfac + i + 1) as i32;
+        if spi::is_str(var) {
+            return Err(RfError::InvalidInput(format!("regfast plugin: {what} variable must be numeric")));
+        }
+        scan_vars.push(var);
+    }
+
     with_ctx(&common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
         let parallel = !common.serialio;
-        let candidates = io::sample_obs();
-        let touse = io::read_col(touse_var, &candidates, ctx.threads, parallel)?;
-        let obs: Vec<i32> = candidates.iter().zip(&touse).filter(|(_, t)| **t != 0.0).map(|(o, _)| *o).collect();
-        drop(touse);
+        let (obs, cols) = io::read_sample(touse_var, &scan_vars, ctx.threads, parallel)?;
         let n = obs.len();
         ctx.check()?;
-
+        let mut cols = cols.into_iter();
         let mut raw = Vec::with_capacity(nfac);
         for (f, t) in factype.bytes().enumerate() {
-            let var = f as i32 + 1;
-            let is_str = spi::is_str(var);
-            if is_str != (t == b's') {
-                return Err(RfError::InvalidInput(format!(
-                    "regfast plugin: factor {} is {} but factype says {}",
-                    f + 1,
-                    if is_str { "string" } else { "numeric" },
-                    t as char
-                )));
-            }
-            raw.push(if is_str {
-                let (b, o) = io::read_strings(var, &obs)?;
+            raw.push(if t == b's' {
+                let (b, o) = io::read_strings(f as i32 + 1, &obs)?;
+                ctx.check()?;
                 RawFactor::Str(b, o)
             } else {
-                RawFactor::Num(io::read_col(var, &obs, ctx.threads, parallel)?)
+                RawFactor::Num(cols.next().expect("one column per numeric factor"))
             });
-            ctx.check()?;
         }
-        let mut next = nfac as i32 + 1;
-        let mut numeric = |what: &str| -> Result<Vec<f64>, RfError> {
-            let var = next;
-            next += 1;
-            if spi::is_str(var) {
-                return Err(RfError::InvalidInput(format!("regfast plugin: {what} variable must be numeric")));
-            }
-            io::read_col(var, &obs, ctx.threads, parallel)
-        };
-        let slopes: Vec<Vec<f64>> = (0..nslope).map(|_| numeric("slope")).collect::<Result<_, _>>()?;
-        let weights = if has_w { Some(numeric("weight")?) } else { None };
-        let y = if has_y { Some(numeric("dependent")?) } else { None };
+        let slopes: Vec<Vec<f64>> = cols.by_ref().take(nslope).collect();
+        let weights = if has_w { cols.next() } else { None };
+        let y = if has_y { cols.next() } else { None };
         ph.mark(&format!("prepare: read {n} obs"));
-        ctx.check()?;
 
         let prep = Prep {
             n,
