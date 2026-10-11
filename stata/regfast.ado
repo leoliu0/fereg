@@ -284,7 +284,9 @@ program Estimate, eclass
 	* Keys common to prepare and ols (every key=value is quoted: see protocol)
 	local common `""threads=`threads'" "verbose=`plugin_verbose'""'
 	if ("`serialio'" != "") local common `"`common' "serialio=1""'
-	if ("`absorber'" != "") local common `"`common' "absorber=`absorber'""'
+	* absorber() selects the session's absorber: a prepare-only key
+	local abskind
+	if ("`absorber'" != "") local abskind `""absorber=`absorber'""'
 
 // --------------------------------------------------------------------------
 // Prepare: factorize, drop singletons, build the fixed-effects structure
@@ -294,7 +296,7 @@ program Estimate, eclass
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
 	local _rf_token
-	_rf_load `facvars' `slopevars_r' `wvar' `touse', prepare `args' `common'
+	_rf_load `facvars' `slopevars_r' `wvar' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
 	local num_singletons = scalar(__rf_num_singletons)
 	if (`drop_singletons' & `num_singletons' > 0 & `verbose' > -1) {
