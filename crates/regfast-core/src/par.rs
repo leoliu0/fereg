@@ -45,6 +45,13 @@ pub fn resolve_threads(threads: usize) -> usize {
     }
 }
 
+/// Threads worth starting for `work` rows or cells: at most one per [`CHUNK`], since chunks are
+/// the unit of parallel work. A 16-thread scoped pool costs ≈0.2 ms to build and join, which
+/// dominates small problems. Results do not depend on the thread count (D3), so capping is safe.
+pub fn threads_for(requested: usize, work: usize) -> usize {
+    resolve_threads(requested).min(work.div_ceil(CHUNK)).max(1)
+}
+
 /// Runs `body` on the calling thread with a scoped pool of `threads` workers (0 = all CPUs).
 /// No worker outlives this call.
 pub fn with_pool<R>(threads: usize, body: impl FnOnce(&Pool) -> R) -> Result<R, RfError> {

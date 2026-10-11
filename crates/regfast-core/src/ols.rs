@@ -151,7 +151,7 @@ impl Session {
         if rows.len() != self.n() * lay.ncols() {
             return Err(RfError::InvalidInput("ols: data block size differs from N·R".into()));
         }
-        par::with_pool(ctx.threads, |pool| self.ols_in_pool(rows, lay.nx, s, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.ols_in_pool(rows, lay.nx, s, ctx, pool))?
     }
 
     fn ols_in_pool(&mut self, mut rows: Vec<f64>, nx: usize, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {

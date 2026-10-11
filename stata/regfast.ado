@@ -24,11 +24,33 @@ end
 program Replay, rclass
 	syntax [, noHEader noTABle noFOOTnote *]
 	_get_diopts options, `options'
+	if (!c(noisily)) {
+		* Output is suppressed (quietly): skip the display work, but leave r(table) and r(level)
+		* exactly as _coef_table would.
+		if ("`table'" == "") {
+			QuietTable, `options'
+			return add
+		}
+		exit
+	}
 	if ("`header'" == "") _rf_header
 	if ("`header'" == "" & "`table'" == "") di ""
 	if ("`table'" == "") _coef_table, `options'
 	return add // adds r(level), r(table), etc.
 	if ("`footnote'" == "") _rf_footnote
+end
+
+
+* r(table) and r(level) of _coef_table, computed without formatting any output
+program QuietTable, rclass
+	syntax [, Level(cilevel) *]
+	capture confirm matrix e(b)
+	if (_rc) exit
+	tempname T
+	_ms_omit_info e(b)
+	mata: _rf_rtable("`T'", `level')
+	return scalar level = `level'
+	return matrix table = `T'
 end
 
 
@@ -602,4 +624,35 @@ program AddBN
 		local old `part'
 	}
 	c_local part `part'
+end
+
+
+version 16
+mata:
+// r(table) as _coef_table builds it: rows b se t pvalue ll ul df crit eform; omitted and base
+// coefficients (r(omit) from _ms_omit_info) get missing se, t, pvalue, ll and ul.
+void _rf_rtable(string scalar name, real scalar level)
+{
+	real rowvector b, se, t, p, omit
+	real scalar k, df, crit
+	b = st_matrix("e(b)")
+	k = cols(b)
+	omit = st_matrix("r(omit)")
+	se = sqrt(diagonal(st_matrix("e(V)")))'
+	se = se :/ (omit :== 0)
+	df = st_numscalar("e(df_r)")
+	if (missing(df)) {
+		crit = invnormal(1 - (100 - level) / 200)
+		t = b :/ se
+		p = 2 :* normal(-abs(t))
+	}
+	else {
+		crit = invttail(df, (100 - level) / 200)
+		t = b :/ se
+		p = 2 :* ttail(df, abs(t))
+	}
+	st_matrix(name, (b \ se \ t \ p \ b - crit :* se \ b + crit :* se \ J(1, k, df) \ J(1, k, crit) \ J(1, k, 0)))
+	st_matrixrowstripe(name, (J(9, 1, ""), ("b" \ "se" \ "t" \ "pvalue" \ "ll" \ "ul" \ "df" \ "crit" \ "eform")))
+	st_matrixcolstripe(name, st_matrixcolstripe("e(b)"))
+}
 end
