@@ -16,7 +16,9 @@ use regfast_core::{
     AbsorbTerm, AbsorberKind, Ctx, DofOptions, EstResult, Family, FactorValues, Layout, Prep, Session, Spec, Vce, WeightKind,
 };
 
-const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense];
+const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense, AbsorberKind::Fast];
+/// Absorbers that support heterogeneous slopes (the Fast absorber gains them in Phase 7).
+const SLOPE_KINDS: &[AbsorberKind] = &[AbsorberKind::Dense];
 
 // ---------------------------------------------------------------------------------------------
 // Minimal JSON reader (fixtures are flat objects of numbers, strings, arrays and null).
@@ -665,7 +667,7 @@ fn a_noabsorb_and_noconstant() {
 #[test]
 fn a_slopes_savefe_and_d() {
     let dat = sim(900, 19);
-    for &kind in KINDS {
+    for &kind in SLOPE_KINDS {
         let absorb = vec![term(&[ID], true, &[], true), term(&[FIRM], true, &[0], true)];
         let mut m = dat.model(&[0, 1, 2], absorb, Some(WeightKind::Aweight), Vce::Robust);
         m.spec.want_d = true;
@@ -844,6 +846,9 @@ fn b_reghdfe_ground_truth() {
     let fidx = |n: &str| FACTORS.iter().position(|f| *f == n).unwrap();
     for &kind in KINDS {
         for f in fixtures() {
+            if !SLOPE_KINDS.contains(&kind) && f.absorb.iter().any(|(_, icpt, sl)| !*icpt || !sl.is_empty()) {
+                continue;
+            }
             let text = std::fs::read_to_string(data_dir().join(format!("ols_{}.json", f.name))).unwrap();
             let j = parse_json(&text);
             let mut slope_names: Vec<&str> = Vec::new();
