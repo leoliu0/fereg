@@ -115,6 +115,41 @@ pub fn alloc_vec<T: Clone>(n: usize, value: T) -> Result<Vec<T>, RfError> {
     Ok(v)
 }
 
+/// Width of a kernel instance: the const `R`, or the runtime `r` when `R = 0`.
+#[inline(always)]
+pub(crate) fn width<const R: usize>(r: usize) -> usize {
+    if R == 0 { r } else { R }
+}
+
+/// Calls `f::<R, B>(args)` with `R` = `$r` as a constant (1..=8; 0 = runtime width, see
+/// [`width`]) and the const bool `B` = `$b`, so per-row loops over the columns are unrolled and
+/// a flag-dependent branch (e.g. unit weights, where w·v = v exactly) disappears.
+macro_rules! dispatch_width {
+    ($r:expr, $b:expr, $f:ident($($a:expr),* $(,)?)) => {
+        match ($r, $b) {
+            (1, true) => $f::<1, true>($($a),*),
+            (1, false) => $f::<1, false>($($a),*),
+            (2, true) => $f::<2, true>($($a),*),
+            (2, false) => $f::<2, false>($($a),*),
+            (3, true) => $f::<3, true>($($a),*),
+            (3, false) => $f::<3, false>($($a),*),
+            (4, true) => $f::<4, true>($($a),*),
+            (4, false) => $f::<4, false>($($a),*),
+            (5, true) => $f::<5, true>($($a),*),
+            (5, false) => $f::<5, false>($($a),*),
+            (6, true) => $f::<6, true>($($a),*),
+            (6, false) => $f::<6, false>($($a),*),
+            (7, true) => $f::<7, true>($($a),*),
+            (7, false) => $f::<7, false>($($a),*),
+            (8, true) => $f::<8, true>($($a),*),
+            (8, false) => $f::<8, false>($($a),*),
+            (_, true) => $f::<0, true>($($a),*),
+            (_, false) => $f::<0, false>($($a),*),
+        }
+    };
+}
+pub(crate) use dispatch_width;
+
 #[cfg(test)]
 mod tests {
     use super::*;

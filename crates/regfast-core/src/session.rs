@@ -298,7 +298,9 @@ fn sorted_set(v: &[usize]) -> Vec<usize> {
 }
 
 fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Result<Session, RfError> {
+    let mut t = std::time::Instant::now();
     let codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
+    crate::solve::log_phase(ctx, &mut t, "factorize");
     ctx.check()?;
     let interact = |fs: &[usize]| -> Result<Codes, RfError> {
         let parts: Vec<&Codes> = fs.iter().map(|&f| &codes[f]).collect();
@@ -316,6 +318,7 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
     let fw = (p.weight_kind == WeightKind::Fweight).then_some(p.weights).flatten();
     let sep = p.sep_fe.then(|| SepRule { y: p.y_for_sep.expect("validated"), family: p.family });
     let counts = sample::drop_singletons(&tc, &mut alive, fw, sep, p.drop_singletons, pool);
+    crate::solve::log_phase(ctx, &mut t, "singletons");
     let kept_index: Vec<u32> = (0..p.n as u32).filter(|&i| alive[i as usize]).collect();
     if kept_index.len() < 2 {
         return Err(RfError::TooFewObs);
@@ -349,6 +352,7 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
     let weights = p.weights.map(|w| filter(w, &alive));
     let y_sep = p.y_for_sep.map(|y| filter(y, &alive));
     let n = kept_index.len();
+    crate::solve::log_phase(ctx, &mut t, "compact");
     let absorber = build_absorber(kind, &terms, weights.as_deref(), n, pool, ctx)?;
     Ok(Session {
         n_input: p.n,

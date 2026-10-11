@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool, alloc_vec};
+use crate::par::{CHUNK, Pool, alloc_vec, dispatch_width, width};
 use crate::rng::SplitMix64;
 use crate::structure::{Structure, split_bounds};
 
@@ -23,6 +23,8 @@ pub const REDUNDANT: f64 = 1e-12;
 pub const ACC_BYTES_MAX: usize = 8 << 20;
 /// Most scatter tasks when every block is accumulated (fixed: thread-count independent).
 pub const MAX_ACC_TASKS: usize = 64;
+/// Largest small super-block assembled by dense products (when dense within the segments).
+const GEMM_SMALL_MAX: usize = 512;
 
 /// Weight-dependent quantities (refreshed by `set_weights`).
 pub struct WeightState {
@@ -40,6 +42,9 @@ pub struct WeightState {
     pub redundant: Vec<bool>,
     /// Σw.
     pub sw: f64,
+    /// Dense S over the small coordinates (m_s × m_s, row-major) when the weight pass built it
+    /// (see [`level_weights`]); otherwise [`Ops::assemble_small`] computes it on demand.
+    pub small_s: Option<Vec<f64>>,
 }
 
 impl WeightState {
@@ -107,14 +112,14 @@ impl JointCells {
 }
 
 /// Accumulator, marks and touched list of one row.
-type Scratch = (Vec<f64>, Vec<u32>, Vec<u32>);
+type RowBufs = (Vec<f64>, Vec<u32>, Vec<u32>);
 
 /// Row-assembly scratch per pool thread, allocated on a thread's first use. Each row stamps the
 /// marks with its own id, so stale contents never affect a result, and results do not depend on
 /// which thread computes a row.
 struct RowScratch {
     len: usize,
-    slots: Vec<Mutex<Option<Scratch>>>,
+    slots: Vec<Mutex<Option<RowBufs>>>,
 }
 
 impl RowScratch {
@@ -194,12 +199,177 @@ pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Re
         diag: Vec::new(),
         redundant: Vec::new(),
         sw: 0.0,
+        small_s: None,
     };
     ws.n1 = pool.install(|| (0..st.g1).into_par_iter().with_min_len(1024).map(|s| st.cells_of(s).map(|c| ws.cw(c)).sum()).collect());
     let parts: Vec<f64> = pool.install(|| ws.n1.par_chunks(CHUNK).map(|ch| ch.iter().sum::<f64>()).collect());
     ws.sw = parts.iter().sum();
 
-    // Level weights and Σ_{g1} c²/n1 per coordinate.
+    let (nr, dq, small_s) = level_weights(st, &ws, pool)?;
+    ws.small_s = small_s;
+    ws.diag = nr.iter().zip(&dq).map(|(n, d)| n - d).collect();
+    ws.redundant = ws.diag.iter().zip(&nr).map(|(d, n)| *d <= REDUNDANT * n).collect();
+    ws.nr = nr;
+    Ok(ws)
+}
+
+/// Level weights n_r and Σ_{g1} c²/n1 of every reduced coordinate, plus the dense small block
+/// of S when it is dense within the segments (same pass: the per-segment level sums c_s are its
+/// GEMM columns, see [`Ops::assemble_small_gemm`]).
+#[allow(clippy::type_complexity)]
+fn level_weights(st: &Structure, ws: &WeightState, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>, Option<Vec<f64>>), RfError> {
+    let (m, nb, ms) = (st.m, st.nb, st.m_small);
+    if nb == 0 {
+        return Ok((Vec::new(), Vec::new(), None));
+    }
+    if 2 * m * 8 > st.acc_bytes_max {
+        let (nr, dq) = level_weights_pull(st, ws, pool)?;
+        return Ok((nr, dq, None));
+    }
+    // Per-task accumulators [n_r | Σ c²/n1] over the whole reduced space; the per-segment level
+    // sums c_{s,g} go through a dense scratch that is reset after each segment.
+    let tb = acc_tasks(st, 4, 2 * m);
+    let nt = tb.len() - 1;
+    let fuse = gemm_small(st) && nt * ms * ms <= 4 * st.ncells;
+    let ns = st.blocks.iter().filter(|b| b.small).count();
+    let batch = (4096 / ms.max(1)).max(128);
+    let offs = block_offsets(st, 1);
+    let accs: Vec<(Vec<f64>, Vec<f64>)> = pool.install(|| {
+        (0..nt)
+            .into_par_iter()
+            .map(|t| {
+                let (s0, s1) = (tb[t] as usize, tb[t + 1] as usize);
+                let mut acc = vec![0.0; 2 * m];
+                let mut cs = vec![0.0; m];
+                let mut acc_s = if fuse { vec![0.0; ms * ms] } else { Vec::new() };
+                let ld = if fuse { batch.min(s1 - s0) } else { 0 };
+                let mut cbuf = vec![0.0; ms * ld];
+                let mut ncol = 0;
+                for s in s0..s1 {
+                    let cells = st.cells_of(s);
+                    let codes = &st.cell_codes[cells.start * nb..cells.end * nb];
+                    for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
+                        let w = ws.cw(c);
+                        for (&code, &off) in cc.iter().zip(&offs) {
+                            cs[off + code as usize] += w;
+                        }
+                    }
+                    let n1 = ws.n1[s];
+                    for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
+                        let w = ws.cw(c);
+                        for (&code, &off) in cc.iter().zip(&offs) {
+                            let k = off + code as usize;
+                            acc[k] += w;
+                            acc[m + k] += w * cs[k] / n1;
+                        }
+                        if fuse && ns > 1 {
+                            // Cross counts between distinct small blocks (the diagonal is n_r).
+                            for (b, (&code, &off)) in cc[..ns].iter().zip(&offs).enumerate() {
+                                let row = &mut acc_s[(off + code as usize) * ms..(off + code as usize + 1) * ms];
+                                for (b2, (&code2, &off2)) in cc[..ns].iter().zip(&offs).enumerate() {
+                                    if b2 != b {
+                                        row[off2 + code2 as usize] += w;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if fuse {
+                        let f = 1.0 / n1.sqrt();
+                        for (k, v) in cs[..ms].iter().enumerate() {
+                            cbuf[k * ld + ncol] = v * f;
+                        }
+                        ncol += 1;
+                        if ncol == ld {
+                            sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+                            ncol = 0;
+                        }
+                    }
+                    for cc in codes.chunks_exact(nb) {
+                        for (&code, &off) in cc.iter().zip(&offs) {
+                            cs[off + code as usize] = 0.0;
+                        }
+                    }
+                }
+                if fuse && ncol > 0 {
+                    sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+                }
+                (acc, acc_s)
+            })
+            .collect()
+    });
+    let mut out = alloc_vec(2 * m, 0.0)?;
+    pool.install(|| {
+        out.par_chunks_mut(4096).enumerate().for_each(|(ci, o)| {
+            let (base, len) = (ci * 4096, o.len());
+            for (acc, _) in &accs {
+                for (a, v) in o.iter_mut().zip(&acc[base..base + len]) {
+                    *a += v;
+                }
+            }
+        })
+    });
+    let dq = out.split_off(m);
+    let small = fuse.then(|| {
+        let mut full = vec![0.0; ms * ms];
+        for (_, acc_s) in &accs {
+            for k in 0..ms {
+                for (a, v) in full[k * ms..k * ms + k + 1].iter_mut().zip(&acc_s[k * ms..k * ms + k + 1]) {
+                    *a += v;
+                }
+            }
+        }
+        for k in 0..ms {
+            full[k * ms + k] += out[k];
+            for l in 0..k {
+                full[l * ms + k] = full[k * ms + l];
+            }
+        }
+        full
+    });
+    Ok((out, dq, small))
+}
+
+/// The small super-block is dense within the segments: assembled by dense products
+/// ([`Ops::assemble_small_gemm`]).
+fn gemm_small(st: &Structure) -> bool {
+    let ms = st.m_small;
+    ms > 0 && ms <= GEMM_SMALL_MAX && (ms * ms * st.g1) as u64 <= 8 * st.small_work
+}
+
+/// Lower triangle of `acc` (ms × ms, row-major) −= C·Cᵀ for the first `ncol` columns of the
+/// row-major ms × `ld` block `c` (fixed summation order: deterministic).
+fn sub_gram_lower(acc: &mut [f64], ms: usize, c: &[f64], ld: usize, ncol: usize) {
+    for k in 0..ms {
+        let ck = &c[k * ld..k * ld + ncol];
+        let row = &mut acc[k * ms..k * ms + k + 1];
+        for (l, a) in row.iter_mut().enumerate() {
+            *a -= dot(ck, &c[l * ld..l * ld + ncol]);
+        }
+    }
+}
+
+/// Dot product with four interleaved partial sums (vectorizable; fixed order).
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let n4 = a.len() / 4 * 4;
+    let mut s = [0.0f64; 4];
+    for (x, y) in a[..n4].chunks_exact(4).zip(b[..n4].chunks_exact(4)) {
+        for i in 0..4 {
+            s[i] += x[i] * y[i];
+        }
+    }
+    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
+    for (x, y) in a[n4..].iter().zip(&b[n4..]) {
+        t += x * y;
+    }
+    t
+}
+
+/// [`level_weights`] for reduced spaces too large for per-task accumulators: small blocks
+/// through per-task accumulators, large ones through per-cell values pulled along `perm`.
+fn level_weights_pull(st: &Structure, ws: &WeightState, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
+    let mc = st.ncells;
     let ns = st.blocks.iter().filter(|b| b.small).count();
     let nl = st.nb - ns;
     let ms = st.m_small;
@@ -208,7 +378,7 @@ pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Re
     let mut zq = alloc_vec(mc * nl, 0.0)?;
     let zb: Vec<usize> = cb.iter().map(|c| c * nl).collect();
     let pieces = split_bounds(&mut zq, &zb);
-    let wsr = &ws;
+    let wsr = ws;
     let accs: Vec<Vec<f64>> = pool.install(|| {
         pieces
             .into_par_iter()
@@ -264,10 +434,19 @@ pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Re
             })
         });
     }
-    ws.diag = nr.iter().zip(&dq).map(|(n, d)| n - d).collect();
-    ws.redundant = ws.diag.iter().zip(&nr).map(|(d, n)| *d <= REDUNDANT * n).collect();
-    ws.nr = nr;
-    Ok(ws)
+    Ok((nr, dq))
+}
+
+/// Segment boundaries of tasks with per-task accumulators of `acc_len` values over the whole
+/// reduced space: at most [`MAX_ACC_TASKS`] tasks and a combine volume of at most half the
+/// per-cell data (`r` values per cell). Depends only on the data, `r` and `acc_len`.
+fn acc_tasks(st: &Structure, r: usize, acc_len: usize) -> Vec<u32> {
+    let np = st.nparts();
+    let k = (st.ncells * r / (2 * acc_len).max(1)).clamp(1, MAX_ACC_TASKS).min(np);
+    let per = np.div_ceil(k);
+    let mut t: Vec<u32> = (0..np).step_by(per).map(|p| st.parts[p]).collect();
+    t.push(st.parts[np]);
+    t
 }
 
 /// Output of [`Ops::rhs`].
@@ -288,22 +467,306 @@ pub struct Ops<'a> {
     pub ws: &'a WeightState,
 }
 
-impl Ops<'_> {
-    /// Σ_b P[off_b + g_b(c)] for every cell of `cells` into `u` (len × r).
-    #[inline]
-    fn cell_sums(&self, cells: std::ops::Range<usize>, p: &[f64], r: usize, u: &mut Vec<f64>) {
-        u.clear();
-        u.resize(cells.len() * r, 0.0);
-        let st = self.st;
-        for (k, c) in cells.enumerate() {
-            let uc = &mut u[k * r..(k + 1) * r];
-            for (b, &code) in st.codes(c).iter().enumerate() {
-                let at = (st.blocks[b].off + code as usize) * r;
-                for (a, v) in uc.iter_mut().zip(&p[at..at + r]) {
-                    *a += v;
+/// Scratch of the scatter kernels, reused across calls: the per-task accumulators and the
+/// M × r buffer of the large-block pulls.
+#[derive(Default)]
+pub struct Scratch {
+    zbuf: Vec<f64>,
+    accs: Vec<Vec<f64>>,
+}
+
+/// One scatter task: segments `segs` (cells from `c0` on), the per-task accumulator of the
+/// first `nacc` blocks, the task's piece of the M × r buffer, per-segment outputs and per-task
+/// sums.
+struct Task<'s> {
+    segs: std::ops::Range<usize>,
+    c0: usize,
+    acc: &'s mut [f64],
+    nacc: usize,
+    zt: Option<&'s mut [f64]>,
+    seg_out: Option<&'s mut [f64]>,
+    extra: &'s mut [f64],
+}
+
+/// Block offsets premultiplied by the width.
+fn block_offsets(st: &Structure, r: usize) -> Vec<usize> {
+    st.blocks.iter().map(|b| b.off * r).collect()
+}
+
+/// u_c = Σ_b P[off_b + g_b(c)] for the `k` cells whose codes are `codes` (k × nb) into `u`.
+#[inline(always)]
+fn gather_cells<const R: usize>(codes: &[u32], nb: usize, offs: &[usize], p: &[f64], r: usize, u: &mut [f64]) {
+    let r = width::<R>(r);
+    if nb == 0 {
+        u.fill(0.0);
+        return;
+    }
+    for (cc, uc) in codes.chunks_exact(nb).zip(u.chunks_exact_mut(r)) {
+        uc.fill(0.0);
+        for (&code, &off) in cc.iter().zip(offs) {
+            let at = off + code as usize * r;
+            let pv = &p[at..at + r];
+            for j in 0..r {
+                uc[j] += pv[j];
+            }
+        }
+    }
+}
+
+/// Adds z_c to the accumulator entries of the first `nacc` blocks.
+#[inline(always)]
+fn scatter_cell<const R: usize>(cc: &[u32], nacc: usize, offs: &[usize], z: &[f64], r: usize, acc: &mut [f64]) {
+    let r = width::<R>(r);
+    let z = &z[..r];
+    for (&code, &off) in cc[..nacc].iter().zip(offs) {
+        let at = off + code as usize * r;
+        let a = &mut acc[at..at + r];
+        for j in 0..r {
+            a[j] += z[j];
+        }
+    }
+}
+
+/// Scatters z_c (in `u`, k × r) of the cells `cells` of a task: accumulated blocks into
+/// `acc`, and the whole z_c into the task's piece of the M × r buffer when there is one.
+#[inline(always)]
+fn scatter_cells<const R: usize>(t: &mut Task, codes: &[u32], nb: usize, offs: &[usize], cells: std::ops::Range<usize>, u: &[f64], r: usize) {
+    let r = width::<R>(r);
+    for (cc, z) in codes.chunks_exact(nb.max(1)).zip(u.chunks_exact(r)) {
+        scatter_cell::<R>(cc, t.nacc, offs, z, r, t.acc);
+    }
+    if let Some(zt) = t.zt.as_deref_mut() {
+        let at = (cells.start - t.c0) * r;
+        zt[at..at + cells.len() * r].copy_from_slice(&u[..cells.len() * r]);
+    }
+}
+
+/// Task body of [`Ops::apply`], with the block count as a constant (1..=3; 0 = runtime).
+fn apply_task_nb<const R: usize, const UNIT: bool>(ops: &Ops, p: &[f64], r: usize, t: Task) {
+    match ops.st.nb {
+        1 => apply_task::<R, UNIT, 1>(ops, p, r, t),
+        2 => apply_task::<R, UNIT, 2>(ops, p, r, t),
+        3 => apply_task::<R, UNIT, 3>(ops, p, r, t),
+        _ => apply_task::<R, UNIT, 0>(ops, p, r, t),
+    }
+}
+
+fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &[f64], r: usize, mut t: Task) {
+    let r = width::<R>(r);
+    let (st, ws) = (ops.st, ops.ws);
+    let nb = width::<NB>(st.nb);
+    let offs_v = block_offsets(st, r);
+    let offs = &offs_v[..nb];
+    let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
+    let mut u: Vec<f64> = Vec::new();
+    let mut tbuf = vec![0.0; r];
+    let tv = &mut tbuf[..r];
+    for s in t.segs.clone() {
+        let cells = st.cells_of(s);
+        let k = cells.len();
+        if u.len() < k * r {
+            u.resize(k * r, 0.0);
+        }
+        let uk = &mut u[..k * r];
+        let codes = &st.cell_codes[cells.start * nb..cells.end * nb];
+        gather_cells::<R>(codes, nb, &offs, p, r, uk);
+        tv.fill(0.0);
+        if UNIT {
+            for uc in uk.chunks_exact(r) {
+                for j in 0..r {
+                    tv[j] += uc[j];
+                }
+            }
+        } else {
+            for (uc, &w) in uk.chunks_exact(r).zip(&cw[cells.clone()]) {
+                for j in 0..r {
+                    tv[j] += w * uc[j];
                 }
             }
         }
+        let inv = 1.0 / ws.n1[s];
+        tv.iter_mut().for_each(|v| *v *= inv);
+        if UNIT {
+            for uc in uk.chunks_exact_mut(r) {
+                for j in 0..r {
+                    uc[j] -= tv[j];
+                }
+            }
+        } else {
+            for (uc, &w) in uk.chunks_exact_mut(r).zip(&cw[cells.clone()]) {
+                for j in 0..r {
+                    uc[j] = w * (uc[j] - tv[j]);
+                }
+            }
+        }
+        scatter_cells::<R>(&mut t, codes, nb, &offs, cells, uk, r);
+    }
+}
+
+/// Task body of [`Ops::rhs`]: cell sums s_c = Σ w v, b1 (per segment), Σ w v² and Σ w v
+/// (`extra`), then z_c = s_c − W_c·b1/n1.
+fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize, mut t: Task) {
+    let r = width::<R>(r);
+    let (st, ws) = (ops.st, ops.ws);
+    let nb = st.nb;
+    let offs = block_offsets(st, r);
+    let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
+    let mut u: Vec<f64> = Vec::new();
+    let mut ex = vec![0.0; 2 * r];
+    let (esq, esum) = ex.split_at_mut(r);
+    let s0 = t.segs.start;
+    let seg_out = t.seg_out.take().expect("b1 slot");
+    for s in t.segs.clone() {
+        let cells = st.cells_of(s);
+        let k = cells.len();
+        if u.len() < k * r {
+            u.resize(k * r, 0.0);
+        }
+        let uk = &mut u[..k * r];
+        let b1s = &mut seg_out[(s - s0) * r..(s - s0 + 1) * r];
+        if UNIT {
+            let rv = &rows[cells.start * r..cells.end * r];
+            for (sc, v) in uk.chunks_exact_mut(r).zip(rv.chunks_exact(r)) {
+                for j in 0..r {
+                    sc[j] = v[j];
+                    esq[j] += v[j] * v[j];
+                    esum[j] += v[j];
+                }
+                for j in 0..r {
+                    b1s[j] += sc[j];
+                }
+            }
+        } else if let (None, Some(wr)) = (&st.cell_obs_off, &ws.w_rows) {
+            // One row per cell, weighted.
+            let rv = &rows[cells.start * r..cells.end * r];
+            for ((sc, v), &w) in uk.chunks_exact_mut(r).zip(rv.chunks_exact(r)).zip(&wr[cells.clone()]) {
+                for j in 0..r {
+                    let wv = w * v[j];
+                    sc[j] = wv;
+                    esq[j] += wv * v[j];
+                    esum[j] += wv;
+                }
+                for j in 0..r {
+                    b1s[j] += sc[j];
+                }
+            }
+        } else {
+            for (sc, c) in uk.chunks_exact_mut(r).zip(cells.clone()) {
+                sc.fill(0.0);
+                for row in st.rows_of_cell(c) {
+                    let v = &rows[row * r..(row + 1) * r];
+                    let w = ws.w_rows.as_ref().map_or(1.0, |w| w[row]);
+                    for j in 0..r {
+                        let wv = w * v[j];
+                        sc[j] += wv;
+                        esq[j] += wv * v[j];
+                        esum[j] += wv;
+                    }
+                }
+                for j in 0..r {
+                    b1s[j] += sc[j];
+                }
+            }
+        }
+        let b1s = &seg_out[(s - s0) * r..(s - s0 + 1) * r];
+        let inv = 1.0 / ws.n1[s];
+        if UNIT {
+            for sc in uk.chunks_exact_mut(r) {
+                for j in 0..r {
+                    sc[j] -= inv * b1s[j];
+                }
+            }
+        } else {
+            for (sc, &w) in uk.chunks_exact_mut(r).zip(&cw[cells.clone()]) {
+                let w = w * inv;
+                for j in 0..r {
+                    sc[j] -= w * b1s[j];
+                }
+            }
+        }
+        let codes = &st.cell_codes[cells.start * nb..cells.end * nb];
+        scatter_cells::<R>(&mut t, codes, nb, &offs, cells, uk, r);
+    }
+    t.extra.copy_from_slice(&ex);
+}
+
+/// Task body of [`Ops::residualize_rows`] over the segments `segs` whose rows start at `row0`.
+#[allow(clippy::too_many_arguments)]
+fn residualize_task<const R: usize, const UNIT: bool>(
+    ops: &Ops,
+    rp: &mut [f64],
+    row0: usize,
+    r: usize,
+    segs: std::ops::Range<usize>,
+    x: &[f64],
+    b1: &[f64],
+    mut alpha: Option<&mut [f64]>,
+) {
+    let r = width::<R>(r);
+    let (st, ws) = (ops.st, ops.ws);
+    let nb = st.nb;
+    let offs = block_offsets(st, r);
+    let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
+    let mut u: Vec<f64> = Vec::new();
+    let mut abuf = vec![0.0; r];
+    let a = &mut abuf[..r];
+    let s0 = segs.start;
+    for s in segs {
+        let cells = st.cells_of(s);
+        let k = cells.len();
+        if u.len() < k * r {
+            u.resize(k * r, 0.0);
+        }
+        let uk = &mut u[..k * r];
+        let codes = &st.cell_codes[cells.start * nb..cells.end * nb];
+        gather_cells::<R>(codes, nb, &offs, x, r, uk);
+        a.copy_from_slice(&b1[s * r..(s + 1) * r]);
+        if UNIT {
+            for uc in uk.chunks_exact(r) {
+                for j in 0..r {
+                    a[j] -= uc[j];
+                }
+            }
+        } else {
+            for (uc, &w) in uk.chunks_exact(r).zip(&cw[cells.clone()]) {
+                for j in 0..r {
+                    a[j] -= w * uc[j];
+                }
+            }
+        }
+        let inv = 1.0 / ws.n1[s];
+        a.iter_mut().for_each(|v| *v *= inv);
+        if let Some(at) = alpha.as_deref_mut() {
+            at[(s - s0) * r..(s - s0 + 1) * r].copy_from_slice(a);
+        }
+        if UNIT || st.cell_obs_off.is_none() {
+            let rv = &mut rp[(cells.start - row0) * r..(cells.end - row0) * r];
+            for (v, uc) in rv.chunks_exact_mut(r).zip(uk.chunks_exact_mut(r)) {
+                for j in 0..r {
+                    uc[j] += a[j];
+                    v[j] -= uc[j];
+                }
+            }
+        } else {
+            for (uc, c) in uk.chunks_exact_mut(r).zip(cells) {
+                for j in 0..r {
+                    uc[j] += a[j];
+                }
+                for row in st.rows_of_cell(c) {
+                    let v = &mut rp[(row - row0) * r..(row - row0 + 1) * r];
+                    for j in 0..r {
+                        v[j] -= uc[j];
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Ops<'_> {
+    /// Every cell weight is 1 (one row per cell, unweighted).
+    fn unit(&self) -> bool {
+        self.ws.cell_w.is_none()
     }
 
     /// Whether every block (small and large) is scattered through per-task accumulators for a
@@ -320,54 +783,52 @@ impl Ops<'_> {
     }
 
     /// Segment boundaries of the scatter tasks for accumulators of `acc_len` values: with every
-    /// block accumulated, at most [`MAX_ACC_TASKS`] tasks and a combine volume of at most half
-    /// the per-cell data; otherwise the fixed parts (grouped by [`Structure::tasks`]).
-    /// Depends only on the data, `r` and `acc_len` (never on the thread count).
+    /// block accumulated see [`acc_tasks`]; otherwise the fixed parts (grouped by
+    /// [`Structure::tasks`]). Depends only on the data, `r` and `acc_len` (never on the thread
+    /// count).
     fn scatter_tasks(&self, r: usize, acc_len: usize, all: bool) -> Vec<u32> {
-        let st = self.st;
-        if !all {
-            return st.tasks(acc_len);
-        }
-        let np = st.nparts();
-        let k = (st.ncells * r / (2 * acc_len).max(1)).clamp(1, MAX_ACC_TASKS).min(np);
-        let per = np.div_ceil(k);
-        let mut t: Vec<u32> = (0..np).step_by(per).map(|p| st.parts[p]).collect();
-        t.push(st.parts[np]);
-        t
+        if all { acc_tasks(self.st, r, acc_len) } else { self.st.tasks(acc_len) }
     }
 
-    /// Scatters per-cell values `z_c` (computed by `fill` per segment into `zc`, len × r) into the
-    /// reduced space `y`: accumulated blocks through per-task accumulators combined in task order,
-    /// the other large blocks through `zbuf` and level pulls (see [`Ops::accumulates_all`]).
-    /// `fill(s, cells, zc, seg_slot, extra)` may also write per-segment outputs (`seg_out`, of
-    /// the given width) and per-task sums (`extra_len`, combined in task order and returned).
+    /// Runs `task` over the scatter tasks and scatters their per-cell values into the reduced
+    /// space `y`: accumulated blocks through per-task accumulators combined in task order, the
+    /// other large blocks through the M × r buffer and level pulls (see
+    /// [`Ops::accumulates_all`]). Tasks may also write per-segment outputs (`seg_out`, of the
+    /// given width) and per-task sums (`extra_len`, combined in task order and returned).
     #[allow(clippy::too_many_arguments)]
-    fn scatter_cells(
+    fn scatter(
         &self,
         r: usize,
         y: &mut [f64],
-        zbuf: &mut [f64],
+        sc: &mut Scratch,
         seg_out: Option<(&mut [f64], usize)>,
         extra_len: usize,
         pool: &Pool,
-        fill: impl Fn(usize, std::ops::Range<usize>, &mut Vec<f64>, Option<&mut [f64]>, &mut [f64]) + Sync,
-    ) -> Vec<f64> {
+        task: impl Fn(Task) + Sync,
+    ) -> Result<Vec<f64>, RfError> {
         let st = self.st;
         let all = self.accumulates_all(r);
         let use_z = self.needs_zbuf(r);
         let acc_len = if all { st.m * r } else { st.m_small * r };
-        // Blocks scattered through the accumulators: small ones, or all of them.
+        // Blocks scattered through the accumulators: small ones (first), or all of them.
         let nacc = if all { st.nb } else { st.blocks.iter().filter(|b| b.small).count() };
         let tb = self.scatter_tasks(r, acc_len, all);
         let cb = st.cell_bounds(&tb);
         let nt = tb.len() - 1;
+        if use_z && sc.zbuf.len() < st.ncells * r {
+            sc.zbuf = Vec::new();
+            sc.zbuf = alloc_vec(st.ncells * r, 0.0)?;
+        }
+        if sc.accs.len() < nt {
+            sc.accs.resize_with(nt, Vec::new);
+        }
+        let Scratch { zbuf, accs } = sc;
         let zp: Vec<Option<&mut [f64]>> = if use_z {
             let zb: Vec<usize> = cb.iter().map(|c| c * r).collect();
             split_bounds(&mut zbuf[..st.ncells * r], &zb).into_iter().map(Some).collect()
         } else {
             (0..nt).map(|_| None).collect()
         };
-        let sw = seg_out.as_ref().map_or(0, |s| s.1);
         let so: Vec<Option<&mut [f64]>> = match seg_out {
             Some((buf, width)) => {
                 let sb: Vec<usize> = tb.iter().map(|&s| s as usize * width).collect();
@@ -375,44 +836,24 @@ impl Ops<'_> {
             }
             None => (0..nt).map(|_| None).collect(),
         };
-        let results: Vec<(Vec<f64>, Vec<f64>)> = pool.install(|| {
-            zp.into_par_iter()
-                .zip(so)
-                .enumerate()
-                .map(|(t, (mut zt, mut sot))| {
-                    let mut acc = vec![0.0; acc_len];
-                    let mut extra = vec![0.0; extra_len];
-                    let mut zc = Vec::new();
-                    let s0 = tb[t] as usize;
-                    for s in s0..tb[t + 1] as usize {
-                        let cells = st.cells_of(s);
-                        let segslot = sot.as_deref_mut().map(|o| &mut o[(s - s0) * sw..(s - s0 + 1) * sw]);
-                        fill(s, cells.clone(), &mut zc, segslot, &mut extra);
-                        for (k, c) in cells.enumerate() {
-                            let z = &zc[k * r..(k + 1) * r];
-                            for (b, &code) in st.codes(c)[..nacc].iter().enumerate() {
-                                let at = (st.blocks[b].off + code as usize) * r;
-                                for (a, v) in acc[at..at + r].iter_mut().zip(z) {
-                                    *a += v;
-                                }
-                            }
-                            if let Some(zt) = zt.as_deref_mut() {
-                                let at = (c - cb[t]) * r;
-                                zt[at..at + r].copy_from_slice(z);
-                            }
-                        }
-                    }
-                    (acc, extra)
-                })
-                .collect()
+        let el = extra_len.max(1);
+        let mut extras = vec![0.0; nt * el];
+        pool.install(|| {
+            accs[..nt].par_iter_mut().zip(zp).zip(so).zip(extras.par_chunks_mut(el)).enumerate().for_each(|(t, (((acc, zt), seg_out), ex))| {
+                acc.clear();
+                acc.resize(acc_len, 0.0);
+                let segs = tb[t] as usize..tb[t + 1] as usize;
+                task(Task { segs, c0: cb[t], acc, nacc, zt, seg_out, extra: &mut ex[..extra_len] });
+            })
         });
         // Ordered combine, parallel over entries.
+        let accs = &accs[..nt];
         pool.install(|| {
             y[..acc_len].par_chunks_mut(4096).enumerate().for_each(|(ci, out)| {
                 let base = ci * 4096;
                 let len = out.len();
                 out.iter_mut().for_each(|v| *v = 0.0);
-                for (acc, _) in &results {
+                for acc in accs {
                     for (o, v) in out.iter_mut().zip(&acc[base..base + len]) {
                         *o += v;
                     }
@@ -420,15 +861,15 @@ impl Ops<'_> {
             })
         });
         let mut extra = vec![0.0; extra_len];
-        for (_, ex) in &results {
+        for ex in extras.chunks_exact(el) {
             for (a, v) in extra.iter_mut().zip(ex) {
                 *a += v;
             }
         }
         if use_z {
-            self.pull_large(zbuf, r, y, pool);
+            self.pull_large(&sc.zbuf, r, y, pool);
         }
-        extra
+        Ok(extra)
     }
 
     /// y[off_b + g] = Σ_{c ∈ level g of b} Z[c] for every large block.
@@ -454,71 +895,20 @@ impl Ops<'_> {
         }
     }
 
-    /// Y = S·P (both m × r row-major). `zbuf` is scratch of M × r (unused without large blocks).
-    pub fn apply(&self, p: &[f64], r: usize, y: &mut [f64], zbuf: &mut [f64], pool: &Pool) {
-        let ws = self.ws;
-        self.scatter_cells(r, y, zbuf, None, 0, pool, |s, cells, zc, _, _| {
-            self.cell_sums(cells.clone(), p, r, zc);
-            let mut t = [0.0f64; 64];
-            let mut tv = Vec::new();
-            let t: &mut [f64] = if r <= 64 {
-                &mut t[..r]
-            } else {
-                tv.resize(r, 0.0);
-                &mut tv
-            };
-            for (k, c) in cells.clone().enumerate() {
-                let w = ws.cw(c);
-                for (a, v) in t.iter_mut().zip(&zc[k * r..(k + 1) * r]) {
-                    *a += w * v;
-                }
-            }
-            let inv = 1.0 / ws.n1[s];
-            t.iter_mut().for_each(|v| *v *= inv);
-            for (k, c) in cells.enumerate() {
-                let w = ws.cw(c);
-                for (a, tv) in zc[k * r..(k + 1) * r].iter_mut().zip(t.iter()) {
-                    *a = w * (*a - tv);
-                }
-            }
-        });
+    /// Y = S·P (both m × r row-major).
+    pub fn apply(&self, p: &[f64], r: usize, y: &mut [f64], sc: &mut Scratch, pool: &Pool) -> Result<(), RfError> {
+        let unit = self.unit();
+        self.scatter(r, y, sc, None, 0, pool, |t| dispatch_width!(r, unit, apply_task_nb(self, p, r, t)))?;
+        Ok(())
     }
 
     /// Right-hand side of the reduced system for the row block `rows` (N × r, row order).
-    pub fn rhs(&self, rows: &[f64], r: usize, zbuf: &mut [f64], pool: &Pool) -> Result<Rhs, RfError> {
-        let (st, ws) = (self.st, self.ws);
+    pub fn rhs(&self, rows: &[f64], r: usize, sc: &mut Scratch, pool: &Pool) -> Result<Rhs, RfError> {
+        let st = self.st;
         let mut y = alloc_vec(st.m * r, 0.0)?;
         let mut b1 = alloc_vec(st.g1 * r, 0.0)?;
-        let extra = self.scatter_cells(r, &mut y, zbuf, Some((&mut b1, r)), 2 * r, pool, |s, cells, zc, b1s, extra| {
-            zc.clear();
-            zc.resize(cells.len() * r, 0.0);
-            for (k, c) in cells.clone().enumerate() {
-                let sc = &mut zc[k * r..(k + 1) * r];
-                for row in st.rows_of_cell(c) {
-                    let v = &rows[row * r..(row + 1) * r];
-                    let w = ws.w_rows.as_ref().map_or(1.0, |w| w[row]);
-                    for j in 0..r {
-                        let wv = w * v[j];
-                        sc[j] += wv;
-                        extra[j] += wv * v[j];
-                        extra[r + j] += wv;
-                    }
-                }
-            }
-            let b1s = b1s.expect("b1 slot");
-            for k in 0..cells.len() {
-                for (a, v) in b1s.iter_mut().zip(&zc[k * r..(k + 1) * r]) {
-                    *a += v;
-                }
-            }
-            let inv = 1.0 / ws.n1[s];
-            for (k, c) in cells.enumerate() {
-                let w = ws.cw(c) * inv;
-                for (a, b) in zc[k * r..(k + 1) * r].iter_mut().zip(b1s.iter()) {
-                    *a -= w * b;
-                }
-            }
-        });
+        let unit = self.unit();
+        let extra = self.scatter(r, &mut y, sc, Some((&mut b1, r)), 2 * r, pool, |t| dispatch_width!(r, unit, rhs_task(self, rows, r, t)))?;
         let (wsq, wsum) = extra.split_at(r);
         Ok(Rhs { rhs: y, b1, wsq: wsq.to_vec(), wsum: wsum.to_vec() })
     }
@@ -527,9 +917,9 @@ impl Ops<'_> {
     /// α1 = (b1 − Σ_c W_c u_c)/n1 per segment and v_i −= α1 + u_c for every row (F is never
     /// materialized). Writes α1 (g1×r) to `alpha` when given.
     pub fn residualize_rows(&self, rows: &mut [f64], r: usize, x: &[f64], b1: &[f64], alpha: Option<&mut [f64]>, pool: &Pool) {
-        let (st, ws) = (self.st, self.ws);
-        let tb = st.parts.clone();
-        let cb = st.cell_bounds(&tb);
+        let st = self.st;
+        let tb = &st.parts;
+        let cb = st.cell_bounds(tb);
         let rb: Vec<usize> = cb.iter().map(|&c| st.cell_row(c) * r).collect();
         let row_pieces = split_bounds(&mut rows[..st.n * r], &rb);
         let ap: Vec<Option<&mut [f64]>> = match alpha {
@@ -539,40 +929,11 @@ impl Ops<'_> {
             }
             None => (0..tb.len() - 1).map(|_| None).collect(),
         };
+        let unit = self.unit();
         pool.install(|| {
-            row_pieces.into_par_iter().zip(ap).enumerate().for_each(|(t, (rp, mut at))| {
-                let mut u = Vec::new();
-                let mut a = vec![0.0; r];
-                let row0 = rb[t] / r;
-                let s0 = tb[t] as usize;
-                for s in s0..tb[t + 1] as usize {
-                    let cells = st.cells_of(s);
-                    self.cell_sums(cells.clone(), x, r, &mut u);
-                    a.copy_from_slice(&b1[s * r..(s + 1) * r]);
-                    for (k, c) in cells.clone().enumerate() {
-                        let w = ws.cw(c);
-                        for (av, v) in a.iter_mut().zip(&u[k * r..(k + 1) * r]) {
-                            *av -= w * v;
-                        }
-                    }
-                    let inv = 1.0 / ws.n1[s];
-                    a.iter_mut().for_each(|v| *v *= inv);
-                    if let Some(at) = at.as_deref_mut() {
-                        at[(s - s0) * r..(s - s0 + 1) * r].copy_from_slice(&a);
-                    }
-                    for (k, c) in cells.enumerate() {
-                        let uc = &mut u[k * r..(k + 1) * r];
-                        for (f, av) in uc.iter_mut().zip(&a) {
-                            *f += av;
-                        }
-                        for row in st.rows_of_cell(c) {
-                            let v = &mut rp[(row - row0) * r..(row - row0 + 1) * r];
-                            for (vv, f) in v.iter_mut().zip(uc.iter()) {
-                                *vv -= f;
-                            }
-                        }
-                    }
-                }
+            row_pieces.into_par_iter().zip(ap).enumerate().for_each(|(t, (rp, at))| {
+                let segs = tb[t] as usize..tb[t + 1] as usize;
+                dispatch_width!(r, unit, residualize_task(self, rp, rb[t] / r, r, segs, x, b1, at));
             })
         });
     }
@@ -603,10 +964,82 @@ impl Ops<'_> {
         out
     }
 
+    /// [`Ops::assemble_small`] for small blocks dense within the segments: the cell-weight
+    /// cross counts per cell, and Σ_s c_s c_sᵀ/n1_s as dense products of batches of columns
+    /// c_s/√n1_s ([`sub_gram_lower`] per batch, tasks combined in order: thread-count invariant).
+    fn assemble_small_gemm(&self, pool: &Pool) -> Result<Vec<f64>, RfError> {
+        let (st, ws) = (self.st, self.ws);
+        let (ms, nb) = (st.m_small, st.nb);
+        // Columns per product: ≥ 128, and ≈ 4K entries (L1-resident) for tiny blocks.
+        let batch = (4096 / ms.max(1)).max(128);
+        let ns = st.blocks.iter().filter(|b| b.small).count();
+        let offs = block_offsets(st, 1);
+        let flops = (ms * ms * st.g1) as u64;
+        let nt = ((st.ncells / CHUNK) as u64).max(flops >> 22).min(flops / (8 * (ms * ms) as u64)).clamp(1, 64);
+        let tb = st.even_tasks(nt as usize);
+        let accs: Vec<Vec<f64>> = pool.install(|| {
+            (0..tb.len() - 1)
+                .into_par_iter()
+                .map(|t| {
+                    let mut acc = vec![0.0; ms * ms];
+                    let (s0, s1) = (tb[t] as usize, tb[t + 1] as usize);
+                    let ld = batch.min(s1 - s0);
+                    let mut cbuf = vec![0.0; ms * ld];
+                    let mut b0 = s0;
+                    while b0 < s1 {
+                        let b1 = (b0 + batch).min(s1);
+                        cbuf.fill(0.0);
+                        for s in b0..b1 {
+                            let j = s - b0;
+                            for c in st.cells_of(s) {
+                                let w = ws.cw(c);
+                                let cc = &st.cell_codes[c * nb..c * nb + ns];
+                                for (&code, &off) in cc.iter().zip(&offs) {
+                                    let k = off + code as usize;
+                                    cbuf[k * ld + j] += w;
+                                    let row = &mut acc[k * ms..(k + 1) * ms];
+                                    for (&code2, &off2) in cc.iter().zip(&offs) {
+                                        row[off2 + code2 as usize] += w;
+                                    }
+                                }
+                            }
+                            let f = 1.0 / ws.n1[s].sqrt();
+                            for k in 0..ms {
+                                cbuf[k * ld + j] *= f;
+                            }
+                        }
+                        sub_gram_lower(&mut acc, ms, &cbuf, ld, b1 - b0);
+                        b0 = b1;
+                    }
+                    acc
+                })
+                .collect()
+        });
+        let mut full = alloc_vec(ms * ms, 0.0)?;
+        pool.install(|| {
+            full.par_chunks_mut(ms).enumerate().for_each(|(k, row)| {
+                for acc in &accs {
+                    for (a, v) in row[..=k].iter_mut().zip(&acc[k * ms..k * ms + k + 1]) {
+                        *a += v;
+                    }
+                }
+            })
+        });
+        for k in 0..ms {
+            for l in 0..k {
+                full[l * ms + k] = full[k * ms + l];
+            }
+        }
+        Ok(full)
+    }
+
     /// Dense S restricted to the small coordinates (m_s × m_s, row-major).
     pub fn assemble_small(&self, pool: &Pool) -> Result<Vec<f64>, RfError> {
         let (st, ws) = (self.st, self.ws);
         let ms = st.m_small;
+        if gemm_small(st) {
+            return self.assemble_small_gemm(pool);
+        }
         let ns = st.blocks.iter().filter(|b| b.small).count();
         let nrb = (ms * ms).div_ceil(1 << 21).max(1);
         let rows_per = ms.div_ceil(nrb);
@@ -707,6 +1140,43 @@ impl Ops<'_> {
             for (blk, &code) in st.blocks.iter().zip(st.codes(c)) {
                 out.push(((blk.off as u32) + code, w));
             }
+        })
+    }
+
+    /// Structural (weight-independent) joint assembly statistics without building the lists of
+    /// [`Ops::joint_seg_agg`]: (Σ_s d_s², Σ_s d_s·l_s), with d_s the distinct reduced coordinates
+    /// of segment s and l_s those of large blocks. Integer sums: any partition gives the same.
+    pub fn joint_seg_counts(&self, pool: &Pool) -> (u64, u64) {
+        let st = self.st;
+        let (m, ms, nb) = (st.m, st.m_small, st.nb);
+        let offs = block_offsets(st, 1);
+        pool.install(|| {
+            (0..st.nparts())
+                .into_par_iter()
+                .map_init(
+                    || vec![u32::MAX; m],
+                    |stamp, p| {
+                        let (mut sq, mut dl) = (0u64, 0u64);
+                        for s in st.parts[p] as usize..st.parts[p + 1] as usize {
+                            let (mut d, mut l) = (0u64, 0u64);
+                            let cells = st.cells_of(s);
+                            for cc in st.cell_codes[cells.start * nb..cells.end * nb].chunks_exact(nb.max(1)) {
+                                for (&code, &off) in cc.iter().zip(&offs) {
+                                    let k = off + code as usize;
+                                    if stamp[k] != s as u32 {
+                                        stamp[k] = s as u32;
+                                        d += 1;
+                                        l += u64::from(k >= ms);
+                                    }
+                                }
+                            }
+                            sq += d * d;
+                            dl += d * l;
+                        }
+                        (sq, dl)
+                    },
+                )
+                .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
         })
     }
 
@@ -1273,8 +1743,8 @@ mod tests {
                 let r = 2;
                 let p: Vec<f64> = (0..m * r).map(|_| rng.next_f64() - 0.5).collect();
                 let mut y = vec![0.0; m * r];
-                let mut zbuf = vec![0.0; st.ncells * r];
-                ops.apply(&p, r, &mut y, &mut zbuf, pool);
+                let mut sc = Scratch::default();
+                ops.apply(&p, r, &mut y, &mut sc, pool).unwrap();
                 for i in 0..m {
                     for j in 0..r {
                         let want: f64 = (0..m).map(|k| s[i * m + k] * p[k * r + j]).sum();
@@ -1298,6 +1768,107 @@ mod tests {
                     for i in 0..ms {
                         let back: f64 = (0..ms).map(|k| a[i * ms + k] * z[k]).sum();
                         assert!((back - rr[i]).abs() < 1e-9, "ginv row {i}: {back} vs {} (limit {limit})", rr[i]);
+                    }
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    /// Small blocks dense within the segments (GEMM assembly, fused into the weight pass), with
+    /// and without weights, against the explicit S; apply/rhs/residualize kernels against
+    /// explicit formulas for widths with and without a const instance.
+    #[test]
+    fn dense_small_blocks_and_kernel_widths() {
+        let mut rng = SplitMix64::new(7);
+        let n = 4000;
+        let mk = |g: u64, rng: &mut SplitMix64| (0..n).map(|_| (rng.next_u64() % g) as u32).collect::<Vec<u32>>();
+        let terms = vec![term(mk(150, &mut rng)), term(mk(6, &mut rng)), term(mk(4, &mut rng)), term(mk(70, &mut rng))];
+        for weighted in [false, true] {
+            let w: Vec<f64> = (0..n).map(|_| 0.5 + rng.next_f64()).collect();
+            with_pool(2, |pool| {
+                let st = structure::build(&terms, n, 12, pool).unwrap();
+                assert_eq!(st.m_small, 10);
+                let wr = weighted.then(|| st.pi.iter().map(|&k| w[k as usize]).collect::<Vec<f64>>());
+                let ws = weight_state(&st, wr, pool).unwrap();
+                let ops = Ops { st: &st, ws: &ws };
+                let (m, ms) = (st.m, st.m_small);
+                let s = explicit_s(&st, &ws);
+                let fused = ws.small_s.as_ref().expect("fused small block");
+                let a = ops.assemble_small(pool).unwrap();
+                for i in 0..ms {
+                    for j in 0..ms {
+                        assert!((a[i * ms + j] - s[i * m + j]).abs() < 1e-9, "gemm ({i},{j})");
+                        assert!((fused[i * ms + j] - s[i * m + j]).abs() < 1e-9, "fused ({i},{j})");
+                    }
+                }
+                for r in [1, 3, 9] {
+                    let p: Vec<f64> = (0..m * r).map(|_| rng.next_f64() - 0.5).collect();
+                    let mut y = vec![0.0; m * r];
+                    let mut sc = Scratch::default();
+                    ops.apply(&p, r, &mut y, &mut sc, pool).unwrap();
+                    for i in 0..m {
+                        for j in 0..r {
+                            let want: f64 = (0..m).map(|k| s[i * m + k] * p[k * r + j]).sum();
+                            assert!((want - y[i * r + j]).abs() < 1e-9, "apply r={r} ({i},{j})");
+                        }
+                    }
+                    // rhs = D_Rᵀ W v − A_R1 N1⁻¹ b1, residualize = v − D(α1, x).
+                    let rows: Vec<f64> = (0..n * r).map(|_| rng.next_f64()).collect();
+                    let rh = ops.rhs(&rows, r, &mut sc, pool).unwrap();
+                    let wrow = |i: usize| ws.w_rows.as_ref().map_or(1.0, |w| w[i]);
+                    let mut want = vec![0.0; m * r];
+                    let mut b1 = vec![0.0; st.g1 * r];
+                    for seg in 0..st.g1 {
+                        for c in st.cells_of(seg) {
+                            for i in st.rows_of_cell(c) {
+                                for j in 0..r {
+                                    b1[seg * r + j] += wrow(i) * rows[i * r + j];
+                                }
+                            }
+                        }
+                    }
+                    for seg in 0..st.g1 {
+                        for c in st.cells_of(seg) {
+                            for i in st.rows_of_cell(c) {
+                                for b in 0..st.nb {
+                                    let k = st.blocks[b].off + st.codes(c)[b] as usize;
+                                    for j in 0..r {
+                                        want[k * r + j] += wrow(i) * (rows[i * r + j] - b1[seg * r + j] / ws.n1[seg]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for k in 0..m * r {
+                        assert!((want[k] - rh.rhs[k]).abs() < 1e-9, "rhs r={r} {k}");
+                    }
+                    for k in 0..st.g1 * r {
+                        assert!((b1[k] - rh.b1[k]).abs() < 1e-9, "b1 r={r} {k}");
+                    }
+                    let x: Vec<f64> = (0..m * r).map(|_| rng.next_f64() - 0.5).collect();
+                    let mut res = rows.clone();
+                    let mut alpha = vec![0.0; st.g1 * r];
+                    ops.residualize_rows(&mut res, r, &x, &rh.b1, Some(&mut alpha), pool);
+                    for seg in 0..st.g1 {
+                        for c in st.cells_of(seg) {
+                            for i in st.rows_of_cell(c) {
+                                for j in 0..r {
+                                    let fit: f64 = alpha[seg * r + j] + (0..st.nb).map(|b| x[(st.blocks[b].off + st.codes(c)[b] as usize) * r + j]).sum::<f64>();
+                                    assert!((rows[i * r + j] - fit - res[i * r + j]).abs() < 1e-9, "resid r={r}");
+                                }
+                            }
+                        }
+                    }
+                    // α1 = (b1 − Σ_c W_c u_c)/n1.
+                    for seg in 0..st.g1 {
+                        for j in 0..r {
+                            let mut a = b1[seg * r + j];
+                            for c in st.cells_of(seg) {
+                                a -= ws.cw(c) * (0..st.nb).map(|b| x[(st.blocks[b].off + st.codes(c)[b] as usize) * r + j]).sum::<f64>();
+                            }
+                            assert!((a / ws.n1[seg] - alpha[seg * r + j]).abs() < 1e-9, "alpha r={r}");
+                        }
                     }
                 }
             })

@@ -156,6 +156,7 @@ impl Session {
 
     fn ols_in_pool(&mut self, mut rows: Vec<f64>, nx: usize, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {
         let n = self.n();
+        let mut t = std::time::Instant::now();
         let r = 1 + nx;
         let has_intercept = self.has_intercept();
         let report_constant = has_intercept && !s.noconstant;
@@ -165,21 +166,25 @@ impl Session {
         // Degrees of freedom do not depend on the data columns.
         let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar);
         ctx.check()?;
+        crate::solve::log_phase(ctx, &mut t, "ols: weights+dof");
 
         // Pass A: raw column statistics.
         let cs = stats::col_stats(&rows, r, w.raw.as_deref(), pool);
         let tss_all = tss_of(&cs, &w, has_intercept);
         let sd = &cs.sd;
         ctx.check()?;
+        crate::solve::log_phase(ctx, &mut t, "ols: pass A");
 
         // Residualize every column against the fixed effects.
         let want_coefs = s.want_d || (s.want_fe && self.terms.iter().any(|t| t.save));
         let opts = SolveOpts { tol: s.tol, maxiter: s.maxiter, want_coefs };
         let info = self.absorber.residualize(&mut rows, r, &opts, None, pool, ctx)?;
         ctx.check()?;
+        let mut t = std::time::Instant::now();
 
         // Pass B: weighted Gram of the residualized columns.
         let (mut g, ss_res) = stats::gram(&rows, r, w.wv.as_deref(), pool);
+        crate::solve::log_phase(ctx, &mut t, "ols: pass B");
 
         // Collinearity, stage 1 (with the fixed effects).
         let ctol = collinear_tol(s.tol);
@@ -237,14 +242,25 @@ impl Session {
         } else {
             None
         };
-        let rss = par::sum_chunks(pool, n, CHUNK, 1, |range, acc| {
-            for i in range {
-                let ei = e.as_ref().map_or_else(|| resid_of(i), |e| e[i]);
-                acc[0] += w.wv(i) * ei * ei;
-            }
-        })[0];
+        // Without materialized residuals, rss = G_yy − 2β'G_xy + β'G_xxβ from the Gram saves a
+        // pass unless cancellation would cost more than ~1e-10 relative (near-perfect fits).
+        let rss_gram = || {
+            let gy: f64 = kept.iter().zip(&beta).map(|(&j, b)| b * g[j]).sum();
+            let gxx: f64 = kept.iter().zip(&beta).map(|(&a, ba)| ba * kept.iter().zip(&beta).map(|(&b, bb)| bb * g[a * r + b]).sum::<f64>()).sum();
+            g[0] - 2.0 * gy + gxx
+        };
+        let rss = match e.is_none().then(rss_gram) {
+            Some(v) if v.is_finite() && v > 1e-6 * g[0] => v,
+            _ => par::sum_chunks(pool, n, CHUNK, 1, |range, acc| {
+                for i in range {
+                    let ei = e.as_ref().map_or_else(|| resid_of(i), |e| e[i]);
+                    acc[0] += w.wv(i) * ei * ei;
+                }
+            })[0],
+        };
         let rss_s = rss / (sd_y * sd_y);
         ctx.check()?;
+        crate::solve::log_phase(ctx, &mut t, "ols: pass C");
 
         // Constant (regression through the means) and the extended bread.
         let means_s: Vec<f64> = kept.iter().map(|&j| cs.wmean[j] / sd[j]).collect();
