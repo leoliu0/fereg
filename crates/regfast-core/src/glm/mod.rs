@@ -288,12 +288,12 @@ impl Session {
 
         // Separation (relu; `fe` ran at prepare).
         let mut num_sep = 0u64;
-        if g.separation.relu {
-            if let Some(sep) = separation::relu(self.absorber.as_mut(), &d, inner_maxiter, pool, ctx)? {
-                num_sep += sep.iter().filter(|v| **v).count() as u64;
-                self.glm_drop(&mut d, &sep, &mut [], pool, ctx)?;
-                self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
-            }
+        if g.separation.relu
+            && let Some(sep) = separation::relu(self.absorber.as_mut(), &d, inner_maxiter, pool, ctx)?
+        {
+            num_sep += sep.iter().filter(|v| **v).count() as u64;
+            self.glm_drop(&mut d, &sep, &mut [], pool, ctx)?;
+            self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
         }
 
         // Initial values of μ (ppmlhdfe `guess()`; logit: (y + 1/2)/2).

@@ -13,7 +13,7 @@ use regfast_core::{
     WeightKind,
 };
 
-const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense];
+const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense, AbsorberKind::Fast];
 
 // ---------------------------------------------------------------------------------------------
 // Minimal JSON reader (fixtures are flat objects of numbers, strings, arrays and null).
@@ -256,6 +256,8 @@ struct G {
     exact: Vec<(&'static str, f64)>,
     /// Tolerance of d relative to max|d|.
     d_tol: f64,
+    /// Relative tolerance of V (1e-6 unless the design is ill-conditioned).
+    v_tol: f64,
 }
 
 fn poisson(fixture: &'static str, data: &'static str, y: &'static str, x: &[&'static str], absorb: &[&'static str]) -> G {
@@ -284,6 +286,7 @@ fn poisson(fixture: &'static str, data: &'static str, y: &'static str, x: &[&'st
         skip: Vec::new(),
         exact: Vec::new(),
         d_tol: 1e-6,
+        v_tol: 1e-6,
     }
 }
 
@@ -433,7 +436,7 @@ fn check_poisson(g: &G, kind: AbsorberKind) {
         assert_eq!(r.status[j] != 0, o, "{}: omitted status of {}", g.fixture, g.x[j]);
     }
     e.vec(&format!("{} b", g.fixture), mat(r, "b"), &fx.get("b").unwrap().nums(), 1e-7);
-    e.vec(&format!("{} V", g.fixture), mat(r, "V"), &fx.get("V").unwrap().nums(), 1e-6);
+    e.vec(&format!("{} V", g.fixture), mat(r, "V"), &fx.get("V").unwrap().nums(), g.v_tol);
     let want = |k: &str| g.exact.iter().find(|(n, _)| *n == k).map_or_else(|| sc(k), |(_, v)| *v);
     for k in ["ll", "ll_0", "deviance", "chi2", "r2_p"] {
         if !g.skip.contains(&k) {
@@ -576,10 +579,12 @@ fn poisson_specs() -> Vec<G> {
         poisson("p_collinear4", "collinear4", "y", &["x1", "x2"], &[]),
         poisson("p_collinear5", "collinear5", "y", &["x1", "x2"], &[]),
         {
-            // x1 and x2 are nearly collinear: ppmlhdfe finds V numerically singular and reports
-            // a missing chi2; whether the sweep flags it is rounding noise.
+            // x1 and x2 are nearly collinear (x2 = x1 + e/18000): ppmlhdfe finds V numerically
+            // singular and reports a missing chi2 (whether the sweep flags it is rounding noise),
+            // and V (entries ≈ 1e6) agrees with ppmlhdfe only to 9.7e-7 (Dense) / 1.6e-6 (Fast).
             let mut g = poisson("p_collinear6", "collinear6", "y", &["x1", "x2"], &[]).tol(1e-12);
             g.skip = vec!["chi2"];
+            g.v_tol = 1e-5;
             g
         },
     ];

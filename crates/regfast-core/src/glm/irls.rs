@@ -88,10 +88,11 @@ fn predict_eps(hist: &mut [f64; 3], eps: f64) -> f64 {
     // Solve [i, i², i³]·c = h for i = 1..3, then forecast at i = 4.
     let mut a = [[1.0, 1.0, 1.0, hist[0]], [2.0, 4.0, 8.0, hist[1]], [3.0, 9.0, 27.0, hist[2]]];
     for p in 0..3 {
-        for q in p + 1..3 {
-            let f = a[q][p] / a[p][p];
-            for j in p..4 {
-                a[q][j] -= f * a[p][j];
+        let pivot = a[p];
+        for row in a.iter_mut().skip(p + 1) {
+            let f = row[p] / pivot[p];
+            for (v, pv) in row.iter_mut().zip(pivot).skip(p) {
+                *v -= f * pv;
             }
         }
     }
@@ -223,7 +224,8 @@ pub(crate) fn irls(
         ctx.check()?;
         let predicted = predict_eps(&mut hist, eps);
         // ppmlhdfe `iter_fast_solver` (normal equations while far from convergence).
-        let fast = k > 0 && tol_in > c.tol * 11.0 && !(predicted <= c.tol);
+        // (Mata: a missing prediction compares as +∞, so it allows the fast solver.)
+        let fast = k > 0 && tol_in > c.tol * 11.0 && (predicted.is_nan() || predicted > c.tol);
 
         // (a) weights, (b) working variable.
         let tw = d.tw.as_deref();
@@ -282,9 +284,9 @@ pub(crate) fn irls(
             // Logit: the mirror rule for y = 1 (μ within mu_tol of 1).
             let adj1 = log_septol + (-max_zero + 5.0).min(0.0);
             for i in 0..n {
-                if y[i] == 0.0 && eta[i] <= adj0 {
-                    sep[i] = true;
-                } else if fam == Family::Logit && y[i] > 0.0 && -eta[i] <= adj1 {
+                let at_zero = y[i] == 0.0 && eta[i] <= adj0;
+                let at_one = fam == Family::Logit && y[i] > 0.0 && -eta[i] <= adj1;
+                if at_zero || at_one {
                     sep[i] = true;
                 }
             }
@@ -297,7 +299,8 @@ pub(crate) fn irls(
         let mut halved = false;
         if fam == Family::Logit && iter > 1 {
             let mut h = 0;
-            while h < MAX_HALVINGS && !(dev <= old_dev + 1e-9 * old_dev.abs().max(1.0)) {
+            let worse = |dev: f64| dev.is_nan() || dev > old_dev + 1e-9 * old_dev.abs().max(1.0);
+            while h < MAX_HALVINGS && worse(dev) {
                 pool.install(|| eta.par_iter_mut().zip(old_eta.par_iter()).for_each(|(e, o)| *e = 0.5 * (*e + o)));
                 update_mu(fam, d, eta, &sep, mu, pool);
                 dev = deviance(fam, d, mu, eta, pool);
