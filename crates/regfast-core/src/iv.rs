@@ -249,7 +249,7 @@ impl Session {
         let (nx, ne, ni) = (lay.nx, lay.nendog, lay.ninst);
         let w = Weights::new(self.weight_kind, self.weights.as_deref(), self.absorber.row_order(), pool)?;
         let big_n = w.n;
-        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar);
+        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false);
         // ivreghdfe l.670: absorb_ct = df_a, or 1 when every FE is nested in a cluster.
         let sdof = dof.df_a.max(1) as f64;
         ctx.check()?;

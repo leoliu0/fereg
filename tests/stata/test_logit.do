@@ -129,6 +129,9 @@ keep if idcode <= 300
 lcheck "age" "union age i.idcode i.year grade," "union age grade, absorb(idcode year)" "grade"
 lcheck "age" "union age i.idcode i.year grade, vce(cluster idcode)" "union age grade, absorb(idcode year) vce(cluster idcode)" "grade"
 lcheck "age ttl_exp" "union age ttl_exp i.idcode i.year grade, vce(robust)" "union age ttl_exp grade, absorb(idcode year) vce(robust)" "grade"
+* heterogeneous slopes: absorb(year##c.tenure) is i.year i.year#c.tenure in logit
+lcheck "age ttl_exp" "union age ttl_exp i.idcode i.year i.year#c.tenure," "union age ttl_exp, absorb(idcode year##c.tenure)"
+lcheck "age ttl_exp" "union age ttl_exp i.idcode i.ind_code#c.tenure, vce(cluster idcode)" "union age ttl_exp, absorb(idcode ind_code#c.tenure) vce(cluster idcode)"
 di as result "nlswork passed"
 
 * ---------------------------------------------------------------------------

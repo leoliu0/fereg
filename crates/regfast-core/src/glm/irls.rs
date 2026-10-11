@@ -39,7 +39,9 @@ pub(crate) struct IrlsCfg {
     pub start_tol: f64,
     /// FE solver iteration cap.
     pub inner_maxiter: usize,
-    /// The absorber solves exactly (at most one absorbed term; reghdfe `G == 1`).
+    /// ppmlhdfe's partial-out is exact, so IRLS may converge before the inner tolerance reaches
+    /// `highest` (ppmlhdfe.mata l.744: `HDFE.G == 1`, or a realized MAP accuracy at machine
+    /// precision; see `glm::map_exact`).
     pub exact: bool,
     pub log: bool,
     /// Scale of y (deviance is reported as deviance·sd_y).

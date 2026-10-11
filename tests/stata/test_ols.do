@@ -105,6 +105,50 @@ check ln_wage age ttl_exp tenure in 1/15000, absorb(idcode year) vce(robust)
 di as result "nlswork specifications passed"
 
 * ---------------------------------------------------------------------------
+* heterogeneous slopes: fe##c.x, fe#c.x, fe##c.(x z), weights, savefe slopes
+* ---------------------------------------------------------------------------
+webuse nlswork, clear
+gen double w = 1 + mod(_n, 5)
+check ln_wage age ttl_exp tenure, absorb(idcode##c.year)
+check ln_wage age ttl_exp tenure, absorb(idcode#c.year ind_code)
+check ln_wage ttl_exp tenure, absorb(idcode##c.(year age)) vce(cluster idcode)
+* age is spanned by year##c.age: omitted as collinear with the fixed effects
+check ln_wage age ttl_exp tenure, absorb(idcode year##c.age) vce(robust)
+check ln_wage age ttl_exp tenure [aw=w], absorb(idcode ind_code##c.tenure year) vce(cluster idcode year)
+check ln_wage age ttl_exp [pw=w], absorb(idcode##c.tenure year occ_code#c.age)
+* a slope variable that is constant within some levels (degenerate levels: slope 0)
+gen double tc = cond(mod(idcode, 3) == 0, 1, tenure)
+check ln_wage age ttl_exp, absorb(idcode##c.tc year)
+di as result "nlswork slopes passed"
+
+* savefe with slopes: targets <name> (intercept) and <name>Slope# (slopes), labels as reghdfe's,
+* and the saved terms rebuild d
+quietly reghdfe ln_wage age ttl_exp, absorb(fR1=idcode##c.year fR2=ind_code#c.tenure fR3=occ_code) resid(rR) tol(1e-12)
+estimates store R
+quietly predict double dR, d
+if ("$RF_MOCK" != "") rf_stage_mock, indepvars(age ttl_exp)
+regfast ln_wage age ttl_exp, absorb(fF1=idcode##c.year fF2=ind_code#c.tenure fF3=occ_code) resid(rF)
+estimates store F
+rf_compare_e R F, xscalars(ic) xmacros(resid) `=cond("$RF_MOCK" != "", "nosample", "")'
+quietly predict double dF, d
+confirm double variable fF1 fF1Slope1 fF2Slope1 fF3
+unab vR : fR*
+unab vF : fF*
+assert "`vF'" == subinstr("`vR'", "fR", "fF", .)
+foreach v in 1 1Slope1 2Slope1 3 {
+	assert `"`: variable label fF`v''"' == `"`: variable label fR`v''"'
+}
+if ("$RF_MOCK" == "") {
+	gen double sF = fF1 + fF1Slope1 * year + fF2Slope1 * tenure + fF3
+	gen double sR = fR1 + fR1Slope1 * year + fR2Slope1 * tenure + fR3
+	qui count if e(sample) & (reldif(sF, dF) > 1e-6 | reldif(sF, sR) > 1e-6 | reldif(dF, dR) > 1e-6)
+	assert r(N) == 0
+	qui count if !e(sample) & !missing(sF)
+	assert r(N) == 0
+}
+di as result "savefe slopes passed"
+
+* ---------------------------------------------------------------------------
 * groupvar(), residuals, savefe, predict
 * ---------------------------------------------------------------------------
 webuse nlswork, clear

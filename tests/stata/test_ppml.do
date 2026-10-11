@@ -2,7 +2,8 @@
 *
 * Datasets: the ppmlhdfe test-suite data ported in crates/regfast-core/tests/data/glm_*.csv
 *   (MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimarães, and Thomas Zylkin; see
-*   gen_glm_fixtures.do), auto, nlswork and a simulated gravity panel.
+*   gen_glm_fixtures.do) and inline (test/slopes1-4.do), auto, nlswork and a simulated gravity
+*   panel.
 * Every ppmlhdfe run uses tol(1e-10) or tighter and sep(fe relu) (regfast treats `simplex` as an
 * alias of `relu`; ppmlhdfe's simplex presolve needs moremata).
 * Assertions (rf_compare_e): b rtol 1e-7, V rtol 1e-6 (correlation scale), integer e() exact
@@ -242,6 +243,107 @@ foreach g in "exp year" "imp year" "exp imp" {
 }
 drop dG muG rG focG
 di as result "gravity passed"
+
+* ---------------------------------------------------------------------------
+* heterogeneous slopes: ports of ppmlhdfe test/slopes1-4.do (regressors explained by slope FEs,
+* separation through a slope term) and nlswork
+* ---------------------------------------------------------------------------
+* slopes1: fta is an exact combination of exporter##c.trend (omitted), perfect fit
+clear
+input double trade byte(fta exporter trend c)
+35412.88183544995 0  8 15 1
+619124.7429669127 0  8 16 1
+ 645947.355868591 0 35  0 1
+2113023.937040806 1 35 12 1
+end
+check trade fta, absorb(exporter##c.trend c) maxiter(100) tol(1e-10)
+* slopes2: x is an exact combination of id1##c.z
+clear
+input double(id1 y) byte(x z c)
+1   67793.6092504498 0 -1 1
+1              68774 0  0 1
+2 29460066.818006903 1 -1 1
+2  40370377.65078497 1 10 1
+3  4215.552981376648 0  7 1
+3  4288.904005765915 0 15 1
+4  483882.9337809086 0  7 1
+4 306164.57000368834 0  8 1
+5 29557.571687340736 0  6 1
+5  170794.3896008134 0 12 1
+6 1963894.9483253956 0  6 1
+6 3364687.2930059433 0 12 1
+end
+check y x, absorb(id1##c.z c) maxiter(100) tol(1e-12)
+* slopes3: within id2 == 3 the intercept and z separate obs 7; obs 8 is then a singleton.
+* ppmlhdfe's V is nonsymmetric by rounding here (residual df 1, near-perfect fit), so Stata zeroes
+* it when posting and its chi2 is missing; ppmlfast posts its symmetric V (about 1e-14).
+clear
+input byte(index id1 id2 x z) double y
+1 1 1 0 -1  3369071263
+2 1 1 0  2  2535746605
+3 1 1 1 15 15241548895
+4 1 2 0 11        1040
+5 1 2 0 13         166
+6 1 2 0 15    21682500
+7 1 3 0 -1           0
+8 1 3 0  7      764800
+end
+check y x, absorb(id1 id2##c.z) maxiter(100) tol(1e-10) keepsing || nov xs(chi2)
+check y x, absorb(id1 id2##c.z) maxiter(100) tol(1e-10) || nov xs(chi2)
+* slopes4: every y == 0 observation is separated, through combinations of i, j and j#c.z.
+* ppmlhdfe 2.3.3 finds 3 of the 4 (its own test of this dataset is disabled), so ppmlfast is
+* checked for all four, and against ppmlhdfe on the y > 0 sample.
+clear
+input long y byte(x z i j)
+      0 0 -1  1  1
+   5211 0 -1  1  4
+  10498 0  2  2  4
+   1310 0  2  2  5
+    189 0  3  3  2
+      0 0  3  3  6
+   1468 0  6  4  5
+     34 0  6  4  7
+  12000 0  7  5  3
+   1036 0  7  5  5
+      0 0  8  6  3
+   1247 0  8  6  7
+    460 0  9  7  1
+     70 0  9  7  7
+     28 0 14  8  2
+      4 0 14  8  3
+     17 0 14  8  6
+      0 0 15  9  1
+      8 0 15  9  6
+ 203886 0  3 10  8
+3840369 1  3 10  9
+3961747 1  8 11  9
+ 710771 0  8 11 10
+ 810565 0 13 12  8
+ 249014 0 13 12 10
+ 819845 0 16 13  8
+5589636 1 16 13  9
+end
+quietly ppmlfast y x, absorb(i j##c.z) maxiter(400) tol(1e-10) keepsing
+assert e(num_separated) == 4
+qui count if e(sample) != (y > 0)
+assert r(N) == 0
+check y x if y > 0, absorb(i j##c.z) maxiter(400) tol(1e-10) keepsing
+* (after singletons, 8 observations that the model fits exactly: ppmlhdfe's MAP solves this tiny
+* system to machine precision, so it accepts eps < tol at deviance 2e-8 before tightening the
+* inner tolerance; ppmlfast runs two more iterations to deviance 0, which moves _cons by 2e-6)
+check y x if y > 0, absorb(i j##c.z) maxiter(400) tol(1e-10) || btol(1e-5)
+matrix b1 = e(b)
+local N1 = e(N)
+quietly ppmlfast y x, absorb(i j##c.z) maxiter(400) tol(1e-10)
+assert e(num_separated) == 4 & e(N) == `N1'
+assert mreldif(e(b), b1) < 1e-8
+* nlswork: slope terms with and without intercepts, robust / cluster, d() and predict
+webuse nlswork, clear
+check hours age ttl_exp, absorb(idcode year##c.tenure) tol(1e-10)
+check hours ttl_exp tenure, absorb(idcode##c.age year) vce(cluster idcode) tol(1e-10)
+check hours age ttl_exp, absorb(idcode ind_code#c.tenure year) vce(robust) tol(1e-10)
+dcheck hours age ttl_exp, absorb(idcode year##c.tenure) tol(1e-10)
+di as result "slopes passed"
 
 * ---------------------------------------------------------------------------
 * errors

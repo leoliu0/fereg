@@ -164,7 +164,7 @@ impl Session {
         let big_n = w.n;
 
         // Degrees of freedom do not depend on the data columns.
-        let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar);
+        let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false);
         ctx.check()?;
         crate::solve::log_phase(ctx, &mut t, "ols: weights+dof");
 

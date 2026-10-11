@@ -118,6 +118,12 @@ check ln_wage age (tenure = union south msp), absorb(idcode ind_code#year) vce(c
 check ln_wage (tenure = union south), absorb(idcode year) vce(robust)
 di as result "nlswork first/ffirst passed"
 
+* heterogeneous slopes in the absorbed terms
+check ln_wage age (tenure = union south), absorb(idcode year##c.hours) vce(robust)
+check ln_wage (tenure = union south msp) [aw=w], absorb(idcode##c.year) vce(cluster idcode) first
+check ln_wage age (tenure = union south msp), absorb(idcode ind_code#c.hours year) ffirst
+di as result "nlswork slopes passed"
+
 * ---------------------------------------------------------------------------
 * Residuals and predict (xb, residuals, d, xbd, dresiduals) vs ivreghdfe/reghdfe_p
 * ---------------------------------------------------------------------------

@@ -1,8 +1,9 @@
 *! regfast test helper: compare two stored estimation results
-* rf_compare_e REF TEST [, btol(#) vtol(#) stol(#) xscalars(names) xmacros(names) nosample nodoftable]
+* rf_compare_e REF TEST [, btol(#) vtol(#) stol(#) xscalars(names) xmacros(names) nosample nodoftable nov]
 *
 *   b:          names identical; |b_T - b_R| <= btol * (|b_R| + se_R)
-*   V:          |V_T - V_R| <= vtol * sqrt(V_R[i,i] V_R[j,j])  (correlation scale; zeros must match)
+*   V:          |V_T - V_R| <= vtol * sqrt(V_R[i,i] V_R[j,j])  (correlation scale; zeros must match;
+*               skipped with nov)
 *   scalars:    every scalar of REF must exist in TEST; integer-valued scalars must be equal,
 *               the others must satisfy reldif <= stol (both missing is equal)
 *   macros:     every macro of REF must be equal in TEST, except cmd cmdline predict footnote
@@ -13,7 +14,7 @@
 program rf_compare_e
 	version 16
 	syntax namelist(min=2 max=2) [, btol(real 1e-7) vtol(real 1e-6) stol(real 1e-6) ///
-		xscalars(string) xmacros(string) NOSAMPle NODOFtable]
+		xscalars(string) xmacros(string) NOSAMPle NODOFtable NOV]
 	gettoken ref test : namelist
 	local test `test'
 	tempname bR VR bT VT dR dT
@@ -94,7 +95,7 @@ program rf_compare_e
 				local ++nfail
 			}
 			else {
-				mata: rf_compare_bv("`bT'", "`VT'", "`bR'", "`VR'", `btol', `vtol')
+				mata: rf_compare_bv("`bT'", "`VT'", "`bR'", "`VR'", `btol', `vtol', `="`nov'" != ""')
 				if (`rf_fail') local ++nfail
 			}
 		}
@@ -136,7 +137,7 @@ end
 capture mata: mata drop rf_compare_bv()
 mata:
 void rf_compare_bv(string scalar bT, string scalar VT, string scalar bR, string scalar VR,
-	real scalar btol, real scalar vtol)
+	real scalar btol, real scalar vtol, | real scalar skipv)
 {
 	real matrix B1, B2, V1, V2, S, D
 	real scalar fail, i, j
@@ -151,7 +152,7 @@ void rf_compare_bv(string scalar bT, string scalar VT, string scalar bR, string 
 			fail = 1
 		}
 	}
-	for (i = 1; i <= rows(V2); i++) {
+	for (i = 1; i <= (skipv == 1 ? 0 : rows(V2)); i++) {
 		for (j = 1; j <= cols(V2); j++) {
 			if (abs(V1[i, j] - V2[i, j]) > vtol * S[i] * S[j] | (S[i] * S[j] == 0 & V1[i, j] != 0)) {
 				printf("{err}FAIL V[%g,%g]: %21.15g vs %21.15g\n", i, j, V1[i, j], V2[i, j])

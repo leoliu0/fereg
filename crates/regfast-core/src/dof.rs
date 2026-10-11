@@ -51,8 +51,12 @@ struct DofTerm<'a> {
 }
 
 /// reghdfe `estimate_dof`. `clusters` are the cluster dimensions of a cluster VCE (empty
-/// otherwise); `n` is the number of kept observations.
-pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &DofOptions, want_groupvar: bool) -> Dof {
+/// otherwise); `n` is the number of kept observations. With `reghdfe5` (ppmlhdfe 2.3.3, which
+/// runs reghdfe5's `estimate_dof`), the "first remaining intercept is exact" flag goes to the
+/// slot whose position equals that term's position (reghdfe5.mata l.1446 indexes the extended
+/// list with the absvar index), which differs from the term's intercept slot when slope slots
+/// precede it; only the `e(dof_table)` flags change.
+pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &DofOptions, want_groupvar: bool, reghdfe5: bool) -> Dof {
     let dterms: Vec<DofTerm> = if terms.is_empty() {
         vec![DofTerm { codes: std::borrow::Cow::Owned(vec![0; n]), g: 1, intercept: true, slopes: &[] }]
     } else {
@@ -123,7 +127,8 @@ pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &Do
 
     // (c) The first remaining intercept is exact.
     if let Some(i) = intercept_index.iter().position(Option::is_some) {
-        slots[i].exact = true;
+        let at = if reghdfe5 { intercept_index[i].expect("intercept slot") } else { i };
+        slots[at].exact = true;
     }
 
     // (d) Mobility groups between pairs of remaining intercepts.

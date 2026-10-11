@@ -29,7 +29,7 @@ use crate::error::RfError;
 use crate::fe_recovery;
 use crate::ols::{self, STATUS_ABSORBED, STATUS_COLLINEAR, STATUS_OK, missing_if_nonfinite, sub_block};
 use crate::par::{self, CHUNK, Pool};
-use crate::session::{DropReport, Session};
+use crate::session::{DropReport, Session, Term};
 use crate::stats;
 use crate::vcov::{self, ClusterCodes, INVSYM_TOL};
 
@@ -88,6 +88,24 @@ fn col_sumsq(x: &[f64], k: usize, pool: &Pool) -> Vec<f64> {
 
 fn plural(n: usize) -> &'static str {
     if n > 1 { "s" } else { "" }
+}
+
+/// Whether ppmlhdfe's MAP partial-out is exact for these terms: one term's column space contains
+/// every other term's, so all the projections commute and one sweep solves the system (its
+/// realized accuracy is at machine precision). A single term (reghdfe `G == 1`) is the trivial
+/// case; redundant terms nested in another (`absorb(firm industry)`, `absorb(i##c.t c)`) are the
+/// others.
+fn map_exact(terms: &[Term]) -> bool {
+    terms.len() <= 1 || terms.iter().enumerate().any(|(a, ta)| terms.iter().enumerate().all(|(b, tb)| a == b || spans(ta, tb)))
+}
+
+/// The columns of term `b` lie in the span of those of term `a`: every level of `a` lies within
+/// one level of `b`, and `a` has an intercept and each slope wherever `b` does.
+fn spans(a: &Term, b: &Term) -> bool {
+    (a.intercept || !b.intercept)
+        && b.slope_vars.iter().all(|v| a.slope_vars.contains(v))
+        && a.g >= b.g
+        && dof::nested_within(&a.codes, a.g, &b.codes)
 }
 
 impl Session {
@@ -314,7 +332,7 @@ impl Session {
             highest,
             start_tol: irls::START_INNER_TOL.max(g.tol),
             inner_maxiter,
-            exact: self.terms.len() <= 1,
+            exact: map_exact(&self.terms),
             log: g.log,
             sd_y,
             check_sep: g.separation.mu,
@@ -333,7 +351,7 @@ impl Session {
             self.glm_drop(&mut d, &sep, &mut [&mut mu, &mut eta], pool, ctx)?;
             self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
             cfg.check_sep = false;
-            cfg.exact = self.terms.len() <= 1;
+            cfg.exact = map_exact(&self.terms);
             out = irls::irls(self.absorber.as_mut(), &d, &mut mu, &mut eta, &cfg, pool, ctx)?;
             iter += out.iter;
             subiter += out.subiter;
@@ -406,7 +424,7 @@ impl Session {
         let sumw = par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += w[rg].iter().sum::<f64>())[0];
         let cw = big_n / sumw;
         let wv: Vec<f64> = w.iter().map(|v| v * cw).collect();
-        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar);
+        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true);
 
         // reghdfe_rmcoll on the final weighted Gram (normally drops nothing).
         let gfull = stats::gram(block, r, Some(&wv), pool).0;
