@@ -1,0 +1,14 @@
+[project]
+name = "regfast-bench"
+version = "0.1.0"
+description = "Benchmark harness for regfast vs reghdfe, xhdfe, fixest and pyfixest"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.5.4",
+    "pandas>=3.0.6",
+    "pyarrow>=26.0.0",
+    "pyfixest==0.60.0",
+]
+
+[tool.uv]
+package = false
