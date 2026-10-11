@@ -555,7 +555,10 @@ impl Ops<'_> {
         let ns = st.blocks.iter().filter(|b| b.small).count();
         let nrb = (ms * ms).div_ceil(1 << 21).max(1);
         let rows_per = ms.div_ceil(nrb);
-        let tb = st.tasks(rows_per * ms);
+        // Segment tasks: enough to parallelize the Σ s² outer products, few enough that zeroing
+        // and combining the per-task accumulators (rows_per × m_s each) stays ≤ 1/4 of that work.
+        let nt_want = (st.small_work / (4 * (rows_per * ms) as u64).max(1)).clamp(1, 64) as usize;
+        let tb = st.even_tasks(nt_want);
         let nt = tb.len() - 1;
         let jobs: Vec<(usize, usize)> = (0..nrb).flat_map(|rbk| (0..nt).map(move |t| (rbk, t))).collect();
         let accs: Vec<Vec<f64>> = pool.install(|| {
@@ -576,12 +579,14 @@ impl Ops<'_> {
                                 if kb >= k0 && kb < k1 {
                                     for b2 in 0..ns {
                                         let l = st.blocks[b2].off + codes[b2] as usize;
-                                        acc[(kb - k0) * ms + l] += w;
+                                        if l <= kb {
+                                            acc[(kb - k0) * ms + l] += w;
+                                        }
                                     }
                                 }
                             }
                         }
-                        agg.sort_by_key(|e| e.0);
+                        agg.sort_unstable_by_key(|e| e.0);
                         let mut out = 0;
                         for i in 0..agg.len() {
                             if out > 0 && agg[out - 1].0 == agg[i].0 {
@@ -593,14 +598,16 @@ impl Ops<'_> {
                         }
                         agg.truncate(out);
                         let inv = 1.0 / ws.n1[s];
-                        for &(k, ck) in &agg {
+                        // Lower triangle only (l ≤ k): agg is sorted by coordinate.
+                        for (i, &(k, ck)) in agg.iter().enumerate() {
                             let k = k as usize;
                             if k < k0 || k >= k1 {
                                 continue;
                             }
                             let row = &mut acc[(k - k0) * ms..(k - k0 + 1) * ms];
-                            for &(l, cl) in &agg {
-                                row[l as usize] -= ck * cl * inv;
+                            let f = ck * inv;
+                            for &(l, cl) in &agg[..=i] {
+                                row[l as usize] -= f * cl;
                             }
                         }
                     }
@@ -608,11 +615,23 @@ impl Ops<'_> {
                 })
                 .collect()
         });
+        // Combine in task order (parallel over rows), then mirror the lower triangle.
         let mut full = alloc_vec(ms * ms, 0.0)?;
-        for (job, acc) in jobs.iter().zip(&accs) {
-            let k0 = job.0 * rows_per;
-            for (a, v) in full[k0 * ms..k0 * ms + acc.len()].iter_mut().zip(acc) {
-                *a += v;
+        pool.install(|| {
+            full.par_chunks_mut(ms).enumerate().for_each(|(k, row)| {
+                let rbk = k / rows_per;
+                let local = k - rbk * rows_per;
+                for t in 0..nt {
+                    let acc = &accs[rbk * nt + t];
+                    for (a, v) in row[..=k].iter_mut().zip(&acc[local * ms..local * ms + k + 1]) {
+                        *a += v;
+                    }
+                }
+            })
+        });
+        for k in 0..ms {
+            for l in 0..k {
+                full[l * ms + k] = full[k * ms + l];
             }
         }
         Ok(full)
@@ -630,7 +649,7 @@ impl Ops<'_> {
                     for s in st.parts[p] as usize..st.parts[p + 1] as usize {
                         tmp.clear();
                         tmp.extend(st.cells_of(s).map(|c| (st.codes(c)[b], ws.cw(c))));
-                        tmp.sort_by_key(|e| e.0);
+                        tmp.sort_unstable_by_key(|e| e.0);
                         let before = codes.len();
                         for &(g, w) in &tmp {
                             if codes.len() > before && *codes.last().expect("nonempty") == g {

@@ -401,28 +401,7 @@ fn session_fast_path_matches_dense() {
 }
 
 #[test]
-fn slopes_are_rejected_and_maxiter_is_enforced() {
-    let mut rng = SplitMix64::new(30);
-    let n = 400;
-    let a = random_codes(n, 20, &mut rng);
-    let x: Vec<f64> = (0..n).map(|_| rng.next_f64()).collect();
-    let prep = Prep {
-        n,
-        factors: vec![FactorValues::Num(&a)],
-        absorb: vec![AbsorbTerm { factors: vec![0], intercept: true, slopes: vec![0], save: false }],
-        slope_vars: vec![&x],
-        weights: None,
-        weight_kind: WeightKind::None,
-        vce: Vce::Unadjusted,
-        drop_singletons: true,
-        family: Family::Gaussian,
-        y_for_sep: None,
-        sep_fe: false,
-    };
-    match Session::prepare(prep, &Ctx::quiet(1)) {
-        Err(RfError::InvalidInput(m)) => assert_eq!(m, "slopes not yet supported"),
-        _ => panic!("slopes must be rejected"),
-    }
+fn maxiter_is_enforced() {
     let mut p = setup(&ring(400, 800), all_large(), 1);
     let refs: Vec<&[f64]> = p.cols.iter().map(Vec::as_slice).collect();
     let ctx = Ctx::quiet(2);

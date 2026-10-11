@@ -18,6 +18,7 @@ use crate::operator::{Ops, Rhs, WeightState, weight_state};
 use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::{BlockPrecond, Precond, approx_chol::ApproxChol, dense::Dense, jacobi, sparse_chol::SparseChol};
 use crate::session::Term;
+use crate::slopes::SlopeSolver;
 use crate::structure::{self, Structure};
 
 /// Assembly-work limit E_b = Σ_s d_s² for exact assembly of a large block.
@@ -53,7 +54,8 @@ impl Default for SolverConfig {
     }
 }
 
-/// Builds the production absorber for the kept sample (`weights` in kept order).
+/// Builds the production absorber for the kept sample (`weights` in kept order): [`FeSolver`]
+/// for intercept-only designs, [`SlopeSolver`] when some term has slopes or no intercept.
 pub fn build(
     terms: &[Term],
     weights: Option<&[f64]>,
@@ -61,6 +63,9 @@ pub fn build(
     pool: &Pool,
     ctx: &Ctx,
 ) -> Result<Box<dyn Absorber>, RfError> {
+    if terms.iter().any(|t| !t.slopes.is_empty() || !t.intercept) {
+        return Ok(Box::new(SlopeSolver::new(terms, weights, n, SolverConfig::default(), pool, ctx)?));
+    }
     Ok(Box::new(FeSolver::new(terms, weights, n, SolverConfig::default(), pool, ctx)?))
 }
 
@@ -80,7 +85,7 @@ pub struct FeSolver {
     cfg: SolverConfig,
 }
 
-fn log_phase(ctx: &Ctx, t: &mut Instant, what: &str) {
+pub(crate) fn log_phase(ctx: &Ctx, t: &mut Instant, what: &str) {
     if ctx.verbose >= 2 {
         ctx.log(&format!("regfast: {what:<28} {:>9.4}s", t.elapsed().as_secs_f64()));
     }

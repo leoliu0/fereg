@@ -30,9 +30,10 @@ pub fn regularization(signs: &[i8]) -> LdltRegularization<'_, f64> {
     }
 }
 
-/// Parallelism for a dense operation of dimension `k` inside `pool`.
+/// Parallelism for a dense operation of dimension `k` inside `pool`: sequential below 1024
+/// (faer's parallel start-up costs more than it saves on small blocks).
 pub fn par_for(k: usize, pool: &Pool) -> Par {
-    if k >= 256 && pool.threads() > 1 { Par::rayon(pool.threads()) } else { Par::Seq }
+    if k >= 1024 && pool.threads() > 1 { Par::rayon(pool.threads()) } else { Par::Seq }
 }
 
 pub struct Dense {
