@@ -215,6 +215,18 @@ pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Re
     Ok(ws)
 }
 
+/// Output of [`Ops::rhs`].
+pub struct Rhs {
+    /// Reduced right-hand side (m × r).
+    pub rhs: Vec<f64>,
+    /// FE1 level sums b1 = Σ w v per segment (g1 × r).
+    pub b1: Vec<f64>,
+    /// Σ w v² per column.
+    pub wsq: Vec<f64>,
+    /// Σ w v per column.
+    pub wsum: Vec<f64>,
+}
+
 /// Kernels bound to a structure and a weight state.
 pub struct Ops<'a> {
     pub st: &'a Structure,
@@ -418,8 +430,7 @@ impl Ops<'_> {
     }
 
     /// Right-hand side of the reduced system for the row block `rows` (N × r, row order).
-    /// Returns (rhs m×r, b1 g1×r, Σw v² per column, Σw v per column).
-    pub fn rhs(&self, rows: &[f64], r: usize, zbuf: &mut [f64], pool: &Pool) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), RfError> {
+    pub fn rhs(&self, rows: &[f64], r: usize, zbuf: &mut [f64], pool: &Pool) -> Result<Rhs, RfError> {
         let (st, ws) = (self.st, self.ws);
         let mut y = alloc_vec(st.m * r, 0.0)?;
         let mut b1 = alloc_vec(st.g1 * r, 0.0)?;
@@ -454,7 +465,7 @@ impl Ops<'_> {
             }
         });
         let (wsq, wsum) = extra.split_at(r);
-        Ok((y, b1, wsq.to_vec(), wsum.to_vec()))
+        Ok(Rhs { rhs: y, b1, wsq: wsq.to_vec(), wsum: wsum.to_vec() })
     }
 
     /// In-place residualization of `rows` given the reduced solution `x` (m×r) and b1:
@@ -895,10 +906,8 @@ fn laplacian_from_edges(n: usize, edges: &[(u64, f64)]) -> Result<Csr, RfError> 
     }
     // Diagonal slots.
     let mut diag_at = vec![0u32; n];
-    for i in 0..n {
-        diag_at[i] = cur[i];
-        cur[i] += 1;
-    }
+    diag_at.copy_from_slice(&cur);
+    cur.iter_mut().for_each(|c| *c += 1);
     // Pass 2: entries with column > row.
     for &(k, w) in edges {
         let (lo, hi) = ((k >> 32) as usize, (k & 0xFFFF_FFFF) as usize);

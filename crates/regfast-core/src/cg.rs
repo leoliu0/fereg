@@ -3,7 +3,9 @@
 //! Each column keeps its own scalars. Column j stops when the Hestenes–Stiefel window estimate
 //! Σ_{i=k−d}^{k−1} γ_iρ_i (a lower bound on ‖x* − x_{k−d}‖²_S = W-norm error of the residualized
 //! column) falls below max(tol²·SS_k, (1e-13)²·SS₀). With an exact preconditioner (M = S on the
-//! whole reduced space) ρ_k = ‖x* − x_k‖²_S exactly and is used directly. A single escalation
+//! whole reduced space) ρ_k = ‖x* − x_k‖²_S exactly and is used directly. Independently, a
+//! column stops once ρ_k ≤ (1e-13)²·SS₀: the recursive residual has reached roundoff, and further
+//! steps break down (γ explodes) before a tight window could be satisfied. A single escalation
 //! probe at iteration 12 may strengthen the preconditioner, after which PCG restarts from the
 //! current x. Converged columns are frozen (their direction is zeroed so the shared matvec
 //! leaves them untouched). Dot products use the fixed-chunk reduction (thread-count invariant).

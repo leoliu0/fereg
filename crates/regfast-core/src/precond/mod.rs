@@ -15,8 +15,8 @@ use crate::structure::Structure;
 /// Preconditioner of one large block.
 pub enum BlockPrecond {
     Jacobi,
-    SparseChol { keep: Vec<u32>, f: sparse_chol::SparseChol },
-    ApproxChol { keep: Vec<u32>, f: approx_chol::ApproxChol },
+    SparseChol { keep: Vec<u32>, f: Box<sparse_chol::SparseChol> },
+    ApproxChol { keep: Vec<u32>, f: Box<approx_chol::ApproxChol> },
 }
 
 impl BlockPrecond {

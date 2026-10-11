@@ -128,10 +128,8 @@ fn level_counts(t: TermCodes, alive: &[bool], sep: Option<SepRule>, pool: &Pool)
             for (k, (&c, &a)) in codes.iter().zip(al).enumerate() {
                 if a {
                     count[c as usize].fetch_add(1, Ordering::Relaxed);
-                    if let Some(rule) = sep {
-                        if rule.y[base + k] != 0.0 {
-                            pos[c as usize].fetch_add(1, Ordering::Relaxed);
-                        }
+                    if sep.is_some_and(|rule| rule.y[base + k] != 0.0) {
+                        pos[c as usize].fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -213,11 +211,9 @@ fn pass_serial(t: TermCodes, alive: &mut [bool], fw: Option<&[f64]>, sep: Option
         if singletons && k == 1.0 {
             alive[obs] = false;
             s += 1;
-        } else if let Some(rule) = sep {
-            if separated(rule.family, ysum[c as usize], k) {
-                alive[obs] = false;
-                f += 1;
-            }
+        } else if sep.is_some_and(|rule| separated(rule.family, ysum[c as usize], k)) {
+            alive[obs] = false;
+            f += 1;
         }
     }
     (s, f)

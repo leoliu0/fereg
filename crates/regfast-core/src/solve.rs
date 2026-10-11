@@ -14,7 +14,7 @@ use crate::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts};
 use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
-use crate::operator::{Ops, WeightState, weight_state};
+use crate::operator::{Ops, Rhs, WeightState, weight_state};
 use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::{BlockPrecond, Precond, approx_chol::ApproxChol, dense::Dense, jacobi, sparse_chol::SparseChol};
 use crate::session::Term;
@@ -78,10 +78,8 @@ impl FeSolver {
     /// Builds the solver for session `terms` (kept order codes) and kept-order `weights`.
     pub fn new(terms: &[Term], weights: Option<&[f64]>, n: usize, cfg: SolverConfig, pool: &Pool, ctx: &Ctx) -> Result<FeSolver, RfError> {
         let mut t = Instant::now();
-        if let Some(w) = weights {
-            if w.len() != n {
-                return Err(RfError::InvalidInput("weight length differs from the kept sample".into()));
-            }
+        if weights.is_some_and(|w| w.len() != n) {
+            return Err(RfError::InvalidInput("weight length differs from the kept sample".into()));
         }
         if terms.iter().any(|t| t.codes.len() != n) {
             return Err(RfError::InvalidInput("term codes length differs from the kept sample".into()));
@@ -226,16 +224,16 @@ fn escalate_block(ops: &Ops, b: usize, cell_seg: &mut Option<Vec<u32>>, pool: &P
     ctx.check()?;
     let out = match exact_csr {
         Some(csr) => match SparseChol::try_factor(&csr, pool)? {
-            Some(f) => BlockPrecond::SparseChol { keep, f },
+            Some(f) => BlockPrecond::SparseChol { keep, f: Box::new(f) },
             None => match ApproxChol::factor(&csr) {
-                Ok(f) => BlockPrecond::ApproxChol { keep, f },
+                Ok(f) => BlockPrecond::ApproxChol { keep, f: Box::new(f) },
                 Err(_) => BlockPrecond::Jacobi,
             },
         },
         None => {
             let csr = ops.sample_block(&agg, g, &keep, pool)?;
             match ApproxChol::factor(&csr) {
-                Ok(f) => BlockPrecond::ApproxChol { keep, f },
+                Ok(f) => BlockPrecond::ApproxChol { keep, f: Box::new(f) },
                 Err(_) => BlockPrecond::Jacobi,
             }
         }
@@ -313,10 +311,8 @@ impl Absorber for FeSolver {
     }
 
     fn set_weights(&mut self, w: Option<Vec<f64>>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
-        if let Some(v) = &w {
-            if v.len() != self.st.n || v.iter().any(|x| !(x.is_finite() && *x > 0.0)) {
-                return Err(RfError::InvalidInput("weights must be positive and finite".into()));
-            }
+        if w.as_ref().is_some_and(|v| v.len() != self.st.n || v.iter().any(|x| !(x.is_finite() && *x > 0.0))) {
+            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
         }
         ctx.check()?;
         self.ws = weight_state(&self.st, w, pool)?;
@@ -340,10 +336,8 @@ impl Absorber for FeSolver {
         if z.len() != n * r {
             return Err(RfError::InvalidInput("residualize: block size differs from n·R".into()));
         }
-        if let Some(wc) = warm {
-            if wc.r != r || wc.p != m + g1 {
-                return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
-            }
+        if warm.is_some_and(|wc| wc.r != r || wc.p != m + g1) {
+            return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
         }
         if r == 0 {
             return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + g1, r, data: Vec::new() }) });
@@ -358,7 +352,7 @@ impl Absorber for FeSolver {
         log_phase(ctx, &mut t, "preconditioner");
         let ops = Ops { st: &self.st, ws: &self.ws };
         let mut zbuf = if ops.needs_zbuf(r) { alloc_vec(self.st.ncells * r, 0.0)? } else { Vec::new() };
-        let (rhs, b1, wsq, wsum) = Ops { st: &self.st, ws: &self.ws }.rhs(z, r, &mut zbuf, pool)?;
+        let Rhs { rhs, b1, wsq, wsum } = ops.rhs(z, r, &mut zbuf, pool)?;
         log_phase(ctx, &mut t, "rhs pass");
         ctx.check()?;
         let sw = self.ws.sw;
