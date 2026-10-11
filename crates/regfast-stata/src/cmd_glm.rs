@@ -7,7 +7,7 @@
 //! ppmlhdfe `itolerance()`, default 1e-9), `separation=<comma list of relu,simplex,mu>|none`
 //! (default `relu` for Poisson, `none` for logit; `fe` is a prepare key), `guess=simple|ols`,
 //! `log=0|1`, `offset=0|1`, `dof`. There is no residual output (`resid=` is rejected).
-//! See `regfast-protocol-glm.md`.
+//! See `PROTOCOL.md`.
 
 use regfast_core::{Family, GlmOptions, Guess, Layout, RfError, Separation, Spec};
 

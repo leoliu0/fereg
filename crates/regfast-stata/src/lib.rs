@@ -2,7 +2,7 @@
 //!
 //! Only `pginit` and `stata_call` are exported. Every Stata API call goes through `c/glue.c`
 //! (wrapped by [`spi`]) on Stata's thread; worker threads live only inside a call (plan D4).
-//! The protocol between the ado files and this plugin is documented in `regfast-protocol.md`.
+//! The protocol between the ado files and this plugin is documented in `PROTOCOL.md`.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{self, AssertUnwindSafe};
