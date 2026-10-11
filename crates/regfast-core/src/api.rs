@@ -118,7 +118,8 @@ pub struct Ctx<'a> {
     pub verbose: u8,
     /// Polled between kernels and iterations; `true` aborts with [`RfError::Interrupted`].
     pub interrupt: &'a dyn Fn() -> bool,
-    /// Real-time log sink (iteration logs, verbose output).
+    /// Real-time log sink (iteration logs, verbose output): one line per call, without a
+    /// trailing newline (the plugin appends it).
     pub log: &'a dyn Fn(&str),
 }
 

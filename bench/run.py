@@ -403,7 +403,7 @@ def gate(rows_by_tool: dict[str, dict]) -> tuple[str, str]:
     comps = {t: r for t, r in rows_by_tool.items() if t != "regfast"}
     finished = [float(r["median_s"]) for r in comps.values() if r["status"] == "ok"]
     best = min(finished) if finished else None
-    if rf is None:
+    if rf is None or not comps:
         return "", "n/a"
     if rf["status"] != "ok":
         return "", "FAIL"
@@ -426,7 +426,7 @@ def write_report(rows: list[dict]) -> None:
     ]
     by_group: dict[str, dict[tuple[str, str], dict[str, dict]]] = {}
     for r in rows:
-        by_group.setdefault(r["group"], {}).setdefault((r["config"], r["threads"]), {})[r["tool"]] = r
+        by_group.setdefault(r["group"], {}).setdefault((r["config"], str(r["threads"])), {})[r["tool"]] = r
     n_pass = n_fail = 0
     for g in sorted(by_group):
         cells = by_group[g]
