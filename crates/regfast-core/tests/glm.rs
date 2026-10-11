@@ -745,3 +745,48 @@ fn results_do_not_depend_on_threads() {
         }
     }
 }
+
+/// Synthetic panel large enough for several fixed chunks (n = 70 000), Poisson with zeros and
+/// logit; fast absorber only (beyond the dense reference's size limit).
+fn synthetic() -> Csv {
+    let n = 70_000usize;
+    let mut rng = regfast_core::rng::SplitMix64::new(0x61F1);
+    let a1: Vec<f64> = (0..2000).map(|_| rng.next_f64() - 0.5).collect();
+    let a2: Vec<f64> = (0..40).map(|_| 0.5 * (rng.next_f64() - 0.5)).collect();
+    let names = ["y", "yb", "x1", "x2", "fe1", "fe2", "c"].map(str::to_string).to_vec();
+    let mut cols = vec![Vec::with_capacity(n); names.len()];
+    for i in 0..n {
+        let (f1, f2) = (i % 2000, (i * 7) % 40);
+        let x1 = rng.next_f64() * 2.0 - 1.0;
+        let x2 = rng.next_f64() + 0.3 * x1;
+        let eta = 0.4 * x1 - 0.3 * x2 + a1[f1] + a2[f2];
+        let u = rng.next_f64();
+        // A count with mean ≈ exp(η) and many zeros (geometric draw).
+        let p = 1.0 / (1.0 + eta.exp());
+        let y = (u.ln() / (1.0 - p).ln()).floor().min(50.0);
+        let yb = f64::from(u8::from(rng.next_f64() < 1.0 / (1.0 + (-eta).exp())));
+        for (c, v) in cols.iter_mut().zip([y, yb, x1, x2, f1 as f64, f2 as f64, (i % 300) as f64]) {
+            c.push(v);
+        }
+    }
+    Csv { names, cols }
+}
+
+#[test]
+fn large_problems_are_thread_count_invariant() {
+    let csv = synthetic();
+    let mut p = poisson("synthetic poisson", "-", "y", &["x1", "x2"], &["fe1", "fe2"]).cluster(&[&["c"], &["fe2"]]);
+    p.mu = true;
+    let mut l = logit("synthetic logit", "yb", &["fe1", "fe2"]).cluster(&[&["c"]]);
+    l.tol = 1e-10;
+    for &kind in KINDS.iter().filter(|k| **k != AbsorberKind::Dense) {
+        for g in [&p, &l] {
+            let a = run(g, &csv, kind, 1).unwrap().res;
+            let b = run(g, &csv, kind, 4).unwrap().res;
+            assert_eq!(mat(&a, "b"), mat(&b, "b"), "{}", g.fixture);
+            assert_eq!(mat(&a, "V"), mat(&b, "V"), "{}", g.fixture);
+            assert_eq!(a.scalars, b.scalars, "{}", g.fixture);
+            assert_eq!(scalar(&a, "converged"), 1.0);
+        }
+    }
+}
