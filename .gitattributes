@@ -1,2 +1,4 @@
+* text=auto eol=lf
 *.plugin binary
 *.dta binary
+*.parquet binary
