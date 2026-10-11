@@ -101,9 +101,17 @@ pub(crate) fn matmul(a: &[f64], b: &[f64], k: usize) -> Vec<f64> {
     out
 }
 
-/// Sandwich D·M·D·scale (D symmetric).
+/// Sandwich D·M·D·scale (D symmetric), symmetrized: the two triangles of the product differ by
+/// rounding, which near collinearity is enough for Stata to reject V as nonsymmetric.
 pub(crate) fn sandwich(d: &[f64], meat: &[f64], k: usize, scale: f64) -> Vec<f64> {
     let mut v = matmul(&matmul(d, meat, k), d, k);
+    for i in 0..k {
+        for j in 0..i {
+            let s = 0.5 * (v[i * k + j] + v[j * k + i]);
+            v[i * k + j] = s;
+            v[j * k + i] = s;
+        }
+    }
     v.iter_mut().for_each(|x| *x *= scale);
     v
 }

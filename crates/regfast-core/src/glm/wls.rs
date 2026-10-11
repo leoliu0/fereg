@@ -1,8 +1,9 @@
-//! Weighted least squares on residualized row blocks: Givens QR (accurate; ppmlhdfe uses Mata
+//! Weighted least squares on residualized row blocks: QR (accurate; ppmlhdfe uses Mata
 //! `qrsolve` for these solves) and normal equations (ppmlhdfe `fastsolve`).
 //!
-//! The QR kernel accumulates the upper-triangular factor of √w·[X̃, ỹ] per fixed chunk of rows and
-//! merges chunk factors in chunk order, so results do not depend on the thread count.
+//! The QR kernel factors √w·[X̃, ỹ] per fixed chunk of rows (Householder reflections on the
+//! chunk's columns) and merges the chunk factors in chunk order (Givens rotations), so results do
+//! not depend on the thread count.
 
 use crate::par::{self, CHUNK, Pool};
 use crate::vcov::{self, INVSYM_TOL};
@@ -27,23 +28,74 @@ fn givens_add(r: &mut [f64], m: usize, row: &mut [f64]) {
     }
 }
 
+/// Σ a_i·b_i with four interleaved accumulators (vectorizes; fixed order for a given length).
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let mut s = [0.0f64; 4];
+    let (ac, ar) = a.split_at(a.len() - a.len() % 4);
+    let (bc, br) = b.split_at(ac.len());
+    for (x, y) in ac.chunks_exact(4).zip(bc.chunks_exact(4)) {
+        for q in 0..4 {
+            s[q] += x[q] * y[q];
+        }
+    }
+    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
+    for (x, y) in ar.iter().zip(br) {
+        t += x * y;
+    }
+    t
+}
+
+/// Upper-triangular R (m×m, row-major) of the column-major nc×m matrix `a` (overwritten) by
+/// Householder reflections.
+fn householder_r(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
+    let mut rr = vec![0.0; m * m];
+    for j in 0..m.min(nc) {
+        let (head, tail) = a.split_at_mut((j + 1) * nc);
+        let x = &mut head[j * nc + j..];
+        let x0 = x[0];
+        let s1 = dot(&x[1..], &x[1..]);
+        if s1 == 0.0 {
+            // Already triangular in this column: no reflection.
+            rr[j * m + j] = x0;
+            for k in j + 1..m {
+                rr[j * m + k] = tail[(k - j - 1) * nc + j];
+            }
+            continue;
+        }
+        let norm = (x0 * x0 + s1).sqrt();
+        let alpha = if x0 >= 0.0 { -norm } else { norm };
+        // v = x − α·e1 (in place); v'v = s1 + (x0 − α)².
+        x[0] = x0 - alpha;
+        let vv = s1 + x[0] * x[0];
+        rr[j * m + j] = alpha;
+        for k in j + 1..m {
+            let col = &mut tail[(k - j - 1) * nc + j..(k - j) * nc];
+            let tau = 2.0 * dot(x, col) / vv;
+            for (cv, xv) in col.iter_mut().zip(x.iter()) {
+                *cv -= tau * xv;
+            }
+            rr[j * m + k] = col[0];
+        }
+    }
+    rr
+}
+
 /// R factor (m×m, upper) of the QR decomposition of the n×m matrix whose row i is
-/// √w_i·(rows[i·r + cols[0]], …, rows[i·r + cols[m−1]]).
+/// √w_i·(rows[i·r + cols[0]], …, rows[i·r + cols[m−1]]). Diagonal signs are unspecified.
 pub(crate) fn qr_factor(rows: &[f64], r: usize, cols: &[usize], w: Option<&[f64]>, pool: &Pool) -> Vec<f64> {
     let n = rows.len().checked_div(r).unwrap_or(0);
     let m = cols.len();
     let parts = par::map_chunks(pool, n, CHUNK, |_, range| {
-        let mut acc = vec![0.0; m * m];
-        let mut buf = vec![0.0; m];
-        for i in range {
+        let nc = range.len();
+        let mut a = vec![0.0; m * nc];
+        for (ii, i) in range.enumerate() {
             let sw = w.map_or(1.0, |w| w[i].sqrt());
             let row = &rows[i * r..(i + 1) * r];
-            for (b, &c) in buf.iter_mut().zip(cols) {
-                *b = sw * row[c];
+            for (j, &c) in cols.iter().enumerate() {
+                a[j * nc + ii] = sw * row[c];
             }
-            givens_add(&mut acc, m, &mut buf);
         }
-        acc
+        householder_r(&mut a, nc, m)
     });
     let mut out = vec![0.0; m * m];
     let mut buf = vec![0.0; m];

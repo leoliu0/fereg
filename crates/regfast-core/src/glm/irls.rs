@@ -146,20 +146,8 @@ fn censor_mu(mu: &mut [f64], y: &[f64]) {
     }
 }
 
-/// Deviance on the standardized scale with ppmlhdfe's clean-up of values within macheps of 0.
-pub(crate) fn deviance(fam: Family, d: &GlmData, mu: &[f64], eta: &[f64], pool: &Pool) -> f64 {
-    let n = d.n;
-    let tw = d.tw.as_deref();
-    let raw = par::sum_chunks(pool, n, CHUNK, 1, |range, acc| {
-        for i in range {
-            let w = tw.map_or(1.0, |t| t[i]);
-            let y = d.y[i];
-            acc[0] += match fam {
-                Family::Logit => -w * family::logit_ll(y, eta[i]),
-                _ => w * (mu[i] - y) + if y > 0.0 { w * y * (y.ln() - eta[i]) } else { 0.0 },
-            };
-        }
-    })[0];
+/// ppmlhdfe's clean-up of a raw deviance sum (values within macheps of 0) and scaling by 2.
+fn finish_deviance(raw: f64, n: usize) -> f64 {
     let mut dev = raw;
     if 2.0 * dev / (n as f64) < EPS1 {
         dev = 0.0;
@@ -171,18 +159,43 @@ pub(crate) fn deviance(fam: Family, d: &GlmData, mu: &[f64], eta: &[f64], pool: 
     if dev < 0.0 { 0.0 } else { dev }
 }
 
-/// μ from η with the separated observations pinned to the boundary.
-fn update_mu(fam: Family, d: &GlmData, eta: &[f64], sep: &[bool], mu: &mut [f64], pool: &Pool) {
-    let y = &d.y;
-    pool.install(|| {
-        mu.par_iter_mut().enumerate().for_each(|(i, m)| {
-            *m = if sep[i] {
-                if fam == Family::Logit && y[i] > 0.0 { 1.0 - MU_MIN } else { MU_MIN }
-            } else {
-                family::mean(fam, eta[i])
-            };
-        })
+/// ln y for y > 0 (0 otherwise), the per-observation constant of the Poisson deviance.
+fn ln_y(fam: Family, y: &[f64], pool: &Pool) -> Result<Vec<f64>, RfError> {
+    let mut out = par::alloc_vec(if fam == Family::Logit { 0 } else { y.len() }, 0.0)?;
+    pool.install(|| out.par_iter_mut().zip(y.par_iter()).for_each(|(l, &yi)| *l = if yi > 0.0 { yi.ln() } else { 0.0 }));
+    Ok(out)
+}
+
+/// μ from η with the separated observations pinned to the boundary, and the deviance of the new
+/// μ (standardized scale) in the same pass. Each fixed chunk sums its rows in order and the chunk
+/// sums are added in chunk order, so the result does not depend on the thread count.
+fn update_mu_deviance(fam: Family, d: &GlmData, eta: &[f64], sep: &[bool], lny: &[f64], mu: &mut [f64], pool: &Pool) -> f64 {
+    let (y, tw) = (&d.y, d.tw.as_deref());
+    let parts: Vec<f64> = pool.install(|| {
+        mu.par_chunks_mut(CHUNK)
+            .enumerate()
+            .map(|(c, mc)| {
+                let base = c * CHUNK;
+                let mut acc = 0.0;
+                for (k, m) in mc.iter_mut().enumerate() {
+                    let i = base + k;
+                    let yi = y[i];
+                    *m = if sep[i] {
+                        if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN }
+                    } else {
+                        family::mean(fam, eta[i])
+                    };
+                    let w = tw.map_or(1.0, |t| t[i]);
+                    acc += match fam {
+                        Family::Logit => -w * family::logit_ll(yi, eta[i]),
+                        _ => w * (*m - yi) + if yi > 0.0 { w * yi * (lny[i] - eta[i]) } else { 0.0 },
+                    };
+                }
+                acc
+            })
+            .collect()
     });
+    finish_deviance(parts.iter().fold(0.0, |a, p| a + p), d.n)
 }
 
 /// Runs IRLS from `mu` (updated in place, as are `eta`) until convergence.
@@ -220,6 +233,10 @@ pub(crate) fn irls(
     let mut old_eta = vec![0.0; n];
     let mut z = par::alloc_vec(n, 0.0)?;
     let mut w = par::alloc_vec(n, 0.0)?;
+    let mut block = par::alloc_vec(n * r, 0.0)?;
+    let mut resid = par::alloc_vec(n, 0.0)?;
+    let lny = ln_y(fam, &d.y, pool)?;
+    let ztol = c.tol.min(1e-12);
     let mut iter = 0usize;
     loop {
         iter += 1;
@@ -232,28 +249,33 @@ pub(crate) fn irls(
         // (Mata: a missing prediction compares as +∞, so it allows the fast solver.)
         let fast = k > 0 && tol_in > c.tol * 11.0 && (predicted.is_nan() || predicted > c.tol);
 
-        // (a) weights, (b) working variable.
+        // (a) weights, (b) working variable, written with X into the [z, X] block (values within
+        // ztol of 0 edited to 0, Mata `_edittozerotol`). Fixed chunks of plain loops.
         let tw = d.tw.as_deref();
         let off = d.off.as_deref();
         pool.install(|| {
-            w.par_iter_mut().zip(z.par_iter_mut()).enumerate().for_each(|(i, (wi, zi))| {
-                *wi = tw.map_or(1.0, |t| t[i]) * family::irls_weight(fam, mu[i]);
-                let e = eta[i] - off.map_or(0.0, |o| o[i]);
-                *zi = family::working(fam, e, d.y[i], mu[i]);
-            })
+            block.par_chunks_mut(CHUNK * r).zip(w.par_chunks_mut(CHUNK).zip(z.par_chunks_mut(CHUNK))).enumerate().for_each(
+                |(c, (bc, (wc, zc)))| {
+                    let base = c * CHUNK;
+                    for (j, ((row, wi), zi)) in bc.chunks_exact_mut(r).zip(wc.iter_mut()).zip(zc.iter_mut()).enumerate() {
+                        let i = base + j;
+                        *wi = tw.map_or(1.0, |t| t[i]) * family::irls_weight(fam, mu[i]);
+                        let e = eta[i] - off.map_or(0.0, |o| o[i]);
+                        *zi = family::working(fam, e, d.y[i], mu[i]);
+                        row[0] = *zi;
+                        row[1..].copy_from_slice(&d.x[i * k..(i + 1) * k]);
+                        for v in row.iter_mut() {
+                            if v.abs() <= ztol {
+                                *v = 0.0;
+                            }
+                        }
+                    }
+                },
+            )
         });
         abs.set_weights(Some(w.clone()), pool, ctx)?;
 
         // (c)-(d) residualize [z, X].
-        let mut block = par::alloc_vec(n * r, 0.0)?;
-        pool.install(|| {
-            block.par_chunks_mut(r).enumerate().for_each(|(i, row)| {
-                row[0] = z[i];
-                row[1..].copy_from_slice(&d.x[i * k..(i + 1) * k]);
-            })
-        });
-        let ztol = c.tol.min(1e-12);
-        edit_to_zero(&mut block, ztol, pool);
         let opts = SolveOpts { tol: tol_in, maxiter: c.inner_maxiter, want_coefs: true };
         let info = abs.residualize(&mut block, r, &opts, warm.as_ref(), pool, ctx)?;
         edit_to_zero(&mut block, ztol, pool);
@@ -267,18 +289,19 @@ pub(crate) fn irls(
         } else {
             wls::qr_coefs(&block, r, 0, &xcols, Some(&w), pool)
         };
-        let mut resid = par::alloc_vec(n, 0.0)?;
-        pool.install(|| {
-            resid.par_iter_mut().enumerate().for_each(|(i, e)| {
-                let row = &block[i * r..(i + 1) * r];
-                *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
-            })
-        });
 
-        // (e) η = z − resid (+ offset).
+        // (e) working residuals and η = z − resid (+ offset).
         old_eta.copy_from_slice(eta);
         pool.install(|| {
-            eta.par_iter_mut().enumerate().for_each(|(i, e)| *e = z[i] - resid[i] + off.map_or(0.0, |o| o[i]))
+            resid.par_chunks_mut(CHUNK).zip(eta.par_chunks_mut(CHUNK)).enumerate().for_each(|(c, (rc, ec))| {
+                let base = c * CHUNK;
+                for (j, (e, et)) in rc.iter_mut().zip(ec.iter_mut()).enumerate() {
+                    let i = base + j;
+                    let row = &block[i * r..(i + 1) * r];
+                    *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
+                    *et = z[i] - *e + off.map_or(0.0, |o| o[i]);
+                }
+            })
         });
         if c.check_sep {
             // ppmlhdfe: tolerance in terms of μ, made more conservative when η is low for y > 0.
@@ -298,17 +321,15 @@ pub(crate) fn irls(
             n_sep = sep.iter().filter(|s| **s).count();
         }
         // (f) μ, deviance.
-        update_mu(fam, d, eta, &sep, mu, pool);
         let old_dev = dev;
-        dev = deviance(fam, d, mu, eta, pool);
+        dev = update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool);
         let mut halved = false;
         if fam == Family::Logit && iter > 1 {
             let mut h = 0;
             let worse = |dev: f64| dev.is_nan() || dev > old_dev + 1e-9 * old_dev.abs().max(1.0);
             while h < MAX_HALVINGS && worse(dev) {
                 pool.install(|| eta.par_iter_mut().zip(old_eta.par_iter()).for_each(|(e, o)| *e = 0.5 * (*e + o)));
-                update_mu(fam, d, eta, &sep, mu, pool);
-                dev = deviance(fam, d, mu, eta, pool);
+                dev = update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool);
                 h += 1;
                 halved = true;
             }
@@ -320,6 +341,9 @@ pub(crate) fn irls(
         if iter > 1 {
             let denom = dev.min(old_dev).max(0.1);
             eps = delta.abs() / denom;
+            // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations ppmlhdfe
+            // spends tightening tol_in to `highest` also refine β beyond eps < tol (stopping at
+            // eps < tol moves β by ~2e-6 relative on fixture p_problem1).
             if eps < c.tol && !fast && (tol_in <= 1.1 * c.highest || c.exact) {
                 ok += 1;
             }
