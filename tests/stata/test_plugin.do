@@ -2,6 +2,12 @@
 * Run from tests/stata after scripts/build_plugin.sh:   stata-mp -b do test_plugin.do
 * Needs reghdfe 6.13.1 and ppmlhdfe 2.3.3 (sample/singleton parity).
 * Steps that depend on estimators still being stubs in regfast-core print "PENDING:".
+*
+* Break key: batch mode (stata-mp -b) cannot deliver Break (SIGINT terminates a batch or
+* non-terminal Stata), so it is not exercised here. Verified manually in console Stata on a
+* pseudo-terminal: `plugin call _rf_plugin price, selftest "spin=30"` + Ctrl-C prints
+* --Break--, returns r(1) within ~50 ms polling, and the plugin keeps working afterwards.
+* tests/mockhost covers the same path on every OS by setting the stop flag (expects r(1)).
 
 version 16
 clear all
