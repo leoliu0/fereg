@@ -49,16 +49,17 @@ program SplitSpec
 		gettoken bar cmp : rest, parse("|")
 	}
 	local 0 , `cmp'
-	syntax [, xs(string) *]
+	syntax [, xs(string) dtol(real 1e-6) *]
 	local spec `"`spec'"'
 	if (!strpos(`"`spec'"', ",")) local spec `"`spec',"'
 	if (!strpos(`"`spec'"', "sep(")) local spec `"`spec' sep(fe relu)"'
 	c_local spec `"`spec'"'
 	c_local xs `xs'
+	c_local dtol `dtol'
 	c_local cmp `options'
 end
 
-* dcheck <arguments> : like check, plus d() and saved FEs (sum compared with d) and predict
+* dcheck <arguments> [|| dtol(#) ...] : like check, plus d() and every predict option (rtol dtol)
 capture program drop dcheck
 program dcheck
 	SplitSpec `0'
@@ -71,10 +72,10 @@ program dcheck
 	ppmlfast `spec' d(__dF)
 	estimates store F
 	rf_compare_e R F, xscalars($PX `xs') xmacros($PM d) `cmp'
-	cmpvar d __dF __dR 1e-6
+	cmpvar d __dF __dR `dtol'
 	foreach o in mu xb xbd eta deviance response pearson anscombe scores working {
 		quietly predict double __pF_`o', `o'
-		cmpvar "predict `o'" __pF_`o' __pR_`o' 1e-6
+		cmpvar "predict `o'" __pF_`o' __pR_`o' `dtol'
 	}
 	drop __dR __dF __pR* __pF*
 end
@@ -159,6 +160,7 @@ di as result "ppmlhdfe test-suite datasets passed"
 * ---------------------------------------------------------------------------
 sysuse auto, clear
 gen double W = foreign + 1
+gen double m10 = mpg / 10
 check price weight gear length, absorb(turn trunk) vce(robust) keepsingletons tol(1e-12)
 check price weight gear length, absorb(turn trunk) vce(cluster turn trunk) keepsingletons tol(1e-12)
 check price weight gear length, absorb(turn trunk) vce(cluster turn) tol(1e-12)
@@ -180,7 +182,15 @@ check price weight gear length, absorb(turn) guess(ols) tol(1e-10)
 check price weight i.foreign, absorb(turn) tol(1e-10)
 check price weight gear length, absorb(turn trunk) vce(robust) tol(1e-10) irr
 dcheck price weight gear length, absorb(turn trunk) tol(1e-12)
-dcheck price weight gear length, absorb(turn) offset(mpg) tol(1e-10) keepsingletons
+* d() with an offset: ppmlhdfe computes d = z - resid - xb with the working variable z of the
+* previous IRLS iteration, so its d is constant within FE groups only up to the last IRLS step
+* (O(sqrt(tol)) in eta). That error is ~1e-4 with a single FE (exact partial-out, ppmlhdfe stops
+* after few iterations) and explodes on degenerate fits such as offset(mpg) on price, where
+* ppmlhdfe's mu is ~0 for some observations and its d varies by 1e4 within a turn group (its
+* group first-order conditions fail; ppmlfast's d is exactly constant within groups). The cases
+* below are well-conditioned two-FE models where ppmlhdfe's d is accurate to ~1e-7.
+dcheck price weight gear length, absorb(turn trunk) offset(m10) tol(1e-12)
+dcheck price weight gear length, absorb(turn trunk) exposure(mpg) tol(1e-12)
 dcheck price weight gear length, noa tol(1e-10)
 
 * savefe: the sum of the saved FEs equals d
@@ -212,7 +222,25 @@ di as result "nlswork passed"
 * ---------------------------------------------------------------------------
 loaddata gravity
 check trade rta x2, absorb(exp#year imp#year exp#imp) vce(cluster exp#imp) tol(1e-10)
-dcheck trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10)
+* ppmlhdfe's d here satisfies the FE first-order conditions sum_g(y - mu) = 0 only to ~2e-6 (its
+* d uses the previous IRLS iteration's working variable and the MAP inner tolerance; the error
+* does not shrink with tol()/itol()); it reaches 1.3e-5 at an observation with mu = 0.07.
+* ppmlfast's d satisfies them to ~1e-12, asserted below. predict working = (y - mu)/mu amplifies
+* the difference at small mu to 7e-6 (relative to its max).
+dcheck trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10) || dtol(1e-5)
+qui ppmlfast trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10) d(dG)
+qui predict double muG, mu
+gen double rG = trade - muG
+foreach g in "exp year" "imp year" "exp imp" {
+	capture drop focG
+	qui bys `g': egen double focG = total(rG)
+	qui su focG
+	if (max(abs(r(min)), abs(r(max))) > 1e-9) {
+		di as err "FAIL first-order conditions of d by `g': " %9.2e max(abs(r(min)), abs(r(max)))
+		exit 9
+	}
+}
+drop dG muG rG focG
 di as result "gravity passed"
 
 * ---------------------------------------------------------------------------
@@ -223,6 +251,12 @@ gen double yneg = price - 5000
 rcof "noi ppmlfast yneg weight, absorb(turn)" == 459
 rcof "noi ppmlfast price weight, absorb(turn) exposure(mpg) offset(mpg)" == 198
 rcof "noi ppmlfast price weight, absorb(turn) sep(bogus)" == 198
+qui ppmlfast price weight, absorb(turn) d(dH)
 rcof "noi predict double h, hat" == 198
+rcof "noi predict double h, cooksd" == 198
+rcof "noi predict double h, likelihood" == 198
+qui ppmlfast price weight, absorb(turn)
+rcof "noi predict double h, mu" != 0
+predict double h, xb
 
 di as result "test_ppml passed"
