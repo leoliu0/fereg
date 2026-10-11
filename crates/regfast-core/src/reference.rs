@@ -195,7 +195,7 @@ impl Absorber for DenseAbsorber {
                 coefs[k * r + col] = a;
             }
         }
-        Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then_some(FeCoefs { p, r, data: coefs }) })
+        Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then_some(FeCoefs { p, r, data: coefs }), exact: true })
     }
 
     fn fit_rows(&self, c: &FeCoefs, col: usize, _pool: &Pool) -> Vec<f64> {

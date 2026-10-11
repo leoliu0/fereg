@@ -3,7 +3,8 @@
 //! Each column keeps its own scalars. Column j stops when the Hestenes–Stiefel window estimate
 //! Σ_{i=k−d}^{k−1} γ_iρ_i (a lower bound on ‖x* − x_{k−d}‖²_S = W-norm error of the residualized
 //! column) falls below max(tol²·SS_k, (1e-13)²·SS₀). With an exact preconditioner (M = S on the
-//! whole reduced space) ρ_k = ‖x* − x_k‖²_S exactly and is used directly. Independently, a
+//! whole reduced space, a reflexive generalized inverse) the solution is x + M⁻¹(rhs − S x): it
+//! is applied directly, with no matvec or stopping check. Independently, a
 //! column stops once ρ_k ≤ (1e-13)²·SS₀: the recursive residual has reached roundoff, and further
 //! steps break down (γ explodes) before a tight window could be satisfied. At iterations 6 and
 //! 12 after the start and after every restart the system is probed ([`CgSystem::probe`]) with
@@ -72,6 +73,8 @@ pub trait CgSystem {
 pub struct CgOutcome {
     pub iterations: usize,
     pub escalated: bool,
+    /// The final (re)start used an exact preconditioner: x solves S x = rhs directly.
+    pub exact: bool,
 }
 
 /// Per-column dot products of two m × w row-major blocks.
@@ -111,6 +114,7 @@ pub fn pcg(
     let mut active: Vec<bool> = ss0.iter().map(|&s| s > 0.0).collect();
     let mut iterations = 0usize;
     let mut escalated = false;
+    let mut exact = false;
     let floor: Vec<f64> = ss0.iter().map(|s| 1e-26 * s).collect();
     let mut thr = vec![0.0; w];
 
@@ -125,6 +129,24 @@ pub fn pcg(
         }
         ctx.check()?;
         sys.precond(&r, &mut z, pool);
+        if sys.exact() {
+            // x* = x + M⁻¹(rhs − S x) for the active columns (the others stay frozen).
+            let act = &active;
+            pool.install(|| {
+                x.par_chunks_mut(CHUNK * w).zip(z.par_chunks(CHUNK * w)).for_each(|(xc, zc)| {
+                    for (xr, zr) in xc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
+                        for j in 0..w {
+                            if act[j] {
+                                xr[j] += zr[j];
+                            }
+                        }
+                    }
+                })
+            });
+            iterations += 1;
+            exact = true;
+            break 'restart;
+        }
         p.copy_from_slice(&z);
         let mut rho = dots(&r, &z, w, pool);
         for j in 0..w {
@@ -133,7 +155,6 @@ pub fn pcg(
             }
         }
         mask_inactive(&mut p, &active, w, pool);
-        let exact = sys.exact();
         let mut ring = vec![[0.0f64; WINDOW]; w];
         let mut rho_from = vec![f64::NAN; w];
         let mut rho_early = vec![f64::NAN; w];
@@ -173,12 +194,7 @@ pub fn pcg(
                 ring[j][(k - 1) % WINDOW] = gamma[j] * rho[j];
                 let ssk = ss1[j] - (xb[j] + xr[j]);
                 thr[j] = (tol * tol * ssk).max(floor[j]);
-                let thr = thr[j];
-                let done = if exact {
-                    rho_new[j] <= thr
-                } else {
-                    k >= WINDOW && ring[j].iter().sum::<f64>() <= thr
-                };
+                let done = k >= WINDOW && ring[j].iter().sum::<f64>() <= thr[j];
                 // The preconditioned residual reached roundoff: the recursion cannot improve x
                 // further and more steps only amplify rounding errors (breakdown).
                 let at_roundoff = rho_new[j] <= floor[j];
@@ -223,7 +239,7 @@ pub fn pcg(
             rho = rho_new;
         }
     }
-    Ok(CgOutcome { iterations, escalated })
+    Ok(CgOutcome { iterations, escalated, exact })
 }
 
 fn par_zip3(out: &mut [f64], a: &[f64], b: &[f64], pool: &Pool, f: impl Fn(&mut f64, f64, f64) + Sync) {
