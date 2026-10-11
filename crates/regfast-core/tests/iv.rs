@@ -375,7 +375,8 @@ fn check_fixture(f: &Fixture, kind: AbsorberKind, max: &mut MaxErr) {
         }
     }
     for (name, _) in &res.scalars {
-        assert!(scal.iter().any(|(k, _)| k == name), "{what}: produced {name} which ivreghdfe does not post");
+        // `ic` (solver iterations) feeds the ado's convergence message only.
+        assert!(name == "ic" || scal.iter().any(|(k, _)| k == name), "{what}: produced {name} which ivreghdfe does not post");
     }
 }
 

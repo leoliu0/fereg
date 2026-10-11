@@ -33,6 +33,10 @@ program _rf_load
 
 	* Result locals set by the plugin (protocol: locals _rf_<name>)
 	local forward version token status
+	* IV: Stock-Yogo critical values for (L1, K1) and for a single endogenous regressor
+	foreach t in ivbias5 ivbias10 ivbias20 ivbias30 ivsize10 ivsize15 ivsize20 ivsize25 {
+		local forward `forward' sy_`t' sy1_`t'
+	}
 	foreach name of local forward {
 		local _rf_`name'
 	}

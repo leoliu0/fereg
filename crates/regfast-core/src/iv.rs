@@ -461,6 +461,8 @@ impl Session {
         scal(&mut res, "df_a_nested", dof.df_a_nested as f64);
         scal(&mut res, "num_singletons", self.num_singletons as f64);
         scal(&mut res, "N_full", big_n + self.num_singletons as f64);
+        // Solver iterations, for the ado's "converged in # iterations" line (not an e() scalar).
+        scal(&mut res, "ic", info.iterations as f64);
 
         // Identification statistics (ranktest) and Stock–Yogo critical values.
         if k1 > 0 {
@@ -479,10 +481,14 @@ impl Session {
             let pad = |v: Vec<f64>| (0..ne).map(|i| v.get(i).copied().unwrap_or(f64::NAN)).collect::<Vec<_>>();
             res.matrices.push(NamedMat { name: "ccev".into(), rows: 1, cols: ne, data: pad(ccev) });
             res.matrices.push(NamedMat { name: "cdev".into(), rows: 1, cols: ne, data: pad(cdev) });
+            // Stock–Yogo critical values for (L1, K1) as `sy_<table>` and for a single
+            // endogenous regressor (the `ffirst` summary) as `sy1_<table>`; display only.
             for (name, _, table) in stock_yogo::IV_TABLES {
-                let cv = table(l1, k1);
-                if cv.is_finite() {
-                    res.macros.push((format!("sy_{name}"), format!("{cv}")));
+                for (prefix, k) in [("sy", k1), ("sy1", 1)] {
+                    let cv = table(l1, k);
+                    if cv.is_finite() {
+                        res.macros.push((format!("{prefix}_{name}"), format!("{cv}")));
+                    }
                 }
             }
         }
