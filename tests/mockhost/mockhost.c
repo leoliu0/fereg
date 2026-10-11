@@ -329,9 +329,14 @@ static void test_selftest(void) {
     int rc = call(vars, 101, 900, args);
     double chk = 0.0, got, nobs;
     for (int i = 100; i < 900; i++) {
-        chk += 1.0 * num[V_Y][i];
-        chk += 2.0 * num[V_X1][i];
-        chk += 3.0 * num[V_X2][i];
+        /* volatile products: compilers may otherwise fuse "chk += a*b" into an FMA
+           (clang does on arm64), which rounds differently from the plugin's sum */
+        volatile double t1 = 1.0 * num[V_Y][i];
+        volatile double t2 = 2.0 * num[V_X1][i];
+        volatile double t3 = 3.0 * num[V_X2][i];
+        chk += t1;
+        chk += t2;
+        chk += t3;
         /* V_SPARE was missing before the call: contributes 0 */
     }
     if (rc) { fail("selftest", "nonzero rc"); return; }

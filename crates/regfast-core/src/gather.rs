@@ -14,9 +14,25 @@ pub fn is_local(order: &[u32]) -> bool {
     2 * near >= order.len() - 1
 }
 
-/// `out[k·R + j] = cols[j][order[k]]`.
+/// `out[k·R + j] = cols[j][order[k]]`. When `order` is local the columns are read directly;
+/// otherwise they are first transposed to kept-order rows (sequential reads) and the rows are
+/// then permuted (one random read of R contiguous values per row).
 pub fn gather_rows(order: &[u32], cols: &[&[f64]], pool: &Pool) -> Result<Vec<f64>, RfError> {
     let r = cols.len();
+    if r > 1 && !is_local(order) {
+        let mut kept = alloc_vec(order.len() * r, 0.0)?;
+        pool.install(|| {
+            kept.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
+                let base = c * CHUNK;
+                for (k, row) in block.chunks_exact_mut(r).enumerate() {
+                    for (j, v) in row.iter_mut().enumerate() {
+                        *v = cols[j][base + k];
+                    }
+                }
+            })
+        });
+        return permute_rows(order, &kept, r, pool);
+    }
     let mut out = alloc_vec(order.len() * r, 0.0)?;
     if r == 0 {
         return Ok(out);
