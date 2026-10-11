@@ -188,6 +188,24 @@ fn ring_graph_escalates_and_converges_fast() {
     assert!(info.iterations <= 30, "ring graph took {} iterations", info.iterations);
 }
 
+/// The approx-chol escalations: on the exact block (sparse Cholesky disabled) and on the
+/// clique-sampled Laplacian (assembly budget exceeded).
+#[test]
+fn approx_chol_escalations() {
+    let approx_exact = SolverConfig { sparse_chol: false, ..all_large() };
+    let sampled_nnz = SolverConfig { max_block_nnz: 0, ..all_large() };
+    let sampled_work = SolverConfig { max_assembly_work: 0, ..limit(50) };
+    for cfg in [approx_exact, sampled_nnz] {
+        let info = check(&ring(400, 800), cfg, 2);
+        assert!(info.escalated, "ring graph must escalate ({cfg:?})");
+        assert!(info.iterations <= 60, "ring graph took {} iterations ({cfg:?})", info.iterations);
+    }
+    for cfg in [approx_exact, sampled_work] {
+        let info = check(&band(400, 800, 3, 10, true), cfg, 2);
+        assert!(info.escalated, "band graph must escalate ({cfg:?})");
+    }
+}
+
 /// Band graph on a ring of firms: indiv i works at `width` consecutive firms starting at i/2,
 /// one observation per firm, each in a random year.
 fn band(nfirm: usize, nindiv: usize, width: usize, nyear: usize, weighted: bool) -> Data {
@@ -275,8 +293,15 @@ fn noabsorb_and_single_fe_are_closed_form() {
 
 #[test]
 fn set_weights_with_warm_start() {
-    let z_path = SolverConfig { small_limit: 20, acc_bytes_max: 0 };
-    for (d, cfg) in [(bipartite(1500, &[150, 20, 60], false, 18), all_large()), (difficult(150, 10, 300, false), z_path)] {
+    let z_path = SolverConfig { small_limit: 20, acc_bytes_max: 0, ..SolverConfig::default() };
+    let designs = [
+        (bipartite(1500, &[150, 20, 60], false, 18), all_large()),
+        (difficult(150, 10, 300, false), z_path),
+        // Escalates on the first solve; later solves run with the stale factor / refactor.
+        (ring(400, 800), all_large()),
+        (band(400, 800, 3, 10, false), SolverConfig { max_block_nnz: 0, ..limit(50) }),
+    ];
+    for (d, cfg) in designs {
         let mut p = setup(&d, cfg, 2);
         let (f, dn, info0, _) = run(&mut p, None);
         assert!(max_rel(&f, &dn) <= 1e-9);
@@ -292,10 +317,13 @@ fn set_weights_with_warm_start() {
             p.fast.set_weights(Some(wf), pool, &ctx).unwrap();
         })
         .unwrap();
-        for _ in 0..2 {
+        for round in 0..3 {
+            if round == 2 {
+                p.fast.request_refactor();
+            }
             let (f, dn, info, _) = run(&mut p, Some(&coefs));
             let err = max_rel(&f, &dn);
-            assert!(err <= 1e-9, "after set_weights: {err:e} ({} iterations)", info.iterations);
+            assert!(err <= 1e-9, "after set_weights (round {round}): {err:e} ({} iterations)", info.iterations);
         }
     }
 }

@@ -33,11 +33,23 @@ pub struct SolverConfig {
     /// Largest reduced vector (bytes, all R columns) scattered entirely through per-task
     /// accumulators; larger large blocks use the M×R scratch and level pulls.
     pub acc_bytes_max: usize,
+    /// Assembly-work limit E_b for exact assembly of a large block.
+    pub max_assembly_work: u64,
+    /// Structural nonzeros limit of an exactly assembled block.
+    pub max_block_nnz: u64,
+    /// Try the exact sparse Cholesky of an assembled block (else approx-chol of it).
+    pub sparse_chol: bool,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
-        SolverConfig { small_limit: structure::SMALL_LIMIT, acc_bytes_max: crate::operator::ACC_BYTES_MAX }
+        SolverConfig {
+            small_limit: structure::SMALL_LIMIT,
+            acc_bytes_max: crate::operator::ACC_BYTES_MAX,
+            max_assembly_work: MAX_ASSEMBLY_WORK,
+            max_block_nnz: MAX_BLOCK_NNZ,
+            sparse_chol: true,
+        }
     }
 }
 
@@ -65,6 +77,7 @@ pub struct FeSolver {
     /// CG count of the first solve after the last (re)factorization.
     base_iters: Option<usize>,
     need_refactor: bool,
+    cfg: SolverConfig,
 }
 
 fn log_phase(ctx: &Ctx, t: &mut Instant, what: &str) {
@@ -123,6 +136,7 @@ impl FeSolver {
             large_fresh: true,
             base_iters: None,
             need_refactor: false,
+            cfg,
         })
     }
 
@@ -133,6 +147,15 @@ impl FeSolver {
     /// Names of the current large-block preconditioners.
     pub fn precond_kinds(&self) -> Vec<&'static str> {
         self.pre.large.iter().map(BlockPrecond::name).collect()
+    }
+
+    /// Rebuilds the escalated large-block factors for the current weights at the next
+    /// `residualize` (numeric refactorization; the automatic rule does this when a solve with a
+    /// stale factor needs more than max(30, 2 × the post-factorization count) iterations).
+    pub fn request_refactor(&mut self) {
+        if self.escalated {
+            self.need_refactor = true;
+        }
     }
 
     fn ensure_basic(&mut self, pool: &Pool) -> Result<(), RfError> {
@@ -173,7 +196,7 @@ impl FeSolver {
                 _ => false,
             };
             if !refreshed {
-                self.pre.large[i] = escalate_block(&ops, b, &mut cell_seg, pool, ctx)?;
+                self.pre.large[i] = escalate_block(&ops, b, &self.cfg, &mut cell_seg, pool, ctx)?;
             }
             ctx.check()?;
         }
@@ -202,7 +225,7 @@ fn kept_levels(ops: &Ops, b: usize) -> Vec<u32> {
 }
 
 /// Escalated preconditioner of large block `b` (plan D5 (b)).
-fn escalate_block(ops: &Ops, b: usize, cell_seg: &mut Option<Vec<u32>>, pool: &Pool, ctx: &Ctx) -> Result<BlockPrecond, RfError> {
+fn escalate_block(ops: &Ops, b: usize, cfg: &SolverConfig, cell_seg: &mut Option<Vec<u32>>, pool: &Pool, ctx: &Ctx) -> Result<BlockPrecond, RfError> {
     let t = Instant::now();
     let keep = kept_levels(ops, b);
     let g = ops.st.blocks[b].g;
@@ -210,20 +233,20 @@ fn escalate_block(ops: &Ops, b: usize, cell_seg: &mut Option<Vec<u32>>, pool: &P
     ctx.check()?;
     let mut exact_csr = None;
     let mut nnz_total = 0u64;
-    if agg.work <= MAX_ASSEMBLY_WORK {
+    if agg.work <= cfg.max_assembly_work {
         if cell_seg.is_none() {
             *cell_seg = Some(ops.st.cell_segments(pool)?);
         }
         let cs = cell_seg.as_deref().expect("set above");
         let row_nnz = ops.block_row_nnz(b, &agg, cs, pool);
         nnz_total = row_nnz.iter().map(|&v| u64::from(v)).sum();
-        if nnz_total <= MAX_BLOCK_NNZ {
+        if nnz_total <= cfg.max_block_nnz {
             exact_csr = Some(ops.assemble_block(b, &agg, cs, &row_nnz, &keep, pool)?);
         }
     }
     ctx.check()?;
     let out = match exact_csr {
-        Some(csr) => match SparseChol::try_factor(&csr, pool)? {
+        Some(csr) => match if cfg.sparse_chol { SparseChol::try_factor(&csr, pool)? } else { None } {
             Some(f) => BlockPrecond::SparseChol { keep, f: Box::new(f) },
             None => match ApproxChol::factor(&csr) {
                 Ok(f) => BlockPrecond::ApproxChol { keep, f: Box::new(f) },
@@ -257,6 +280,7 @@ struct System<'a> {
     w: usize,
     can_escalate: bool,
     large_fresh: bool,
+    cfg: &'a SolverConfig,
 }
 
 impl CgSystem for System<'_> {
@@ -288,7 +312,7 @@ impl CgSystem for System<'_> {
         let mut changed = false;
         for i in 0..self.pre.large.len() {
             if matches!(self.pre.large[i], BlockPrecond::Jacobi) {
-                let bp = escalate_block(&self.ops, ns + i, &mut cell_seg, pool, ctx)?;
+                let bp = escalate_block(&self.ops, ns + i, self.cfg, &mut cell_seg, pool, ctx)?;
                 changed |= !matches!(bp, BlockPrecond::Jacobi);
                 self.pre.large[i] = bp;
             }
@@ -386,6 +410,7 @@ impl Absorber for FeSolver {
                 w: r,
                 can_escalate,
                 large_fresh: self.large_fresh,
+                cfg: &self.cfg,
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
