@@ -121,14 +121,14 @@ pub(crate) fn relu(abs: &mut dyn Absorber, d: &GlmData, inner_maxiter: usize, po
             }
             num_sep = (0..n).filter(|&i| boundary[i] && xbd[i] > 0.0).count();
             ctx.log(&format!(
-                "{{txt}} $$ Stopping (no negative residuals); separation found in {{res}}{:.6}{{txt}} observations ({iter} iterations and {total_iter} subiterations)\n",
+                "{{txt}} $$ Stopping (no negative residuals); separation found in {{res}}{:.6}{{txt}} observations ({iter} iterations and {total_iter} subiterations)",
                 num_sep as f64
             ));
             found = true;
             break;
         }
         if iter == RELU_MAXITER {
-            ctx.log("{err}(ReLU separation check: maximum number of iterations reached; aborting)\n");
+            ctx.log("{err}(ReLU separation check: maximum number of iterations reached; aborting)");
             break;
         }
         // ReLU update of the working variable on the boundary sample.
@@ -143,7 +143,7 @@ pub(crate) fn relu(abs: &mut dyn Absorber, d: &GlmData, inner_maxiter: usize, po
         return Ok(None);
     }
     ctx.log(&format!(
-        "{{txt}}(ReLU method dropped {num_sep} separated observation{} in {iter} iterations)\n",
+        "{{txt}}(ReLU method dropped {num_sep} separated observation{} in {iter} iterations)",
         if num_sep > 1 { "s" } else { "" }
     ));
     Ok(Some((0..n).map(|i| boundary[i] && xbd[i] > 0.0).collect()))

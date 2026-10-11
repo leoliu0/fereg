@@ -340,7 +340,6 @@ pub(crate) fn irls(
             if n_sep > 0 {
                 line.push_str(&format!("{{col 108}}{{txt}} sep.obs. = {{res}}{n_sep}"));
             }
-            line.push('\n');
             ctx.log(&line);
         }
 

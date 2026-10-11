@@ -127,10 +127,7 @@ impl Session {
         if !(g.tol > 0.0 && g.tol <= 1.0 && g.itol > 0.0 && g.maxiter > 0) {
             return Err(RfError::InvalidInput("glm: tolerances must be in (0, 1] and maxiter positive".into()));
         }
-        // Small-n rule: no more threads than fixed chunks of work (switch to par::threads_for
-        // once it lands on main).
-        let threads = par::resolve_threads(ctx.threads).min(self.n().div_ceil(CHUNK)).max(1);
-        par::with_pool(threads, |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, ctx, pool))?
     }
 
     /// ppmlhdfe `remove_collinears` on the current sample, with the true weights.
@@ -226,7 +223,7 @@ impl Session {
         }
         let more = rep.singletons + rep.fe_separated;
         if more > 0 {
-            ctx.log(&format!("{{txt}}(dropped {more} singleton observation{})\n", plural(more as usize)));
+            ctx.log(&format!("{{txt}}(dropped {more} singleton observation{})", plural(more as usize)));
         }
         Ok(rep)
     }
@@ -269,7 +266,7 @@ impl Session {
             y.iter_mut().for_each(|v| *v /= sd_y);
             let min_pos = y.iter().copied().filter(|v| *v > 0.0).fold(f64::INFINITY, f64::min);
             if min_pos <= 1e-6 {
-                ctx.log(&format!("{{err}}warning: dependent variable takes very low values after standardizing ({min_pos:e})\n"));
+                ctx.log(&format!("{{err}}warning: dependent variable takes very low values after standardizing ({min_pos:e})"));
             }
         }
         let sd_x: Vec<f64> = (0..nx).map(|j| standardize_sd((0..n0).map(|i| x[i * nx + j]))).collect();
@@ -327,7 +324,7 @@ impl Session {
         let mut subiter = out.subiter;
         if out.n_sep > 0 {
             let n_sep = out.n_sep;
-            ctx.log(&format!("{{txt}}(IRLS step detected {n_sep} separated observation{})\n", plural(n_sep)));
+            ctx.log(&format!("{{txt}}(IRLS step detected {n_sep} separated observation{})", plural(n_sep)));
             num_sep += n_sep as u64;
             let sep = std::mem::take(&mut out.separated);
             drop(out);
@@ -340,11 +337,11 @@ impl Session {
             subiter += out.subiter;
         }
         if g.log {
-            ctx.log("{txt}{hline 108}\n");
-            ctx.log("{txt}(legend: {res}p{txt}: exact partial-out   {res}s{txt}: exact solver   {res}h{txt}: step-halving   {res}o{txt}: epsilon below tolerance)\n");
+            ctx.log("{txt}{hline 108}");
+            ctx.log("{txt}(legend: {res}p{txt}: exact partial-out   {res}s{txt}: exact solver   {res}h{txt}: step-halving   {res}o{txt}: epsilon below tolerance)");
         }
         ctx.log(&format!(
-            "{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})\n",
+            "{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})",
             fmt_e(g.tol, 1)
         ));
         ctx.check()?;
