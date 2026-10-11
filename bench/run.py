@@ -471,6 +471,7 @@ def main() -> None:
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--dry-run", action="store_true", help="list the jobs without running them")
+    ap.add_argument("--missing", action="store_true", help="skip jobs that already have a row in results.csv (resume)")
     ap.add_argument("--report-only", action="store_true", help="re-render RESULTS.md from results.csv")
     a = ap.parse_args()
 
@@ -494,6 +495,9 @@ def main() -> None:
             for tool in GROUP_TOOLS[cfg.group]:
                 if tool in tools:
                     jobs.append(Job(tool, cfg, T))
+    if a.missing:
+        done = {_row_key(r) for r in load_results()}
+        jobs = [j for j in jobs if _row_key(job_row(j)) not in done]
     if a.dry_run:
         for j in jobs:
             print(f"{j.cfg.group} T={j.threads:<2} {j.tool:<14} {j.cfg.key}")
