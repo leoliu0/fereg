@@ -341,6 +341,9 @@ pub(crate) fn irls(
         if iter > 1 {
             let denom = dev.min(old_dev).max(0.1);
             eps = delta.abs() / denom;
+            // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations ppmlhdfe
+            // spends tightening tol_in to `highest` also refine β beyond eps < tol (stopping at
+            // eps < tol moves β by ~2e-6 relative on fixture p_problem1).
             if eps < c.tol && !fast && (tol_in <= 1.1 * c.highest || c.exact) {
                 ok += 1;
             }
