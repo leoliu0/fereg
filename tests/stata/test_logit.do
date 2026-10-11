@@ -19,14 +19,16 @@ global RF_DATA "`c(pwd)'/../../crates/regfast-core/tests/data"
 * rf_compare_bv() (Mata) is defined in rf_compare_e.ado
 quietly run rf_compare_e.ado
 
-* lcheck "<slope names>" "<logit arguments>" "<logitfast arguments>"
+* lcheck "<slope names>" "<logit arguments>" "<logitfast arguments>" ["<omitted names>"]
+* (omitted names: coefficients both commands must report as omitted, o.<name>)
 capture program drop lcheck
 program lcheck
-	args names lspec fspec
+	args names lspec fspec omitted
 	tempname bR VR bF VF
 	tempvar sR pR pF dF
 	quietly logit `lspec' tol(1e-12) ltol(1e-14) nrtol(1e-12)
 	mata: rf_pick("`bR'", "`VR'", "`names'")
+	CheckOmitted logit "`omitted'"
 	local N = e(N)
 	local ll = e(ll)
 	local ll_0 = e(ll_0)
@@ -35,6 +37,7 @@ program lcheck
 	qui predict double `pR' if e(sample), pr
 	logitfast `fspec' d(`dF') tol(1e-12)
 	mata: rf_pick("`bF'", "`VF'", "`names'")
+	CheckOmitted logitfast "`omitted'"
 	rf_assert_close e(N) e(N) `N' 0
 	rf_assert_close e(ll) e(ll) `ll' 1e-9
 	rf_assert_close e(ll_0) e(ll_0) `ll_0' 1e-9
@@ -60,6 +63,18 @@ program lcheck
 	}
 	drop `dF'_diff
 	di as text "lcheck OK: `fspec'"
+end
+
+capture program drop CheckOmitted
+program CheckOmitted
+	args cmd omitted
+	local cn : colnames e(b)
+	foreach v of local omitted {
+		if (!strpos(" `cn' ", " o.`v' ")) {
+			di as err "FAIL `cmd': `v' is not reported as omitted (o.`v') in e(b): `cn'"
+			exit 9
+		}
+	}
 end
 
 capture mata: mata drop rf_pick()
@@ -105,12 +120,15 @@ logitfast y x1 x2, absorb(fe1 fe2) or
 di as result "simulated panel passed"
 
 * ---------------------------------------------------------------------------
-* nlswork (plan V-3): union on age and grade, idcode and year FEs
+* nlswork (plan V-3): union on age (and ttl_exp) and grade, idcode and year FEs. grade is
+* constant within idcode, so logitfast omits it (o.grade), as does logit when grade follows the
+* FE dummies (_rmcoll keeps the earlier dummies); only the estimable slopes are compared.
 * ---------------------------------------------------------------------------
 webuse nlswork, clear
 keep if idcode <= 300
-lcheck "age grade" "union age grade i.idcode i.year," "union age grade, absorb(idcode year)"
-lcheck "age grade" "union age grade i.idcode i.year, vce(cluster idcode)" "union age grade, absorb(idcode year) vce(cluster idcode)"
+lcheck "age" "union age i.idcode i.year grade," "union age grade, absorb(idcode year)" "grade"
+lcheck "age" "union age i.idcode i.year grade, vce(cluster idcode)" "union age grade, absorb(idcode year) vce(cluster idcode)" "grade"
+lcheck "age ttl_exp" "union age ttl_exp i.idcode i.year grade, vce(robust)" "union age ttl_exp grade, absorb(idcode year) vce(robust)" "grade"
 di as result "nlswork passed"
 
 * ---------------------------------------------------------------------------
