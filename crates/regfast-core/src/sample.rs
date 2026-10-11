@@ -3,9 +3,10 @@
 //!
 //! Each pass counts the level sizes of one term over the current sample and drops the
 //! observations of offending levels. Without frequency weights the counts are exact integers
-//! (atomic histograms, parallel); with fweights, or Poisson depvars with negative values, the
+//! (per-part histograms, parallel); with fweights, or Poisson depvars with negative values, the
 //! serial f64 path keeps the exact weighted-sum semantics. Both give the same sample.
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
@@ -78,47 +79,60 @@ fn separated(family: Family, ysum: f64, count: f64) -> bool {
     }
 }
 
-/// Levels with at most this many entries are counted in per-worker local histograms (exact
-/// integer counts, so the merge order cannot change the result); larger ones use atomics.
-const LOCAL_HIST_MAX: usize = 1 << 14;
+/// Adds the alive observations of `r` (and, with `sep`, those with a nonzero outcome at
+/// `t.g + level`) into `h`.
+fn count_range(h: &mut [u32], t: TermCodes, alive: &[bool], sep: Option<SepRule>, r: Range<usize>) {
+    let (codes, al) = (&t.codes[r.clone()], &alive[r.clone()]);
+    match sep {
+        None => {
+            for (&c, &a) in codes.iter().zip(al) {
+                h[c as usize] += u32::from(a);
+            }
+        }
+        Some(rule) => {
+            for ((&c, &a), &y) in codes.iter().zip(al).zip(&rule.y[r]) {
+                if a {
+                    h[c as usize] += 1;
+                    h[t.g + c as usize] += u32::from(y != 0.0);
+                }
+            }
+        }
+    }
+}
 
-/// Per-level counts of alive observations and of those with a nonzero outcome.
+/// Per-level counts of alive observations and of those with a nonzero outcome. The counts are
+/// exact integers, so any split gives the same result: one histogram per part (a part per
+/// thread while the histograms stay within 2n counters), summed; atomic counters when that
+/// would leave most threads idle.
 fn level_counts(t: TermCodes, alive: &[bool], sep: Option<SepRule>, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
+    let n = t.codes.len();
     let with_y = sep.is_some();
     let width = if with_y { 2 * t.g } else { t.g };
-    if t.g <= LOCAL_HIST_MAX {
-        let h = pool.install(|| {
-            t.codes
-                .par_chunks(CHUNK)
-                .zip(alive.par_chunks(CHUNK))
-                .enumerate()
-                .fold(
-                    || vec![0u32; width],
-                    |mut h, (ci, (codes, al))| {
-                        let base = ci * CHUNK;
-                        for (k, (&c, &a)) in codes.iter().zip(al).enumerate() {
-                            if a {
-                                h[c as usize] += 1;
-                                if let Some(rule) = sep {
-                                    h[t.g + c as usize] += u32::from(rule.y[base + k] != 0.0);
-                                }
-                            }
-                        }
-                        h
-                    },
-                )
-                .reduce(
-                    || vec![0u32; width],
-                    |mut a, b| {
-                        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
-                        a
-                    },
-                )
-        });
+    let nt = pool.threads().min(n.div_ceil(CHUNK)).max(1);
+    let parts = nt.min(2 * n / width.max(1)).max(1);
+    if 2 * parts >= nt {
+        let mut h = vec![0u32; parts * width];
+        if parts == 1 {
+            count_range(&mut h, t, alive, sep, 0..n);
+        } else {
+            pool.install(|| {
+                h.par_chunks_mut(width).enumerate().for_each(|(j, h)| count_range(h, t, alive, sep, j * n / parts..(j + 1) * n / parts))
+            });
+            let (first, rest) = h.split_at_mut(width);
+            const KC: usize = 4096;
+            pool.install(|| {
+                first.par_chunks_mut(KC).enumerate().for_each(|(r, o)| {
+                    for j in 0..parts - 1 {
+                        let src = &rest[j * width + r * KC..][..o.len()];
+                        o.iter_mut().zip(src).for_each(|(x, y)| *x += y);
+                    }
+                })
+            });
+            h.truncate(width);
+        }
         let pos = if with_y { h[t.g..].to_vec() } else { Vec::new() };
-        let mut count = h;
-        count.truncate(t.g);
-        return (count, pos);
+        h.truncate(t.g);
+        return (h, pos);
     }
     let count: Vec<AtomicU32> = (0..t.g).map(|_| AtomicU32::new(0)).collect();
     let pos: Vec<AtomicU32> = if with_y { (0..t.g).map(|_| AtomicU32::new(0)).collect() } else { Vec::new() };

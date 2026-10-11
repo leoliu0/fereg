@@ -14,7 +14,7 @@ use crate::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts};
 use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
-use crate::operator::{JointCells, Ops, Rhs, SegAgg, WeightState, weight_state};
+use crate::operator::{JointCells, Ops, Rhs, Scratch, SegAgg, WeightState, weight_state};
 use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::{BlockPrecond, Joint, Precond, approx_chol::ApproxChol, dense::Dense, jacobi, sparse_chol::SparseChol};
 use crate::session::Term;
@@ -105,6 +105,8 @@ const JOINT_MARGIN: f64 = 0.8;
 struct JointStats {
     /// 2·Σ_s d_s·l_s + cells × blocks + dense small-block work (l_s: large codes of segment s).
     work: Option<u64>,
+    /// Σ_s d_s² (the assembly-work budget measure).
+    seg_work: Option<u64>,
     /// Structural nonzeros of the joint matrix and of its large-coordinate submatrix.
     nnz: Option<u64>,
     amd_nnz: Option<u64>,
@@ -205,6 +207,8 @@ pub struct FeSolver {
     need_refactor: bool,
     joint: JointState,
     cfg: SolverConfig,
+    /// Kernel scratch reused across solves.
+    scratch: Scratch,
 }
 
 pub(crate) fn log_phase(ctx: &Ctx, t: &mut Instant, what: &str) {
@@ -265,6 +269,7 @@ impl FeSolver {
             need_refactor: false,
             joint: JointState::default(),
             cfg,
+            scratch: Scratch::default(),
         })
     }
 
@@ -302,8 +307,15 @@ impl FeSolver {
         self.pre.inv_diag = jacobi::inverse_diagonal(&self.ws.diag, &self.ws.redundant);
         self.pre.small = if self.st.m_small > 0 {
             let ops = Ops { st: &self.st, ws: &self.ws };
-            let a = ops.assemble_small(pool)?;
-            Some(Dense::factor(&a, self.st.m_small, &self.ws.redundant[..self.st.m_small], pool)?)
+            let built;
+            let a = match self.ws.small_s.as_deref() {
+                Some(a) => a,
+                None => {
+                    built = ops.assemble_small(pool)?;
+                    &built
+                }
+            };
+            Some(Dense::factor(a, self.st.m_small, &self.ws.redundant[..self.st.m_small], pool)?)
         } else {
             None
         };
@@ -440,21 +452,28 @@ fn build_joint(ops: &Ops, cfg: &SolverConfig, js: &mut JointState, without: f64,
             break 'stages "rejected (cost)";
         }
         let st = ops.st;
-        if agg.is_none() {
-            agg = Some(ops.joint_seg_agg(pool)?);
+        // Structural work first (a cheap counting pass): an unaffordable factor is rejected
+        // before the per-segment aggregates are built.
+        if js.stats.work.is_none() {
+            let (seg_work, dl) = ops.joint_seg_counts(pool);
+            let small_work = if st.m_small > 0 { st.small_work } else { 0 };
+            js.stats.seg_work = Some(seg_work);
+            js.stats.work = Some(2 * dl + (st.ncells * st.nb) as u64 + small_work);
         }
-        let a = agg.as_ref().expect("set above");
-        let small_work = if st.m_small > 0 { st.small_work } else { 0 };
-        js.stats.work = Some(2 * a.large_work(st.m_small) + (st.ncells * st.nb) as u64 + small_work);
         times[0] = split(&mut lap);
         ctx.check()?;
-        if a.work > cfg.max_assembly_work {
+        if js.stats.seg_work.is_some_and(|w| w > cfg.max_assembly_work) {
             js.failed = true;
             break 'stages "over the assembly budget";
         }
         if !affordable(&js.stats, Stage::Assemble) {
             break 'stages "rejected (cost)";
         }
+        if agg.is_none() {
+            agg = Some(ops.joint_seg_agg(pool)?);
+        }
+        let a = agg.as_ref().expect("set above");
+        times[0] += split(&mut lap);
         if pattern.is_none() {
             let jc = ops.joint_cells(pool)?;
             times[1] = split(&mut lap);
@@ -598,7 +617,7 @@ fn escalate_block(ops: &Ops, b: usize, cfg: &SolverConfig, cell_seg: &mut Option
 struct System<'a> {
     ops: Ops<'a>,
     pre: &'a mut Precond,
-    zbuf: Vec<f64>,
+    scratch: &'a mut Scratch,
     w: usize,
     can_escalate: bool,
     large_fresh: bool,
@@ -610,8 +629,7 @@ struct System<'a> {
 
 impl CgSystem for System<'_> {
     fn matvec(&mut self, p: &[f64], q: &mut [f64], pool: &Pool) -> Result<(), RfError> {
-        self.ops.apply(p, self.w, q, &mut self.zbuf, pool);
-        Ok(())
+        self.ops.apply(p, self.w, q, self.scratch, pool)
     }
 
     fn precond(&mut self, r: &[f64], z: &mut [f64], pool: &Pool) {
@@ -683,7 +701,9 @@ impl Absorber for FeSolver {
             return Err(RfError::InvalidInput("weights must be positive and finite".into()));
         }
         ctx.check()?;
+        let mut t = Instant::now();
         self.ws = weight_state(&self.st, w, pool)?;
+        log_phase(ctx, &mut t, "set_weights");
         self.joint.agg = None;
         self.basic_fresh = false;
         if self.escalated || self.pre.joint.is_some() {
@@ -709,7 +729,7 @@ impl Absorber for FeSolver {
             return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
         }
         if r == 0 {
-            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + g1, r, data: Vec::new() }) });
+            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + g1, r, data: Vec::new() }), exact: true });
         }
         ctx.check()?;
         let mut t = Instant::now();
@@ -746,8 +766,7 @@ impl Absorber for FeSolver {
         }
         log_phase(ctx, &mut t, "preconditioner");
         let ops = Ops { st: &self.st, ws: &self.ws };
-        let mut zbuf = if ops.needs_zbuf(r) { alloc_vec(self.st.ncells * r, 0.0)? } else { Vec::new() };
-        let Rhs { rhs, b1, wsq, wsum } = ops.rhs(z, r, &mut zbuf, pool)?;
+        let Rhs { rhs, b1, wsq, wsum } = ops.rhs(z, r, &mut self.scratch, pool)?;
         log_phase(ctx, &mut t, "rhs pass");
         ctx.check()?;
         let sw = self.ws.sw;
@@ -772,12 +791,14 @@ impl Absorber for FeSolver {
         }
         let mut iterations = 1;
         let mut escalated_now = false;
+        // Closed form without reduced blocks; else set from the PCG outcome.
+        let mut exact = true;
         if m > 0 {
             let can_escalate = !self.escalated && self.st.has_large() && self.pre.joint.is_none();
             let mut sys = System {
                 ops: Ops { st: &self.st, ws: &self.ws },
                 pre: &mut self.pre,
-                zbuf,
+                scratch: &mut self.scratch,
                 w: r,
                 can_escalate,
                 large_fresh: self.large_fresh,
@@ -787,6 +808,7 @@ impl Absorber for FeSolver {
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
+            exact = out.exact || ss0.iter().all(|&s| s == 0.0);
             let joint_built = sys.joint_built;
             if joint_built {
                 joint_now = true;
@@ -826,7 +848,7 @@ impl Absorber for FeSolver {
             data.extend_from_slice(&a);
             FeCoefs { p: m + g1, r, data }
         });
-        Ok(SolveInfo { iterations, escalated: escalated_now, coefs })
+        Ok(SolveInfo { iterations, escalated: escalated_now, coefs, exact })
     }
 
     fn fit_rows(&self, c: &FeCoefs, col: usize, pool: &Pool) -> Vec<f64> {
