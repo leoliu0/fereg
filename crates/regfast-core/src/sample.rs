@@ -222,3 +222,35 @@ fn pass_serial(t: TermCodes, alive: &mut [bool], fw: Option<&[f64]>, sep: Option
     }
     (s, f)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::par::with_pool;
+    use crate::rng::SplitMix64;
+
+    #[test]
+    fn parallel_pass_matches_serial_weighted_pass() {
+        let mut rng = SplitMix64::new(9);
+        let n = 60_000;
+        let a: Vec<u32> = (0..n).map(|_| (rng.next_u64() % 30_000) as u32).collect();
+        let b: Vec<u32> = (0..n).map(|_| (rng.next_u64() % 50) as u32).collect();
+        let y: Vec<f64> = (0..n).map(|_| if rng.next_f64() < 0.3 { 0.0 } else { 1.0 }).collect();
+        let ones = vec![1.0; n];
+        let terms = [TermCodes { codes: &a, g: 30_000 }, TermCodes { codes: &b, g: 50 }];
+        with_pool(4, |pool| {
+            for sep in [None, Some(Family::Poisson), Some(Family::Logit)] {
+                for singletons in [true, false] {
+                    let rule = sep.map(|family| SepRule { y: &y, family });
+                    let mut par = vec![true; n];
+                    let mut ser = vec![true; n];
+                    let cp = drop_singletons(&terms, &mut par, None, rule, singletons, pool);
+                    let cs = drop_singletons(&terms, &mut ser, Some(&ones), rule, singletons, pool);
+                    assert_eq!(cp, cs);
+                    assert!(par == ser);
+                }
+            }
+        })
+        .unwrap();
+    }
+}
