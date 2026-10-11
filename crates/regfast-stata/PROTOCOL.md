@@ -38,12 +38,15 @@ Results: `__rf_nobs`, `__rf_chk` = Σ_obs Σ_j j·v_j (missing = 0, left-to-righ
 
 ## cmd=prepare
 Varlist, in order: factor variables (`nfac`, numeric or string), slope variables (`nslope`),
-weight (iff `wtype≠none`), depvar (iff `family≠gaussian`), touse (last, numeric 0/1).
-Sample: observations in the `in` range with touse ≠ 0. `if` is not evaluated: callers fold it
-into touse. Touse and every numeric variable are read in one parallel pass.
+weight (iff `wtype≠none`), model variables (`nmodel`, numeric; the depvar first iff
+`family≠gaussian`), touse (last, numeric 0/1).
+Sample: observations in the `in` range with touse ≠ 0 and no missing value in a factor (string
+factors: ""), slope, weight or model variable. `if` is not evaluated: callers fold it, the
+weights and the terms that are not plain model variables (factor-variable or time-series
+operators) into touse. Touse and every numeric variable are read in one parallel pass.
 
 Keys:
-- `nfac`, `factype` (one `n|s` per factor), `nslope`.
+- `nfac`, `factype` (one `n|s` per factor), `nslope`, `nmodel` (default 0).
 - `absorb=none` (only the constant) or `;`-separated terms `<factors>|<icpt>|<slopes>|<save>`:
   1-based factor positions joined by `*` (interaction), intercept 0/1, 1-based slope positions
   joined by `*` or `-` for none, save 0/1. Example: `1|1|-|0;2*3|1|-|1;4|0|1*2|1`.
@@ -54,9 +57,10 @@ Keys:
   only when singletons are dropped, as ppmlhdfe.
 - `absorber=fast|dense` (debug; dense = explicit-dummy reference).
 
-Effects: writes 0 into touse for dropped observations; local `_rf_token` names the stored
-session (a new prepare discards the previous one); scalars `__rf_N_full`, `__rf_N`,
-`__rf_num_singletons`, `__rf_num_fe_separated`.
+Effects: writes 0 into touse for dropped observations (missing values, singletons, fe rule);
+local `_rf_token` names the stored session (a new prepare discards the previous one); scalars
+`__rf_N_full` (after the missing-value exclusion), `__rf_N`, `__rf_num_singletons`,
+`__rf_num_fe_separated`. The session keeps the model variables for the estimation command.
 
 ## Estimation commands (cmd=ols, iv, glm)
 - `token=<_rf_token>` is required and the session is consumed either way. A wrong token or a
@@ -67,7 +71,10 @@ session (a new prepare discards the previous one); scalars `__rf_N_full`, `__rf_
   output positions (1-based among the output variables, 0 = none) `resid=`, `d=`, `groupvar=`,
   `fe=<k1,k2,…>|0` (one per saved slot: per saved term, intercept then slopes); matrices
   `b=`, `V=`, `doft=` (n_slots × 5), each optional.
-- Missing values in estimation rows: r(416).
+- `cached=<k1,k2,…>`: one entry per estimation variable (glm: y and x, not the offset), the
+  1-based position of the same variable among prepare's model variables, whose stored values
+  are used instead of a Stata read; 0 = read. Absent: every variable is read.
+- Missing values in estimation rows read from Stata: r(416).
 - Local `_rf_status`: one code per regressor sent (0 ok, 2 absorbed by the FEs, 3 collinear).
 - `est::finish` zeroes touse for observations an estimator drops after prepare.
 

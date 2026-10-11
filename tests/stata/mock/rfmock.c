@@ -2,8 +2,10 @@
  * rfmock.c -- a fake regfast.plugin for ado-level dry runs (tests/stata/test_ado_mock.do).
  *
  * It implements the plugin protocol (cmd=version|prepare|ols) without estimating anything:
- *   prepare  counts the sample (touse = last variable), returns token 777 and copies the staged
- *            scalars __mock_N_full / __mock_num_singletons when present;
+ *   prepare  applies the protocol's sample rule (touse = last variable; touse is zeroed for
+ *            observations with a missing value, or "" for strings, in any other variable),
+ *            counts the sample, returns token 777 and copies the staged scalars
+ *            __mock_N_full / __mock_num_singletons when present;
  *   ols      copies the staged matrices __mock_b, __mock_V, __mock_doft into the matrices named by
  *            b= V= doft= (dimensions must match), copies staged scalars __mock_<name> to __rf_<name>,
  *            returns the status list from global $rfmock_status, and writes 1000*k + obs into the
@@ -53,8 +55,19 @@ STDLL stata_call(int argc, char *argv[]) {
   if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.1.0"); return 0; }
   if (!strcmp(argv[0], "prepare")) {
     record("rfmock_prepare", argc, argv);
-    int tv = SF_nvars(); double n = 0; ST_double t;
-    for (int o = SF_in1(); o <= SF_in2(); o++) if (SF_ifobs(o)) { SF_vdata(tv, o, &t); if (t != 0) n++; }
+    int tv = SF_nvars(); double n = 0; ST_double t, z; char s[2048];
+    for (int o = SF_in1(); o <= SF_in2(); o++) {
+      if (!SF_ifobs(o)) continue;
+      SF_vdata(tv, o, &t); if (t == 0) continue;
+      int miss = 0;
+      for (int v = 1; v < tv && !miss; v++) {
+        if (SF_var_is_string(v)) {
+          if (SF_var_is_strl(v)) miss = SF_sdatalen(v, o) == 0;
+          else { SF_sdata(v, o, s); miss = s[0] == 0; }
+        } else { SF_vdata(v, o, &z); miss = SF_is_missing(z); }
+      }
+      if (miss) SF_vstore(tv, o, 0); else n++;
+    }
     SF_scal_save("__rf_N_full", n); SF_scal_save("__rf_N", n);
     SF_scal_save("__rf_num_singletons", 0); SF_scal_save("__rf_num_fe_separated", 0);
     copy_scalar("N_full"); copy_scalar("num_singletons");

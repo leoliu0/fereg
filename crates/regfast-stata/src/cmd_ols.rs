@@ -17,7 +17,7 @@ pub fn ols(a: &Args) -> Result<(), RfError> {
 
     with_ctx(&k.common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
-        let rows = io::read_session_rows(&stored.session, &stored.obs, &vars, k.mode, !k.common.serialio, ctx)?;
+        let rows = io::read_block(&mut stored, &vars, &k.cached, k.mode, !k.common.serialio, ctx)?;
         ph.mark(&format!("ols: read {} x {}", stored.session.n(), vars.len()));
         let res = stored.session.ols(rows, &lay, &spec, ctx)?;
         ph.mark("ols: estimate");

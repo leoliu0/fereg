@@ -17,6 +17,11 @@ pub struct Stored {
     /// [`crate::est::finish`] zero touse for them.
     pub n_kept: usize,
     pub session: Session,
+    /// The model variables read by `prepare` (protocol `nmodel`), row-major: row k holds their
+    /// `nmodel` values at `obs[k]`; estimation commands gather the variables they map to them
+    /// (`cached=`) instead of reading them again.
+    pub model: Vec<f64>,
+    pub nmodel: usize,
 }
 
 static SESSION: Mutex<Option<Stored>> = Mutex::new(None);

@@ -12,6 +12,7 @@ use regfast_core::{Ctx, EstResult, RfError, Session};
 
 use crate::args::RowRead;
 use crate::spi;
+use crate::store::Stored;
 
 /// Rows per C read call inside a reader thread (keeps the observation buffer in cache).
 const READ_BLOCK: usize = 16_384;
@@ -99,37 +100,55 @@ pub fn read_col(var: i32, obs: &[i32], threads: usize, parallel: bool) -> Result
 /// range (only the pages actually written are touched), which skips the count pass.
 const SINGLE_PASS_MAX: usize = 1 << 24;
 
+/// Sample of a `prepare` call (see [`read_sample`]).
+pub struct Sample {
+    /// Stata observation of each row (ascending).
+    pub obs: Vec<i32>,
+    /// One column per column variable.
+    pub cols: Vec<Vec<f64>>,
+    /// The block variables, row-major: row k holds their `width` values at `obs[k]`.
+    pub block: Vec<f64>,
+    pub width: usize,
+}
+
 /// Sample of a `prepare` call: the observations of the `in` range whose `touse` is not 0
-/// (ascending), and the numeric `vars` at those observations as columns (NaN for missing).
+/// (ascending) with the numeric `col_vars` at those observations as columns and the numeric
+/// `block_vars` as a row-major block (NaN for missing), and the number of missing values read.
 /// `if` is not evaluated: callers fold it into touse (protocol).
 ///
 /// One reader thread scans the range once into outputs sized for the whole range. Several
 /// make two parallel passes over contiguous observation ranges: the first counts each
 /// range's sample, the second writes every range straight into its slice of the outputs.
-pub fn read_sample(touse: i32, vars: &[i32], threads: usize, parallel: bool) -> Result<(Vec<i32>, Vec<Vec<f64>>), RfError> {
+pub fn read_sample(touse: i32, col_vars: &[i32], block_vars: &[i32], threads: usize, parallel: bool) -> Result<(Sample, u64), RfError> {
+    let vars: Vec<i32> = col_vars.iter().chain(block_vars).copied().collect();
+    let w = block_vars.len();
     let (in1, in2) = spi::in_range();
     let o1 = in1.max(1);
     let total = usize::try_from(i64::from(in2) - i64::from(o1) + 1).unwrap_or(0);
     let t = reader_threads(total, threads, parallel);
     if t == 1 && total <= SINGLE_PASS_MAX {
         let mut obs = uninit_vec::<i32>(total)?;
-        let mut cols: Vec<Vec<f64>> = (0..vars.len()).map(|_| uninit_vec::<f64>(total)).collect::<Result<_, _>>()?;
-        let n = {
+        let mut cols: Vec<Vec<f64>> = col_vars.iter().map(|_| uninit_vec::<f64>(total)).collect::<Result<_, _>>()?;
+        let mut block = uninit_vec::<f64>(total * w)?;
+        let (n, miss) = {
             let mut dst: Vec<_> = cols.iter_mut().map(|c| &mut c.spare_capacity_mut()[..total]).collect();
-            spi::read_sample(touse, vars, o1, in2, &mut obs.spare_capacity_mut()[..total], &mut dst)?
+            let dst_obs = &mut obs.spare_capacity_mut()[..total];
+            spi::read_sample(touse, &vars, o1, in2, dst_obs, &mut dst, &mut block.spare_capacity_mut()[..total * w])?
         };
-        // SAFETY: the scan wrote the first `n` positions of every output.
+        // SAFETY: the scan wrote the first `n` positions of every column and `n` block rows.
         unsafe {
             obs.set_len(n);
             for c in &mut cols {
                 c.set_len(n);
             }
+            block.set_len(n * w);
         }
         if n < total / 2 {
             obs.shrink_to_fit();
             cols.iter_mut().for_each(Vec::shrink_to_fit);
+            block.shrink_to_fit();
         }
-        return Ok((obs, cols));
+        return Ok((Sample { obs, cols, block, width: w }, miss));
     }
 
     let per = total.div_ceil(t);
@@ -148,38 +167,89 @@ pub fn read_sample(touse: i32, vars: &[i32], threads: usize, parallel: bool) -> 
 
     let n: usize = counts.iter().sum();
     let mut obs = uninit_vec::<i32>(n)?;
-    let mut cols: Vec<Vec<f64>> = (0..vars.len()).map(|_| uninit_vec::<f64>(n)).collect::<Result<_, _>>()?;
+    let mut cols: Vec<Vec<f64>> = col_vars.iter().map(|_| uninit_vec::<f64>(n)).collect::<Result<_, _>>()?;
+    let mut block = uninit_vec::<f64>(n.checked_mul(w).ok_or(RfError::OutOfMemory)?)?;
+    let miss;
     {
         let mut obs_dst = split_sizes(&mut obs.spare_capacity_mut()[..n], &counts).into_iter();
         let mut col_dst: Vec<_> =
             cols.iter_mut().map(|c| split_sizes(&mut c.spare_capacity_mut()[..n], &counts).into_iter()).collect();
+        let block_sizes: Vec<usize> = counts.iter().map(|&c| c * w).collect();
+        let mut block_dst = split_sizes(&mut block.spare_capacity_mut()[..n * w], &block_sizes).into_iter();
         let parts = (0..t).map(|i| {
             let dst_obs = obs_dst.next().expect("one slice per part");
             let dst_cols: Vec<_> = col_dst.iter_mut().map(|c| c.next().expect("one slice per part")).collect();
-            (range(i), dst_obs, dst_cols)
+            let dst_block = block_dst.next().expect("one slice per part");
+            (range(i), dst_obs, dst_cols, dst_block)
         });
+        let vars = &vars;
         // Every part must find exactly the sample it counted.
-        let read_part = |(a, b): (i32, i32), dst_obs: &mut [MaybeUninit<i32>], mut dst_cols: Vec<&mut [MaybeUninit<f64>]>| {
+        let read_part = |(a, b): (i32, i32),
+                         dst_obs: &mut [MaybeUninit<i32>],
+                         mut dst_cols: Vec<&mut [MaybeUninit<f64>]>,
+                         dst_block: &mut [MaybeUninit<f64>]| {
             let want = dst_obs.len();
-            match spi::read_sample(touse, vars, a, b, dst_obs, &mut dst_cols)? {
-                c if c == want => Ok(()),
+            match spi::read_sample(touse, vars, a, b, dst_obs, &mut dst_cols, dst_block)? {
+                (c, miss) if c == want => Ok(miss),
                 _ => Err(RfError::Internal("the estimation sample changed while it was read".into())),
             }
         };
-        std::thread::scope(|s| {
+        miss = std::thread::scope(|s| {
             let read_part = &read_part;
-            let handles: Vec<_> = parts.map(|(r, dst_obs, dst_cols)| s.spawn(move || read_part(r, dst_obs, dst_cols))).collect();
-            handles.into_iter().map(join).collect::<Result<(), RfError>>()
+            let handles: Vec<_> = parts
+                .map(|(r, dst_obs, dst_cols, dst_block)| s.spawn(move || read_part(r, dst_obs, dst_cols, dst_block)))
+                .collect();
+            handles.into_iter().map(join).sum::<Result<u64, RfError>>()
         })?;
     }
-    // SAFETY: every part filled its whole slice, and the slices cover all `n` positions.
+    // SAFETY: every part filled its whole slices, and the slices cover all `n` positions.
     unsafe {
         obs.set_len(n);
         for c in &mut cols {
             c.set_len(n);
         }
+        block.set_len(n * w);
     }
-    Ok((obs, cols))
+    Ok((Sample { obs, cols, block, width: w }, miss))
+}
+
+impl Sample {
+    /// Rows without a missing value (NaN) in any column or block variable.
+    pub fn complete_rows(&self) -> Vec<bool> {
+        let mut keep = vec![true; self.obs.len()];
+        for c in &self.cols {
+            for (k, v) in keep.iter_mut().zip(c) {
+                *k &= !v.is_nan();
+            }
+        }
+        if self.width > 0 {
+            for (k, row) in keep.iter_mut().zip(self.block.chunks_exact(self.width)) {
+                *k &= !row.iter().any(|v| v.is_nan());
+            }
+        }
+        keep
+    }
+
+    /// Keeps the rows where `keep` is true (order preserved) and returns the observations of
+    /// the other rows.
+    pub fn drop_rows(&mut self, keep: &[bool]) -> Vec<i32> {
+        let dropped: Vec<i32> = self.obs.iter().zip(keep).filter(|(_, k)| !**k).map(|(o, _)| *o).collect();
+        if dropped.is_empty() {
+            return dropped;
+        }
+        retain_by(&mut self.obs, keep);
+        for c in &mut self.cols {
+            retain_by(c, keep);
+        }
+        let w = self.width;
+        let mut rows = 0;
+        for (i, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
+            self.block.copy_within(i * w..(i + 1) * w, rows * w);
+            rows += 1;
+        }
+        self.block.truncate(rows * w);
+        dropped
+    }
 }
 
 /// Splits `s` into consecutive slices of the given sizes (which must sum to `s.len()`).
@@ -208,6 +278,49 @@ pub fn read_strings(var: i32, obs: &[i32]) -> Result<(Vec<u8>, Vec<u32>), RfErro
         offsets.push(end);
     }
     Ok((bytes, offsets))
+}
+
+/// Rows where every string factor is non-empty (Stata's string missing), or `None` when that
+/// is every row.
+pub fn nonempty_rows(strs: &[(Vec<u8>, Vec<u32>)]) -> Option<Vec<bool>> {
+    let empty = |o: &[u32]| o.windows(2).any(|w| w[0] == w[1]);
+    if !strs.iter().any(|(_, o)| empty(o)) {
+        return None;
+    }
+    let n = strs[0].1.len() - 1;
+    let mut keep = vec![true; n];
+    for (_, o) in strs {
+        for (k, w) in keep.iter_mut().zip(o.windows(2)) {
+            *k &= w[0] != w[1];
+        }
+    }
+    Some(keep)
+}
+
+fn retain_by<T: Copy>(v: &mut Vec<T>, keep: &[bool]) {
+    let mut w = 0;
+    for i in 0..v.len() {
+        if keep[i] {
+            v[w] = v[i];
+            w += 1;
+        }
+    }
+    v.truncate(w);
+}
+
+/// Keeps the values of a `(bytes, offsets)` string column at the rows where `keep` is true.
+pub fn drop_strings(bytes: &mut Vec<u8>, offsets: &mut Vec<u32>, keep: &[bool]) {
+    let mut b = Vec::with_capacity(bytes.len());
+    let mut o = Vec::with_capacity(offsets.len());
+    o.push(0u32);
+    for (i, &k) in keep.iter().enumerate() {
+        if k {
+            b.extend_from_slice(&bytes[offsets[i] as usize..offsets[i + 1] as usize]);
+            o.push(b.len() as u32);
+        }
+    }
+    *bytes = b;
+    *offsets = o;
 }
 
 /// Stata observation of every kept observation (kept order).
@@ -247,6 +360,77 @@ pub fn read_session_rows(
         return Err(RfError::Code(416, "regfast: missing values in estimation variables of the sample".into()));
     }
     Ok(rows)
+}
+
+/// The N×R block of an estimation command in [`Session::row_order`]: variable `vars[c]` is
+/// gathered from `prepare`'s model variable `cached[c]` (1-based; protocol `cached`) or, where
+/// that is 0, read from Stata. An empty `cached` reads every variable. The model block is
+/// consumed (one estimation command per prepare); each solver row reads one contiguous row.
+pub fn read_block(
+    stored: &mut Stored,
+    vars: &[i32],
+    cached: &[usize],
+    mode: RowRead,
+    parallel: bool,
+    ctx: &Ctx,
+) -> Result<Vec<f64>, RfError> {
+    let model = std::mem::take(&mut stored.model);
+    let nm = std::mem::take(&mut stored.nmodel);
+    if cached.iter().all(|&k| k == 0) {
+        drop(model);
+        return read_session_rows(&stored.session, &stored.obs, vars, mode, parallel, ctx);
+    }
+    if cached.len() != vars.len() || cached.iter().any(|&k| k > nm) {
+        return Err(RfError::InvalidInput("regfast plugin: cached must map every variable to 0 or a model variable".into()));
+    }
+    let read: Vec<i32> = vars.iter().zip(cached).filter(|&(_, &k)| k == 0).map(|(&v, _)| v).collect();
+    let part = if read.is_empty() { Vec::new() } else { read_session_rows(&stored.session, &stored.obs, &read, mode, parallel, ctx)? };
+    let session = &stored.session;
+    let (n, r, ru) = (session.n(), vars.len(), read.len());
+    let (order, kept) = (session.row_order(), session.kept_index());
+    let len = n.checked_mul(r).ok_or(RfError::OutOfMemory)?;
+    // Every variable cached in prepare's order, no observation dropped since and the solver
+    // rows unpermuted: prepare's block already is the result.
+    let whole = ru == 0 && r == nm && cached.iter().enumerate().all(|(c, &k)| k == c + 1);
+    if whole && model.len() == len && order.iter().enumerate().all(|(k, &o)| o as usize == k) {
+        return Ok(model);
+    }
+    let mut block = uninit_vec::<f64>(len)?;
+    if len == 0 {
+        return Ok(block);
+    }
+    let fill = |row0: usize, out: &mut [MaybeUninit<f64>]| {
+        for (j, row) in out.chunks_exact_mut(r).enumerate() {
+            let rr = row0 + j;
+            let i = kept[order[rr] as usize] as usize;
+            let src = &model[i * nm..(i + 1) * nm];
+            let mut u = rr * ru;
+            for (slot, &k) in row.iter_mut().zip(cached) {
+                if k > 0 {
+                    slot.write(src[k - 1]);
+                } else {
+                    slot.write(part[u]);
+                    u += 1;
+                }
+            }
+        }
+    };
+    let t = reader_threads(n, ctx.threads, parallel);
+    let dst = &mut block.spare_capacity_mut()[..len];
+    if t == 1 {
+        fill(0, dst);
+    } else {
+        let per = n.div_ceil(t);
+        std::thread::scope(|s| {
+            for (p, out) in dst.chunks_mut(per * r).enumerate() {
+                let fill = &fill;
+                s.spawn(move || fill(p * per, out));
+            }
+        });
+    }
+    // SAFETY: every row of the block was written.
+    unsafe { block.set_len(len) };
+    Ok(block)
 }
 
 /// Writes a kept-order vector into variable `var` at the kept observations.

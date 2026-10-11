@@ -17,6 +17,7 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
     let common = a.common(SERIALIO_DEFAULT)?;
     let nfac: usize = a.num_req("nfac")?;
     let nslope: usize = a.num_or("nslope", 0)?;
+    let nmodel: usize = a.num_or("nmodel", 0)?;
     let factype = a.str_or("factype", "");
     let absorb = args::parse_absorb(a.str_req("absorb")?, nfac, nslope)?;
     let vce = args::parse_vce(a.str_or("vce", "unadjusted"), a.str_opt("cluster"), nfac)?;
@@ -37,17 +38,21 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
     if sep_fe && family == Family::Gaussian {
         return Err(RfError::InvalidInput("regfast plugin: sep=fe requires a GLM family".into()));
     }
+    // GLM: model variable 1 is the dependent variable (separation needs it).
+    if family != Family::Gaussian && nmodel == 0 {
+        return Err(RfError::InvalidInput("regfast plugin: a GLM family needs the dependent variable as model variable 1".into()));
+    }
     let has_w = wtype != WeightKind::None;
-    let has_y = family != Family::Gaussian;
-    let nvars = nfac + nslope + usize::from(has_w) + usize::from(has_y) + 1;
+    let nvars = nfac + nslope + usize::from(has_w) + nmodel + 1;
     check_nvars(nvars)?;
     let touse_var = nvars as i32;
     if spi::is_str(touse_var) {
         return Err(RfError::InvalidInput("regfast plugin: touse must be numeric".into()));
     }
 
-    // Every numeric variable is read in one pass over the sample; string factors afterwards.
-    let mut scan_vars = Vec::with_capacity(nvars - 1);
+    // Every numeric variable is read in one pass over the sample: factors, slopes and the
+    // weight as columns, the model variables as a row-major block; string factors afterwards.
+    let mut col_vars = Vec::with_capacity(nvars);
     for (f, t) in factype.bytes().enumerate() {
         let var = f as i32 + 1;
         let is_str = spi::is_str(var);
@@ -60,38 +65,68 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
             )));
         }
         if !is_str {
-            scan_vars.push(var);
+            col_vars.push(var);
         }
     }
-    let extras = (0..nslope).map(|_| "slope").chain(has_w.then_some("weight")).chain(has_y.then_some("dependent"));
+    let nlead = nslope + usize::from(has_w);
+    let extras = (0..nslope).map(|_| "slope").chain(has_w.then_some("weight")).chain((0..nmodel).map(|_| "model"));
+    let mut block_vars = Vec::with_capacity(nmodel);
     for (i, what) in extras.enumerate() {
         let var = (nfac + i + 1) as i32;
         if spi::is_str(var) {
             return Err(RfError::InvalidInput(format!("regfast plugin: {what} variable must be numeric")));
         }
-        scan_vars.push(var);
+        if i < nlead { col_vars.push(var) } else { block_vars.push(var) }
+    }
+    // GLM: the depvar (model variable 1) is also read as a column, for the separation rule.
+    if family != Family::Gaussian {
+        col_vars.push(block_vars[0]);
     }
 
     with_ctx(&common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
         let parallel = !common.serialio;
-        let (obs, cols) = io::read_sample(touse_var, &scan_vars, ctx.threads, parallel)?;
-        let n = obs.len();
+        let (mut sample, nmiss) = io::read_sample(touse_var, &col_vars, &block_vars, ctx.threads, parallel)?;
         ctx.check()?;
-        let mut cols = cols.into_iter();
-        let mut raw = Vec::with_capacity(nfac);
+        // A missing value of any factor, slope, weight or model variable excludes the
+        // observation (the ado leaves these to the plugin: protocol); touse is zeroed below.
+        let mut dropped = if nmiss > 0 {
+            let keep = sample.complete_rows();
+            sample.drop_rows(&keep)
+        } else {
+            Vec::new()
+        };
+        let mut strs = Vec::new();
         for (f, t) in factype.bytes().enumerate() {
-            raw.push(if t == b's' {
-                let (b, o) = io::read_strings(f as i32 + 1, &obs)?;
+            if t == b's' {
+                strs.push(io::read_strings(f as i32 + 1, &sample.obs)?);
                 ctx.check()?;
-                RawFactor::Str(b, o)
-            } else {
-                RawFactor::Num(cols.next().expect("one column per numeric factor"))
-            });
+            }
         }
+        if let Some(keep) = io::nonempty_rows(&strs) {
+            for (b, o) in &mut strs {
+                io::drop_strings(b, o, &keep);
+            }
+            dropped.extend(sample.drop_rows(&keep));
+        }
+        let io::Sample { obs, cols, block: model, width: _ } = sample;
+        let n = obs.len();
+        let mut cols = cols.into_iter();
+        let mut strs = strs.into_iter();
+        let raw: Vec<RawFactor> = factype
+            .bytes()
+            .map(|t| {
+                if t == b's' {
+                    let (b, o) = strs.next().expect("one value list per string factor");
+                    RawFactor::Str(b, o)
+                } else {
+                    RawFactor::Num(cols.next().expect("one column per numeric factor"))
+                }
+            })
+            .collect();
         let slopes: Vec<Vec<f64>> = cols.by_ref().take(nslope).collect();
         let weights = if has_w { cols.next() } else { None };
-        let y = if has_y { cols.next() } else { None };
+        let y_sep = cols.next();
         ph.mark(&format!("prepare: read {n} obs"));
 
         let prep = Prep {
@@ -110,15 +145,14 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
             vce,
             drop_singletons,
             family,
-            y_for_sep: y.as_deref(),
+            y_for_sep: y_sep.as_deref(),
             sep_fe,
         };
         let session = Session::prepare_with(prep, ctx, kind)?;
         drop(raw);
         ph.mark("prepare: session");
 
-        let dropped: Vec<i32> =
-            session.keep().iter().zip(&obs).filter(|(k, _)| !**k).map(|(_, o)| *o).collect();
+        dropped.extend(session.keep().iter().zip(&obs).filter(|(k, _)| !**k).map(|(_, o)| *o));
         spi::store_num(touse_var, &dropped, &vec![0.0; dropped.len()], 1)?;
 
         let token = store::new_token();
@@ -137,7 +171,7 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
             ));
         }
         let n_kept = session.n();
-        store::put(Stored { token, obs, nobs: spi::nobs(), n_kept, session });
+        store::put(Stored { token, obs, nobs: spi::nobs(), n_kept, session, model, nmodel });
         ph.mark("prepare: store");
         Ok(())
     })

@@ -24,6 +24,7 @@ f _rf_glm_header.ado
 f _rf_glm_replay.ado
 f _rf_header.ado
 f _rf_load.ado
+f _rf_model.ado
 f _rf_parse_absorb.ado
 f _rf_parse_vce.ado
 g LINUX64 regfast.linux64.plugin regfast.plugin

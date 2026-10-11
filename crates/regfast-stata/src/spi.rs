@@ -30,6 +30,8 @@ unsafe extern "C" {
         cap: c_int,
         obs_out: *mut c_int,
         cols: *const *mut f64,
+        strides: *const c_int,
+        nmiss: *mut i64,
     ) -> c_int;
     fn rf_store_num(var: c_int, obs: *const c_int, n: c_int, v: *const f64, stride: c_int) -> c_int;
     fn rf_is_str(var: c_int) -> c_int;
@@ -112,8 +114,10 @@ pub fn count_sample(touse: i32, o1: i32, o2: i32) -> Result<usize, RfError> {
 }
 
 /// Sample scan of observations `o1..=o2`: the c-th observation whose `touse` value is not 0
-/// goes to `obs_out[c]` and its value of `vars[j]` to `cols[j][c]` (NaN for missing). Returns
-/// the number of such observations; fails when there are more than `obs_out.len()`.
+/// goes to `obs_out[c]`, its value of the leading `cols.len()` variables to `cols[j][c]` and
+/// that of the remaining `w` variables to row c of the row-major `block` (`block[c·w + j]`);
+/// NaN for missing. Returns the number of such observations and the number of missing values
+/// among them; fails when there are more than `obs_out.len()`.
 pub fn read_sample(
     touse: i32,
     vars: &[i32],
@@ -121,15 +125,32 @@ pub fn read_sample(
     o2: i32,
     obs_out: &mut [MaybeUninit<i32>],
     cols: &mut [&mut [MaybeUninit<f64>]],
-) -> Result<usize, RfError> {
+    block: &mut [MaybeUninit<f64>],
+) -> Result<(usize, u64), RfError> {
     let cap = obs_out.len();
-    assert!(cap <= MAX_CALL && cols.len() == vars.len() && cols.iter().all(|c| c.len() == cap));
-    let ptrs: Vec<*mut f64> = cols.iter_mut().map(|c| c.as_mut_ptr().cast()).collect();
+    let w = vars.len() - cols.len();
+    assert!(cap <= MAX_CALL && cols.iter().all(|c| c.len() == cap) && block.len() == cap * w);
+    // Column j of the block starts at its j-th value (the C side writes only rows c < cap).
+    let base: *mut f64 = block.as_mut_ptr().cast();
+    let ptrs: Vec<*mut f64> = cols.iter_mut().map(|c| c.as_mut_ptr().cast()).chain((0..w).map(|j| base.wrapping_add(j))).collect();
+    let strides: Vec<c_int> = cols.iter().map(|_| 1).chain((0..w).map(|_| w as c_int)).collect();
+    let mut miss: i64 = 0;
     let c = unsafe {
-        rf_read_sample(touse, vars.as_ptr(), vars.len() as c_int, o1, o2, cap as c_int, obs_out.as_mut_ptr().cast(), ptrs.as_ptr())
+        rf_read_sample(
+            touse,
+            vars.as_ptr(),
+            vars.len() as c_int,
+            o1,
+            o2,
+            cap as c_int,
+            obs_out.as_mut_ptr().cast(),
+            ptrs.as_ptr(),
+            strides.as_ptr(),
+            &mut miss,
+        )
     };
     match c {
-        c if c >= 0 => Ok(c as usize),
+        c if c >= 0 => Ok((c as usize, miss as u64)),
         -9999 => Err(RfError::Internal("the estimation sample changed while it was read".into())),
         c => Err(rc_err(-c, "reading the estimation sample")),
     }

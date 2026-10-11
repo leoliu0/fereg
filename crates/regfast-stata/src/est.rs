@@ -25,10 +25,13 @@ pub struct EstKeys {
     pub outputs: Outputs,
     /// `(Stata matrix name, EstResult matrix name)` to fill.
     pub matrices: Vec<(String, &'static str)>,
+    /// Per data variable of the call: the `prepare` model column it is gathered from (1-based),
+    /// 0 = read from Stata; empty = read every variable (protocol `cached`).
+    pub cached: Vec<usize>,
 }
 
-/// Parses token, threads/verbose/serialio, rowread, nout and the output positions, plus the
-/// matrix-name keys in `mat_keys` (`(key, EstResult matrix name)`).
+/// Parses token, threads/verbose/serialio, rowread, nout, the output positions and `cached`,
+/// plus the matrix-name keys in `mat_keys` (`(key, EstResult matrix name)`).
 pub fn keys(a: &Args, mat_keys: &[(&str, &'static str)]) -> Result<EstKeys, RfError> {
     let token = a.str_req("token")?.to_string();
     let common = a.common(SERIALIO_DEFAULT)?;
@@ -44,7 +47,14 @@ pub fn keys(a: &Args, mat_keys: &[(&str, &'static str)]) -> Result<EstKeys, RfEr
         .iter()
         .filter_map(|(key, res)| a.str_opt(key).map(|name| (name.to_string(), *res)))
         .collect();
-    Ok(EstKeys { token, common, mode, nout, outputs, matrices })
+    let cached = match a.str_opt("cached") {
+        None => Vec::new(),
+        Some(s) => s
+            .split(',')
+            .map(|t| t.parse::<usize>().map_err(|_| RfError::InvalidInput(format!("regfast plugin: invalid cached `{s}`"))))
+            .collect::<Result<_, _>>()?,
+    };
+    Ok(EstKeys { token, common, mode, nout, outputs, matrices, cached })
 }
 
 /// Solver/dof keys shared by OLS and IV: `tol maxiter dof noconstant`; the `want_*` flags

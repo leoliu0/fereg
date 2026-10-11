@@ -195,8 +195,16 @@ program _rf_glm, eclass
 // --------------------------------------------------------------------------
 // Sample
 // --------------------------------------------------------------------------
-	local varlist `depvar' `indepvars' `base_clustervars'
-	marksample touse, strok
+	* touse: if + in + weight. Missing values of the plain model variables (the dependent
+	* variable first), the absorbed factors, the slopes and the cluster variables exclude an
+	* observation in the plugin at -prepare- (protocol), as in regfast.ado. With exposure() or
+	* offset() the model and cluster variables are marked out here first, since the exposure
+	* check runs over that sample.
+	if ("`exposure'`offset'" != "") {
+		local varlist `depvar' `indepvars' `base_clustervars'
+		marksample touse, strok
+	}
+	else marksample touse, novarlist
 
 	local offvar_e
 	local offvar
@@ -215,6 +223,12 @@ program _rf_glm, eclass
 		local offvar_e `offset'
 	}
 	if ("`offvar'" != "") markout `touse' `offvar'
+	fvrevar `depvar'
+	local yvar `r(varlist)'
+	_rf_model split `yvar' `indepvars'
+	local modelvars `rf_modelvars'
+	if ("`rf_markvars'" != "") markout `touse' `rf_markvars'
+	local nmodel : word count `modelvars'
 
 	local factors `absfactors'
 	foreach v of local base_clustervars {
@@ -241,9 +255,6 @@ program _rf_glm, eclass
 		}
 		local slopevars_r `slopevars_r' `v'
 	}
-	if ("`facvars'`slopevars_r'" != "") markout `touse' `facvars' `slopevars_r', strok
-	fvrevar `depvar'
-	local yvar `r(varlist)'
 
 	* absorb key: factors|intercept|slopes|save per term (1-based positions)
 	local abskey none
@@ -290,11 +301,11 @@ program _rf_glm, eclass
 // Prepare: factorize, drop singletons and fe-separated groups
 // --------------------------------------------------------------------------
 	_rf_load
-	local args `""nfac=`nfac'" "nslope=`nslope'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
+	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
 	local _rf_token
-	_rf_load `facvars' `slopevars_r' `wvar' `yvar' `touse', prepare `args' `common' `abskind'
+	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
 	local num_singletons0 = scalar(__rf_num_singletons)
 	local num_fesep0 = scalar(__rf_num_fe_separated)
@@ -398,7 +409,8 @@ program _rf_glm, eclass
 	local args `""token=`token'" "nx=`nx'" "nout=`nout'" "family=`family'" "tol=`tolstr'" "maxiter=`maxiterations'""'
 	if (`itolerance' > 0) local args `"`args' "itol=`=strtrim(string(`itolerance', "%21.17g"))'""'
 	local args `"`args' "separation=`glmsep'" "guess=`guess'" "log=`=("`log'" != "nolog")'" "offset=`=("`offvar'" != "")'""'
-	local args `"`args' "d=`pos_d'" "fe=`pos_fe'" "b=`b'" "V=`V'" "doft=`doft'""'
+	_rf_model cached `yvar' `xvars' : `modelvars'
+	local args `"`args' "d=`pos_d'" "fe=`pos_fe'" "b=`b'" "V=`V'" "doft=`doft'" "cached=`rf_cached'""'
 	local _rf_status
 	capture noisily _rf_load `yvar' `xvars' `offvar' `touse' `outvars', glm `args' `common'
 	if (_rc) {

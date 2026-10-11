@@ -73,7 +73,7 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
     with_ctx(&k.common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
         let parallel = !k.common.serialio;
-        let rows = io::read_session_rows(&stored.session, &stored.obs, &vars, k.mode, parallel, ctx)?;
+        let rows = io::read_block(&mut stored, &vars, &k.cached, k.mode, parallel, ctx)?;
         let offset = if has_offset {
             Some(io::read_session_rows(&stored.session, &stored.obs, &[r as i32 + 1], k.mode, parallel, ctx)?)
         } else {

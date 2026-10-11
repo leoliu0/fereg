@@ -149,6 +149,29 @@ if ("$RF_MOCK" == "") {
 di as result "savefe slopes passed"
 
 * ---------------------------------------------------------------------------
+* model variables cached by prepare: the block used as is (rows in FE order, nothing dropped
+* after the read: missing values are dropped while reading) or gathered (variables read from
+* Stata, singletons dropped after the read, permuted rows)
+* ---------------------------------------------------------------------------
+clear
+set seed 7
+set obs 4000
+gen long id = ceil(_n / 4)
+gen byte t = mod(_n - 1, 4)
+gen double x1 = rnormal()
+gen double x2 = rnormal()
+gen double y = x1 - x2 + rnormal()
+check y x1 x2, absorb(id t)
+check y x1 i.t x2, absorb(id)
+gen double x3 = rnormal() if mod(_n, 9)
+check y x1 x3 x2, absorb(id t)
+replace x3 = . if id <= 50 & t > 0
+check y x1 x3 x2, absorb(id t)
+sort t id
+check y x1 x2, absorb(id t)
+di as result "model block passed"
+
+* ---------------------------------------------------------------------------
 * groupvar(), residuals, savefe, predict
 * ---------------------------------------------------------------------------
 webuse nlswork, clear

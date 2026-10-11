@@ -36,7 +36,7 @@ pub fn iv(a: &Args) -> Result<(), RfError> {
 
     with_ctx(&k.common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
-        let rows = io::read_session_rows(&stored.session, &stored.obs, &vars, k.mode, !k.common.serialio, ctx)?;
+        let rows = io::read_block(&mut stored, &vars, &k.cached, k.mode, !k.common.serialio, ctx)?;
         ph.mark(&format!("iv: read {} x {r}", stored.session.n()));
         let res = stored.session.iv(rows, &lay, &spec, ctx)?;
         ph.mark("iv: estimate");

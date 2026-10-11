@@ -65,10 +65,13 @@ RF_HIDDEN int rf_count_sample(int tv, int o1, int o2) {
 
 /* Sample scan for cmd=prepare over o1..o2: for the c-th observation whose touse value
    (variable tv) is not 0, writes the observation to obs_out[c] and the value of vars[j] to
-   cols[j][c] (NaN for missing); every output has room for cap values. Returns the number of
-   observations written, -rc on a Stata error, or -9999 when more than cap are found. */
-RF_HIDDEN int rf_read_sample(int tv, const int *vars, int nv, int o1, int o2, int cap, int *obs_out, double *const *cols) {
+   cols[j][c * strides[j]] (NaN for missing, counted in *nmiss); every output has room for cap
+   observations. Returns the number of observations written, -rc on a Stata error, or -9999
+   when more than cap are found. */
+RF_HIDDEN int rf_read_sample(int tv, const int *vars, int nv, int o1, int o2, int cap, int *obs_out, double *const *cols,
+                             const int *strides, long long *nmiss) {
     ST_double mv = SV_missval;
+    long long miss = 0;
     int c = 0;
     for (int o = o1; o <= o2; o++) {
         ST_double t;
@@ -81,10 +84,12 @@ RF_HIDDEN int rf_read_sample(int tv, const int *vars, int nv, int o1, int o2, in
             ST_double z;
             rc = SF_vdata(vars[j], o, &z);
             if (rc) return -rc;
-            cols[j][c] = (z >= mv) ? NAN : z;
+            miss += (z >= mv);
+            cols[j][(size_t)c * (size_t)strides[j]] = (z >= mv) ? NAN : z;
         }
         c++;
     }
+    *nmiss = miss;
     return c;
 }
 

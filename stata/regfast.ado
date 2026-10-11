@@ -264,12 +264,18 @@ program Estimate, eclass
 // --------------------------------------------------------------------------
 // Sample
 // --------------------------------------------------------------------------
-	* if + in + weight + regression variables + cluster variables, then absorbed and slope variables
-	local varlist `depvar' `indepvars' `endogvars' `instvars' `base_clustervars'
+	* touse: if + in + weight. Missing values of the plain model variables (sent to -prepare-,
+	* which keeps their values for the estimation call), the absorbed factors, the slopes and the
+	* cluster variables exclude an observation in the plugin, which zeroes touse for it
+	* (protocol); terms with factor-variable or time-series operators are marked out here.
 	* Drop the previous e(sample) before touse exists: Stata rewrites every observation when it
 	* drops a variable that is not the last one. Kept when -if- may reference e().
 	if (!strpos(`"`if'"', "e(")) ereturn clear
-	marksample touse, strok
+	marksample touse, novarlist
+	_rf_model split `depvar' `indepvars' `endogvars' `instvars'
+	local modelvars `rf_modelvars'
+	if ("`rf_markvars'" != "") markout `touse' `rf_markvars'
+	local nmodel : word count `modelvars'
 
 	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables
 	local factors `absfactors'
@@ -299,7 +305,6 @@ program Estimate, eclass
 		}
 		local slopevars_r `slopevars_r' `v'
 	}
-	if ("`facvars'`slopevars_r'" != "") markout `touse' `facvars' `slopevars_r', strok
 
 	* absorb key: factors|intercept|slopes|save per term (1-based positions)
 	local abskey none
@@ -350,11 +355,11 @@ program Estimate, eclass
 // Prepare: factorize, drop singletons, build the fixed-effects structure
 // --------------------------------------------------------------------------
 	_rf_load
-	local args `""nfac=`nfac'" "nslope=`nslope'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
+	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
 	local _rf_token
-	_rf_load `facvars' `slopevars_r' `wvar' `touse', prepare `args' `common' `abskind'
+	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
 	local num_singletons = scalar(__rf_num_singletons)
 	if (`drop_singletons' & `num_singletons' > 0 & `verbose' > -1) {
@@ -478,7 +483,8 @@ program Estimate, eclass
 		local tolstr = strtrim(string(`tolerance', "%21.17g"))
 		local args `""token=`token'" "nx=`nx'" "nendog=`nendog'" "ninst=`ninst'" "nout=`nout'" "tol=`tolstr'" "maxiter=`iterate'" "dof=`dofkey'""'
 		local args `"`args' "first=`=("`first'" != "")'" "ffirst=`=("`ffirst'" != "")'""'
-		local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" `matargs'"'
+		_rf_model cached `yvar' `xvars' `endog_revars' `inst_revars' : `modelvars'
+		local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" "cached=`rf_cached'" `matargs'"'
 		local _rf_status
 		capture noisily _rf_load `yvar' `xvars' `endog_revars' `inst_revars' `touse' `outvars', iv `args' `common'
 		if (_rc) {
@@ -759,7 +765,8 @@ program Estimate, eclass
 	matrix `doft' = J(`num_slots', 5, 0)
 	local tolstr = strtrim(string(`tolerance', "%21.17g"))
 	local args `""token=`token'" "nx=`nx'" "nout=`nout'" "tol=`tolstr'" "maxiter=`iterate'" "dof=`dofkey'" "noconstant=`=("`constant'" == "noconstant")'""'
-	local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" `matargs'"'
+	_rf_model cached `yvar' `xvars' : `modelvars'
+	local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" "cached=`rf_cached'" `matargs'"'
 	local _rf_status
 	capture noisily _rf_load `yvar' `xvars' `touse' `outvars', ols `args' `common'
 	if (_rc) {
@@ -1391,7 +1398,8 @@ end
 version 16
 mata:
 // r(table) as _coef_table builds it: rows b se t pvalue ll ul df crit eform; omitted and base
-// coefficients (r(omit) from _ms_omit_info) get missing se, t, pvalue, ll and ul.
+// coefficients (r(omit) from _ms_omit_info) get missing se, t, pvalue, ll and ul. Also posts the
+// statistic labels e(_r_z__CL) and e(_r_z_abs__CL) that _coef_table leaves in e().
 void _rf_rtable(string scalar name, real scalar level)
 {
 	real rowvector b, se, t, p, omit
@@ -1413,7 +1421,9 @@ void _rf_rtable(string scalar name, real scalar level)
 		p = 2 :* ttail(df, abs(t))
 	}
 	st_matrix(name, (b \ se \ t \ p \ b - crit :* se \ b + crit :* se \ J(1, k, df) \ J(1, k, crit) \ J(1, k, 0)))
-	st_matrixrowstripe(name, (J(9, 1, ""), ("b" \ "se" \ "t" \ "pvalue" \ "ll" \ "ul" \ "df" \ "crit" \ "eform")))
+	st_matrixrowstripe(name, (J(9, 1, ""), ("b" \ "se" \ (missing(df) ? "z" : "t") \ "pvalue" \ "ll" \ "ul" \ "df" \ "crit" \ "eform")))
+	st_global("e(_r_z__CL)", missing(df) ? "z" : "t")
+	st_global("e(_r_z_abs__CL)", missing(df) ? "|z|" : "|t|")
 	st_matrixcolstripe(name, st_matrixcolstripe("e(b)"))
 }
 end
