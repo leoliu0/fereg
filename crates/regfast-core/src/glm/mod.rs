@@ -312,6 +312,7 @@ impl Session {
             tol: g.tol,
             maxiter: g.maxiter,
             highest,
+            start_tol: irls::START_INNER_TOL.max(g.tol),
             inner_maxiter,
             exact: self.terms.len() <= 1,
             log: g.log,
@@ -327,6 +328,7 @@ impl Session {
             ctx.log(&format!("{{txt}}(IRLS step detected {n_sep} separated observation{})", plural(n_sep)));
             num_sep += n_sep as u64;
             let sep = std::mem::take(&mut out.separated);
+            cfg.start_tol = out.tol_in;
             drop(out);
             self.glm_drop(&mut d, &sep, &mut [&mut mu, &mut eta], pool, ctx)?;
             self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;

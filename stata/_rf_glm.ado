@@ -433,7 +433,12 @@ program _rf_glm, eclass
 // Post results
 // --------------------------------------------------------------------------
 	local colnames `fullvarlist' _cons
-	local indepvars_e `selected' _cons
+	* ppmlhdfe: invtokens((kept names, " _cons")), i.e. non-base, non-collinear regressors and a
+	* doubled space before _cons
+	local indepvars_e
+	forval j = 1/`nx' {
+		if (`: word `j' of `status'' == 0) local indepvars_e `indepvars_e' `: word `j' of `selected''
+	}
 	local K_full : word count `colnames'
 	if (`K_full' > `K_all') {
 		tempname bf Vf
@@ -505,7 +510,7 @@ program _rf_glm, eclass
 		ereturn local clustvar `clustervars'
 		ereturn local title3 "Statistics robust to heteroskedasticity"
 	}
-	ereturn local indepvars `indepvars_e'
+	mata: st_global("e(indepvars)", invtokens((tokens(st_local("indepvars_e")), " _cons")))
 	ereturn local depvar `depvar'
 	if (!`is_noabsorb') ereturn local title2 "Absorbing `G' HDFE group`=cond(`G' == 1, "", "s")'"
 	ereturn local footnote _rf_footnote
@@ -524,7 +529,7 @@ program _rf_glm, eclass
 
 	ereturn matrix dof_table = `doft'
 	mata: st_matrixrowstripe("e(dof_table)", (J(`num_slots', 1, ""), tokens(st_local("dof_rownames"))'))
-	mata: st_matrixcolstripe("e(dof_table)", (J(5, 1, ""), ("Categories" \ "Redundant" \ "Num Coefs" \ "Inexact?" \ "Nested?")))
+	mata: st_matrixcolstripe("e(dof_table)", (J(5, 1, ""), ("Categories" \ "Redundant" \ "Num Coefs" \ "Exact?" \ "Nested?")))
 
 	if ("`d'" != "") label variable `d' "Sum of fixed effects"
 	local i 0
@@ -533,8 +538,8 @@ program _rf_glm, eclass
 		local lab : word `i' of `fevar_labels'
 		label variable `t' `"`lab'"'
 	}
-	c_local eform `eform'`or'
-	c_local diopts `diopts'
+	* Display options for the caller's replay
+	c_local rf_display `eform' `or' `header' `table' `footnote' `diopts'
 end
 
 

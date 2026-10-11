@@ -34,6 +34,9 @@ pub(crate) struct IrlsCfg {
     pub maxiter: usize,
     /// ppmlhdfe `highest_inner_tol` = max(1e-12, min(target_inner_tol, 0.1·tol)).
     pub highest: f64,
+    /// Inner tolerance of the first iteration (ppmlhdfe `HDFE.tolerance` persists across the
+    /// re-run of IRLS after `mu` separation: max(start_inner_tol, tol) first, then the last value).
+    pub start_tol: f64,
     /// FE solver iteration cap.
     pub inner_maxiter: usize,
     /// The absorber solves exactly (at most one absorbed term; reghdfe `G == 1`).
@@ -62,6 +65,8 @@ pub(crate) struct IrlsOut {
     /// Observations flagged by the `mu` rule (row order).
     pub separated: Vec<bool>,
     pub n_sep: usize,
+    /// Inner tolerance after the last iteration's update (the next run's `start_tol`).
+    pub tol_in: f64,
 }
 
 /// Mata `x :<= lb ... ub` with missing (NaN) bounds treated as +∞ (ftools `inrange`).
@@ -202,7 +207,7 @@ pub(crate) fn irls(
     }
     let log_septol = MU_TOL.ln();
     let xcols: Vec<usize> = (1..r).collect();
-    let mut tol_in = START_INNER_TOL.max(c.tol);
+    let mut tol_in = c.start_tol;
     let mut alt_tol = f64::NAN;
     let mut hist = [f64::NAN; 3];
     let mut eps = f64::NAN;
@@ -355,6 +360,7 @@ pub(crate) fn irls(
                 coefs: warm,
                 separated: sep,
                 n_sep,
+                tol_in,
             });
         }
 
