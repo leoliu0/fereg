@@ -51,6 +51,12 @@ jobs:
           grep -qx stata_call target/exports.txt
           test "$(wc -l < target/exports.txt)" -eq 2
 
+      - name: regfast.pkg lists every ado and help file (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          diff <(cd stata && ls *.ado *.sthlp | sort) <(awk '$1 == "f" {print $2}' stata/regfast.pkg | sort)
+
       - name: Mock host (Linux, macOS)
         if: runner.os != 'Windows'
         shell: bash

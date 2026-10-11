@@ -1,0 +1,3 @@
+v 3
+d regfast — fast high-dimensional fixed effects for Stata (Rust)
+p regfast fast HDFE OLS/IV (regfast), PPML (ppmlfast), logit (logitfast)
