@@ -77,7 +77,7 @@ pub fn selftest(a: &Args) -> Result<(), RfError> {
         if ctx.verbose >= 1 {
             let vals = (obs.len() * k) as f64;
             ctx.log(&format!(
-                "{{txt}}selftest: read {} obs x {k} vars in {tread:.4} s ({:.3e} values/s, {})\n",
+                "{{txt}}selftest: read {} obs x {k} vars in {tread:.4} s ({:.3e} values/s, {})",
                 obs.len(),
                 vals / tread.max(1e-12),
                 if parallel { "parallel" } else { "serial" }
