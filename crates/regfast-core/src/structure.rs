@@ -62,6 +62,9 @@ pub struct Structure {
     pub m_small: usize,
     /// Fixed partition of the segments into parts of ≳ [`CHUNK`] cells (boundaries, len = parts + 1).
     pub parts: Vec<u32>,
+    /// Largest reduced vector (bytes) scattered entirely through accumulators
+    /// (see `operator::Ops::accumulates_all`).
+    pub acc_bytes_max: usize,
 }
 
 impl Structure {
@@ -296,6 +299,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
         m,
         m_small,
         parts,
+        acc_bytes_max: crate::operator::ACC_BYTES_MAX,
     };
 
     // Dense small-block work Σ_seg s², s = distinct small coordinates in the segment.

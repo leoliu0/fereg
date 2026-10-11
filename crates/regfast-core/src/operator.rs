@@ -17,6 +17,11 @@ use crate::structure::{Structure, split_bounds};
 /// Coordinates with d ≤ REDUNDANT·n are redundant (no information beyond FE1).
 pub const REDUNDANT: f64 = 1e-12;
 
+/// Largest reduced vector (bytes, all R columns) scattered entirely through per-task accumulators.
+pub const ACC_BYTES_MAX: usize = 8 << 20;
+/// Most scatter tasks when every block is accumulated (fixed: thread-count independent).
+pub const MAX_ACC_TASKS: usize = 64;
+
 /// Weight-dependent quantities (refreshed by `set_weights`).
 pub struct WeightState {
     /// Observation weights in row order (`None` = all ones).
@@ -234,10 +239,41 @@ impl Ops<'_> {
         }
     }
 
+    /// Whether every block (small and large) is scattered through per-task accumulators for a
+    /// block of `r` columns: true when the whole reduced vector is at most [`ACC_BYTES_MAX`], so
+    /// the random accumulation stays cache resident. Otherwise large blocks go through the scratch
+    /// `zbuf` (M × r) and level-sorted pulls.
+    pub fn accumulates_all(&self, r: usize) -> bool {
+        self.st.has_large() && self.st.m * r * 8 <= self.st.acc_bytes_max
+    }
+
+    /// Whether [`Ops::apply`] / [`Ops::rhs`] need the M × r scratch.
+    pub fn needs_zbuf(&self, r: usize) -> bool {
+        self.st.has_large() && !self.accumulates_all(r)
+    }
+
+    /// Segment boundaries of the scatter tasks for accumulators of `acc_len` values: with every
+    /// block accumulated, at most [`MAX_ACC_TASKS`] tasks and a combine volume of at most half
+    /// the per-cell data; otherwise the fixed parts (grouped by [`Structure::tasks`]).
+    /// Depends only on the data, `r` and `acc_len` (never on the thread count).
+    fn scatter_tasks(&self, r: usize, acc_len: usize, all: bool) -> Vec<u32> {
+        let st = self.st;
+        if !all {
+            return st.tasks(acc_len);
+        }
+        let np = st.nparts();
+        let k = (st.ncells * r / (2 * acc_len).max(1)).clamp(1, MAX_ACC_TASKS).min(np);
+        let per = np.div_ceil(k);
+        let mut t: Vec<u32> = (0..np).step_by(per).map(|p| st.parts[p]).collect();
+        t.push(st.parts[np]);
+        t
+    }
+
     /// Scatters per-cell values `z_c` (computed by `fill` per segment into `zc`, len × r) into the
-    /// reduced space: small coordinates through per-task accumulators, large ones through the
-    /// scratch `zbuf` (M × r) and level pulls. `fill(s, cells, zc, extra)` may also write
-    /// per-segment outputs (`seg_out`, `seg_w` values per segment) and per-task sums (`extra_len`).
+    /// reduced space `y`: accumulated blocks through per-task accumulators combined in task order,
+    /// the other large blocks through `zbuf` and level pulls (see [`Ops::accumulates_all`]).
+    /// `fill(s, cells, zc, seg_slot, extra)` may also write per-segment outputs (`seg_out`, of
+    /// the given width) and per-task sums (`extra_len`, combined in task order and returned).
     #[allow(clippy::too_many_arguments)]
     fn scatter_cells(
         &self,
@@ -250,13 +286,15 @@ impl Ops<'_> {
         fill: impl Fn(usize, std::ops::Range<usize>, &mut Vec<f64>, Option<&mut [f64]>, &mut [f64]) + Sync,
     ) -> Vec<f64> {
         let st = self.st;
-        let ms = st.m_small;
-        let has_large = st.has_large();
-        let acc_len = ms * r;
-        let tb = st.tasks(acc_len);
+        let all = self.accumulates_all(r);
+        let use_z = self.needs_zbuf(r);
+        let acc_len = if all { st.m * r } else { st.m_small * r };
+        // Blocks scattered through the accumulators: small ones, or all of them.
+        let nacc = if all { st.nb } else { st.blocks.iter().filter(|b| b.small).count() };
+        let tb = self.scatter_tasks(r, acc_len, all);
         let cb = st.cell_bounds(&tb);
         let nt = tb.len() - 1;
-        let zp: Vec<Option<&mut [f64]>> = if has_large {
+        let zp: Vec<Option<&mut [f64]>> = if use_z {
             let zb: Vec<usize> = cb.iter().map(|c| c * r).collect();
             split_bounds(&mut zbuf[..st.ncells * r], &zb).into_iter().map(Some).collect()
         } else {
@@ -285,12 +323,8 @@ impl Ops<'_> {
                         fill(s, cells.clone(), &mut zc, segslot, &mut extra);
                         for (k, c) in cells.enumerate() {
                             let z = &zc[k * r..(k + 1) * r];
-                            for (b, &code) in st.codes(c).iter().enumerate() {
-                                let blk = &st.blocks[b];
-                                if !blk.small {
-                                    break;
-                                }
-                                let at = (blk.off + code as usize) * r;
+                            for (b, &code) in st.codes(c)[..nacc].iter().enumerate() {
+                                let at = (st.blocks[b].off + code as usize) * r;
                                 for (a, v) in acc[at..at + r].iter_mut().zip(z) {
                                     *a += v;
                                 }
@@ -305,17 +339,26 @@ impl Ops<'_> {
                 })
                 .collect()
         });
+        // Ordered combine, parallel over entries.
+        pool.install(|| {
+            y[..acc_len].par_chunks_mut(4096).enumerate().for_each(|(ci, out)| {
+                let base = ci * 4096;
+                let len = out.len();
+                out.iter_mut().for_each(|v| *v = 0.0);
+                for (acc, _) in &results {
+                    for (o, v) in out.iter_mut().zip(&acc[base..base + len]) {
+                        *o += v;
+                    }
+                }
+            })
+        });
         let mut extra = vec![0.0; extra_len];
-        y[..acc_len].iter_mut().for_each(|v| *v = 0.0);
-        for (acc, ex) in &results {
-            for (a, v) in y[..acc_len].iter_mut().zip(acc) {
-                *a += v;
-            }
+        for (_, ex) in &results {
             for (a, v) in extra.iter_mut().zip(ex) {
                 *a += v;
             }
         }
-        if has_large {
+        if use_z {
             self.pull_large(zbuf, r, y, pool);
         }
         extra

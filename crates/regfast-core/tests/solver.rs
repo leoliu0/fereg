@@ -104,12 +104,18 @@ fn max_rel(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Checks `cfg` and the same configuration with large blocks scattered through the M×R scratch
+/// (`acc_bytes_max = 0`); returns the info of `cfg`.
 fn check(d: &Data, cfg: SolverConfig, r: usize) -> SolveInfo {
-    let mut p = setup(d, cfg, r);
-    let (f, dn, info, _) = run(&mut p, None);
-    let err = max_rel(&f, &dn);
-    assert!(err <= 1e-9, "max rel error {err:e} (iterations {}, escalated {}, {cfg:?}, seed {})", info.iterations, info.escalated, d.seed);
-    info
+    let mut first = None;
+    for c in [cfg, SolverConfig { acc_bytes_max: 0, ..cfg }] {
+        let mut p = setup(d, c, r);
+        let (f, dn, info, _) = run(&mut p, None);
+        let err = max_rel(&f, &dn);
+        assert!(err <= 1e-9, "max rel error {err:e} (iterations {}, escalated {}, {c:?}, seed {})", info.iterations, info.escalated, d.seed);
+        first.get_or_insert(info);
+    }
+    first.expect("ran")
 }
 
 fn random_codes(n: usize, g: usize, rng: &mut SplitMix64) -> Vec<f64> {
@@ -147,8 +153,12 @@ fn difficult(nindiv: usize, nyear: usize, nfirm: usize, weighted: bool) -> Data 
     Data { factors: vec![indiv, year, firm], terms: vec![vec![0], vec![1], vec![2]], w, seed: 13 }
 }
 
+fn limit(small_limit: usize) -> SolverConfig {
+    SolverConfig { small_limit, ..SolverConfig::default() }
+}
+
 fn all_large() -> SolverConfig {
-    SolverConfig { small_limit: 0 }
+    limit(0)
 }
 
 #[test]
@@ -157,7 +167,7 @@ fn random_bipartite_two_and_three_fe() {
         let d = bipartite(2000, &gs, false, seed);
         check(&d, SolverConfig::default(), 3);
         check(&d, all_large(), 3);
-        check(&d, SolverConfig { small_limit: 60 }, 2);
+        check(&d, limit(60), 2);
     }
 }
 
@@ -198,12 +208,12 @@ fn band(nfirm: usize, nindiv: usize, width: usize, nyear: usize, weighted: bool)
 #[test]
 fn band_graph_with_year_escalates() {
     let d = band(400, 800, 3, 10, false);
-    let info = check(&d, SolverConfig { small_limit: 50 }, 3);
+    let info = check(&d, limit(50), 3);
     assert!(info.escalated, "band graph must escalate ({} iterations)", info.iterations);
     assert!(info.iterations <= 60, "band graph took {} iterations", info.iterations);
     check(&d, all_large(), 2);
     check(&d, SolverConfig::default(), 2);
-    check(&band(400, 800, 3, 10, true), SolverConfig { small_limit: 50 }, 2);
+    check(&band(400, 800, 3, 10, true), limit(50), 2);
 }
 
 #[test]
@@ -242,7 +252,7 @@ fn nested_fe() {
 #[test]
 fn large_plus_small_blocks_and_repeated_cells() {
     let d = bipartite(3000, &[100, 12, 400], false, 12);
-    let info = check(&d, SolverConfig { small_limit: 50 }, 4);
+    let info = check(&d, limit(50), 4);
     assert!(info.iterations >= 1);
     // Few levels: cells hold many observations.
     let d = bipartite(2000, &[40, 15, 9], true, 14);
@@ -265,7 +275,8 @@ fn noabsorb_and_single_fe_are_closed_form() {
 
 #[test]
 fn set_weights_with_warm_start() {
-    for (d, cfg) in [(bipartite(1500, &[150, 20, 60], false, 18), all_large()), (difficult(150, 10, 300, false), SolverConfig { small_limit: 20 })] {
+    let z_path = SolverConfig { small_limit: 20, acc_bytes_max: 0 };
+    for (d, cfg) in [(bipartite(1500, &[150, 20, 60], false, 18), all_large()), (difficult(150, 10, 300, false), z_path)] {
         let mut p = setup(&d, cfg, 2);
         let (f, dn, info0, _) = run(&mut p, None);
         assert!(max_rel(&f, &dn) <= 1e-9);

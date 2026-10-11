@@ -30,11 +30,14 @@ pub const MAX_BLOCK_NNZ: u64 = 30_000_000;
 pub struct SolverConfig {
     /// Total levels of the blocks factored jointly and exactly (dense).
     pub small_limit: usize,
+    /// Largest reduced vector (bytes, all R columns) scattered entirely through per-task
+    /// accumulators; larger large blocks use the M×R scratch and level pulls.
+    pub acc_bytes_max: usize,
 }
 
 impl Default for SolverConfig {
     fn default() -> Self {
-        SolverConfig { small_limit: structure::SMALL_LIMIT }
+        SolverConfig { small_limit: structure::SMALL_LIMIT, acc_bytes_max: crate::operator::ACC_BYTES_MAX }
     }
 }
 
@@ -83,7 +86,8 @@ impl FeSolver {
         if terms.iter().any(|t| t.codes.len() != n) {
             return Err(RfError::InvalidInput("term codes length differs from the kept sample".into()));
         }
-        let st = structure::build(terms, n, cfg.small_limit, pool)?;
+        let mut st = structure::build(terms, n, cfg.small_limit, pool)?;
+        st.acc_bytes_max = cfg.acc_bytes_max;
         log_phase(ctx, &mut t, "structure");
         ctx.check()?;
         let w_rows = match weights {
@@ -352,7 +356,8 @@ impl Absorber for FeSolver {
             self.need_refactor = false;
         }
         log_phase(ctx, &mut t, "preconditioner");
-        let mut zbuf = if self.st.has_large() { alloc_vec(self.st.ncells * r, 0.0)? } else { Vec::new() };
+        let ops = Ops { st: &self.st, ws: &self.ws };
+        let mut zbuf = if ops.needs_zbuf(r) { alloc_vec(self.st.ncells * r, 0.0)? } else { Vec::new() };
         let (rhs, b1, wsq, wsum) = Ops { st: &self.st, ws: &self.ws }.rhs(z, r, &mut zbuf, pool)?;
         log_phase(ctx, &mut t, "rhs pass");
         ctx.check()?;

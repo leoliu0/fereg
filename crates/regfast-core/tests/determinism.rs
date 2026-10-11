@@ -105,12 +105,15 @@ fn check(d: &Data, cfg: SolverConfig) -> (usize, bool) {
 fn two_fe_with_large_block() {
     let d = random(200_000, &[20_000, 5_000], false, 1);
     check(&d, SolverConfig::default());
+    check(&d, SolverConfig { acc_bytes_max: 0, ..SolverConfig::default() });
 }
 
 #[test]
 fn band_graph_with_escalation() {
     let d = band(2_000, 40_000, 5);
-    let (_, escalated) = check(&d, SolverConfig { small_limit: 0 });
+    let (_, escalated) = check(&d, SolverConfig { small_limit: 0, ..SolverConfig::default() });
+    assert!(escalated, "the band graph should exercise the escalated preconditioner");
+    let (_, escalated) = check(&d, SolverConfig { small_limit: 0, acc_bytes_max: 0 });
     assert!(escalated, "the band graph should exercise the escalated preconditioner");
 }
 
@@ -118,5 +121,5 @@ fn band_graph_with_escalation() {
 fn weighted_three_fe_with_repeated_cells() {
     let d = random(300_000, &[2_000, 8, 30], true, 3);
     check(&d, SolverConfig::default());
-    check(&d, SolverConfig { small_limit: 0 });
+    check(&d, SolverConfig { small_limit: 0, acc_bytes_max: 0 });
 }
