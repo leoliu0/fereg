@@ -1,0 +1,130 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      - name: Build
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release -p regfast-stata
+          cp target/release/libregfast_stata.so regfast.linux64.plugin
+
+      - name: glibc floor (<= 2.28)
+        run: |
+          max=$(objdump -T regfast.linux64.plugin | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol: $max"
+          test "$(printf '%s\nGLIBC_2.28\n' "$max" | sort -V | tail -1)" = "GLIBC_2.28"
+
+      - name: Mock host
+        run: |
+          . "$HOME/.cargo/env"
+          cargo run --release -p regfast-core --example mock_expected
+          cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
+          target/mockhost regfast.linux64.plugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-linux
+          path: regfast.linux64.plugin
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build universal plugin
+        run: |
+          MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release -p regfast-stata --target aarch64-apple-darwin
+          MACOSX_DEPLOYMENT_TARGET=10.13 cargo build --release -p regfast-stata --target x86_64-apple-darwin
+          lipo -create -output regfast.macos-universal.plugin \
+            target/aarch64-apple-darwin/release/libregfast_stata.dylib \
+            target/x86_64-apple-darwin/release/libregfast_stata.dylib
+          codesign --force -s - regfast.macos-universal.plugin
+          lipo -info regfast.macos-universal.plugin
+
+      - name: Mock host (arm64)
+        run: |
+          cargo run --release -p regfast-core --example mock_expected
+          cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -o target/mockhost
+          target/mockhost regfast.macos-universal.plugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: regfast.macos-universal.plugin
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release -p regfast-stata --target x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/regfast_stata.dll regfast.win64.plugin
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Mock host
+        shell: cmd
+        run: |
+          cargo run --release -p regfast-core --example mock_expected
+          cl /nologo /O2 /DSYSTEM=STWIN32 /Icrates\regfast-stata\c tests\mockhost\mockhost.c /Fe:target\mockhost.exe
+          target\mockhost.exe regfast.win64.plugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-windows
+          path: regfast.win64.plugin
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble net-install tree
+        run: |
+          mkdir -p dist/stata
+          cp stata/*.ado stata/*.sthlp stata/stata.toc dist/stata/
+          sed "s/^d Distribution-Date: .*/d Distribution-Date: $(date -u +%Y%m%d)/" stata/regfast.pkg > dist/stata/regfast.pkg
+          cp artifacts/regfast.linux64.plugin artifacts/regfast.macos-universal.plugin artifacts/regfast.win64.plugin dist/stata/
+          ls -l dist/stata
+          (cd dist && zip -r "../regfast-${GITHUB_REF_NAME}-stata.zip" stata)
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./dist
+          keep_files: false
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: regfast-${{ github.ref_name }}-stata.zip
