@@ -101,10 +101,11 @@ fn run(argv: &[String]) -> Result<(), RfError> {
 }
 
 /// Runs `f` with a context whose interrupt polls Stata's Break flag and whose log prints to the
-/// Results window. Both callbacks run only on Stata's thread (`Ctx` callbacks are not `Sync`).
+/// Results window, one line per call (the callback appends the newline). Both callbacks run only
+/// on Stata's thread (`Ctx` callbacks are not `Sync`).
 fn with_ctx<R>(c: &Common, f: impl FnOnce(&Ctx) -> R) -> R {
     let interrupt = spi::break_pressed;
-    let log = |s: &str| spi::display(s);
+    let log = |s: &str| spi::display(&format!("{s}\n"));
     let ctx = Ctx { threads: c.threads, verbose: c.verbose, interrupt: &interrupt, log: &log };
     f(&ctx)
 }
