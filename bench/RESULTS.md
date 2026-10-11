@@ -1,154 +1,626 @@
 # regfast benchmark results
 
-Generated 2026-10-11T13:26:27 by `run.py` from `results/results.csv`.
+Generated 2026-10-12T09:01:07 by `run.py` from `results/results.csv`.
 Times are medians of the timed runs in seconds (`ms` = milliseconds); estimation call only, data in memory.
 `ratio` = regfast / fastest finished competitor. Gate: PASS iff regfast is faster than every competitor that
 finished (a competitor timeout counts as slower); `n/a` = regfast not run. `error`/`timeout`/`unsupported`
 cells are explained in results.csv. Coefficient gap: max relative difference over shared non-constant
 coefficients versus regfast (versus fixest when regfast has no result for the row).
 
-**Gate summary:** 4 PASS, 12 FAIL.
+**Gate summary:** 272 PASS, 1 FAIL.
 
 ## G1 OLS (fixest DGP)
 
 | config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 7.0ms | 18.0ms | 9.0ms | 5.0ms | 6.6ms | 7.2ms | 1.40 | FAIL |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 |  | 19.0ms | 6.0ms | 5.0ms | 6.4ms | 7.2ms |  | n/a |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 7.0ms | 53.0ms | 11.0ms | 31.0ms | 9.8ms | 11.9ms | 0.72 | PASS |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 40.0ms | 8.0ms | 6.0ms | 10.7ms | 10.6ms |  | n/a |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 8.0ms | 20.0ms | 11.0ms | 7.0ms | 8.0ms | 8.5ms | 1.14 | FAIL |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 |  | 24.0ms | 7.0ms | 6.0ms | 8.8ms | 13.6ms |  | n/a |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 8.0ms | 43.0ms | 13.0ms | 8.0ms | 10.4ms | 11.1ms | 1.00 | FAIL |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 58.0ms | 15.0ms | 8.0ms | 18.6ms | 13.9ms |  | n/a |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 15.0ms | 0.131 | 98.0ms | 9.0ms | 23.9ms | 33.3ms | 1.67 | FAIL |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 |  | 0.145 | 23.0ms | 11.0ms | 23.6ms | 30.1ms |  | n/a |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 36.0ms | 0.852 | 0.139 | 67.0ms | 0.533 | 57.2ms | 0.63 | PASS |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 0.985 | 0.220 | 0.108 | 0.710 | 62.7ms |  | n/a |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 20.0ms | 0.145 | 74.0ms | 14.0ms | 36.0ms | 56.5ms | 1.43 | FAIL |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 |  | 0.275 | 38.0ms | 20.0ms | 29.5ms | 47.5ms |  | n/a |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 31.0ms | 1.177 | 0.275 | 75.0ms | 0.590 | 71.0ms | 0.44 | PASS |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 2.184 | 0.573 | 0.332 | 2.126 | 0.109 |  | n/a |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 6.0ms | 18.0ms | 7.0ms | 5.0ms | 6.4ms | 7.0ms | 1.20 | FAIL |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 |  | 18.0ms | 6.0ms | 5.0ms | 6.9ms | 6.9ms |  | n/a |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 8.0ms | 0.306 | 0.250 | 23.0ms | 9.3ms | 12.6ms | 0.86 | PASS |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 37.0ms | 8.0ms | 6.0ms | 10.0ms | 10.0ms |  | n/a |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 6.0ms | 20.0ms | 8.0ms | 5.0ms | 8.3ms | 8.0ms | 1.20 | FAIL |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 |  | 47.0ms | 10.0ms | 12.0ms | 11.4ms | 23.1ms |  | n/a |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 8.0ms | 55.0ms | 10.0ms | 7.0ms | 8.8ms | 11.1ms | 1.14 | FAIL |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 46.0ms | 9.0ms | 7.0ms | 10.1ms | 13.3ms |  | n/a |
-| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 18.0ms | 0.128 | 0.213 | 9.0ms | 24.3ms | 31.7ms | 2.00 | FAIL |
-| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 |  | 0.138 | 22.0ms | 9.0ms | 22.3ms | 26.3ms |  | n/a |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 36.0ms | 0.286 | 0.220 | 43.0ms | 33.9ms | 64.0ms | 1.06 | FAIL |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 0.298 | 26.0ms | 11.0ms | 37.5ms | 64.5ms |  | n/a |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 19.0ms | 0.205 | 0.165 | 13.0ms | 32.6ms | 41.7ms | 1.46 | FAIL |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 |  | 0.181 | 35.0ms | 17.0ms | 28.8ms | 38.4ms |  | n/a |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 36.0ms | 0.311 | 38.0ms | 14.0ms | 32.1ms | 70.7ms | 2.57 | FAIL |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 |  | 0.405 | 43.0ms | 25.0ms | 38.2ms | 98.2ms |  | n/a |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 2.0ms | 18.0ms | 9.0ms | 22.0ms | 6.6ms | 7.2ms | 0.30 | PASS |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 2.0ms | 19.0ms | 6.0ms | 5.0ms | 6.4ms | 7.2ms | 0.40 | PASS |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 3.0ms | 53.0ms | 11.0ms | 28.0ms | 9.8ms | 11.9ms | 0.31 | PASS |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 3.0ms | 40.0ms | 8.0ms | 6.0ms | 10.7ms | 10.6ms | 0.50 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 2.0ms | 20.0ms | 11.0ms | 10.0ms | 8.0ms | 8.5ms | 0.25 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 3.0ms | 24.0ms | 7.0ms | 6.0ms | 8.8ms | 13.6ms | 0.50 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 3.0ms | 43.0ms | 13.0ms | 8.0ms | 10.4ms | 11.1ms | 0.38 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 3.0ms | 58.0ms | 15.0ms | 8.0ms | 18.6ms | 13.9ms | 0.38 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 4.0ms | 25.0ms | 10.0ms | 11.0ms | 8.9ms | 9.5ms | 0.45 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 3.0ms | 29.0ms | 8.0ms | 7.0ms | 9.4ms | 9.7ms | 0.43 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 4.0ms | 72.0ms | 19.0ms | 8.0ms | 10.6ms | 11.0ms | 0.50 | PASS |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 4.0ms | 80.0ms | 25.0ms | 11.0ms | 20.3ms | 17.5ms | 0.36 | PASS |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 6.0ms | 0.131 | 98.0ms | 9.0ms | 23.9ms | 33.3ms | 0.67 | PASS |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 6.0ms | 0.145 | 23.0ms | 11.0ms | 23.6ms | 30.1ms | 0.55 | PASS |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 8.0ms | 0.852 | 0.139 | 0.138 | 0.533 | 57.2ms | 0.14 | PASS |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 11.0ms | 0.985 | 0.220 | 0.108 | 0.710 | 62.7ms | 0.18 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 7.0ms | 0.145 | 74.0ms | 0.105 | 36.0ms | 56.5ms | 0.19 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 9.0ms | 0.275 | 38.0ms | 20.0ms | 29.5ms | 47.5ms | 0.45 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 10.0ms | 1.177 | 0.275 | 0.114 | 0.590 | 71.0ms | 0.14 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 17.0ms | 2.184 | 0.573 | 0.332 | 2.126 | 0.109 | 0.16 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 9.0ms | 0.169 | 42.0ms | 0.180 | 36.3ms | 40.9ms | 0.25 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 15.0ms | 0.241 | 45.0ms | 24.0ms | 32.2ms | 48.0ms | 0.62 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 14.0ms | 1.765 | 0.437 | 0.371 | 0.478 | 82.8ms | 0.17 | PASS |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 20.0ms | 2.872 | 0.815 | 0.536 | 3.324 | 0.168 | 0.12 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 23.0ms | 1.129 | 0.110 | 49.0ms | 0.159 | 0.183 | 0.47 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 40.0ms | 1.232 | 0.132 | 50.0ms | 0.160 | 0.219 | 0.80 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 43.0ms | 21.651 | 1.829 | 1.412 | 17.486 | 0.383 | 0.11 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.122 | 33.603 | 6.402 | 2.431 | 21.943 | 0.637 | 0.19 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | 31.0ms | 0.625 | 0.204 | 82.0ms | 0.284 | 0.326 | 0.38 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | 75.0ms | 1.070 | 0.262 | 0.137 | 0.290 | 0.434 | 0.55 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 27.0ms | 1.364 | 0.219 | 79.0ms | 0.224 | 0.270 | 0.34 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 61.0ms | 1.754 | 0.251 | 0.116 | 0.230 | 0.371 | 0.53 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | 62.0ms | 47.375 | 1.278 | 4.711 | 48.805 | 0.835 | 0.07 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | 0.170 | 95.095 | 2.156 | 8.403 | 58.179 | 1.469 | 0.12 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 60.0ms | 47.955 | 1.278 | 4.586 | 48.271 | 0.777 | 0.08 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.157 | 95.627 | 2.116 | 8.483 | 58.841 | 1.417 | 0.11 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 36.0ms | 1.798 | 0.290 | 0.113 | 0.301 | 0.362 | 0.32 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 0.109 | 2.495 | 0.368 | 0.213 | 0.317 | 0.553 | 0.51 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 80.0ms | 86.994 | 2.284 | 9.628 | 88.884 | 1.230 | 0.07 | PASS |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.313 | 172.037 | 3.853 | 17.365 | 119.780 | 2.594 | 0.12 | PASS |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 0.150 | 12.136 | 0.942 | 0.595 | 2.069 | 2.420 | 0.25 | PASS |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.388 | timeout | 73.541 | 35.764 | timeout | 5.925 | 0.07 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | 0.287 | 6.650 | 1.739 | 1.074 | 3.122 | 3.645 | 0.27 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 0.249 | 14.615 | 1.886 | 0.857 | 2.916 | 3.408 | 0.29 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | 0.599 | timeout | 20.828 | 77.090 | timeout | 13.569 | 0.04 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.562 | timeout | 20.756 | 77.911 | timeout | 13.113 | 0.04 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 0.360 | 22.694 | 2.882 | 1.355 | 3.797 | 4.709 | 0.27 | PASS |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.859 | timeout | 35.780 | 158.831 | timeout | 21.494 | 0.04 | PASS |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 2.0ms | 18.0ms | 7.0ms | 8.0ms | 6.4ms | 7.0ms | 0.31 | PASS |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 3.0ms | 18.0ms | 6.0ms | 5.0ms | 6.9ms | 6.9ms | 0.60 | PASS |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 2.0ms | 0.306 | 0.250 | 5.0ms | 9.3ms | 12.6ms | 0.40 | PASS |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 2.0ms | 37.0ms | 8.0ms | 6.0ms | 10.0ms | 10.0ms | 0.33 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 3.0ms | 20.0ms | 8.0ms | 6.0ms | 8.3ms | 8.0ms | 0.50 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 2.0ms | 47.0ms | 10.0ms | 12.0ms | 11.4ms | 23.1ms | 0.20 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 4.0ms | 55.0ms | 10.0ms | 6.0ms | 8.8ms | 11.1ms | 0.67 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 3.0ms | 46.0ms | 9.0ms | 7.0ms | 10.1ms | 13.3ms | 0.43 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 4.0ms | 26.0ms | 10.0ms | 6.0ms | 9.7ms | 9.5ms | 0.67 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 3.0ms | 31.0ms | 8.0ms | 6.0ms | 9.2ms | 10.7ms | 0.50 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 4.0ms | 61.0ms | 14.0ms | 7.0ms | 9.9ms | 12.5ms | 0.57 | PASS |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 4.0ms | 65.0ms | 14.0ms | 9.0ms | 11.6ms | 16.2ms | 0.44 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 7.0ms | 0.128 | 0.213 | 10.0ms | 24.3ms | 31.7ms | 0.70 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 6.0ms | 0.138 | 22.0ms | 9.0ms | 22.3ms | 26.3ms | 0.67 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 9.0ms | 0.286 | 0.220 | 12.0ms | 33.9ms | 64.0ms | 0.75 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 11.0ms | 0.298 | 26.0ms | 11.0ms | 37.5ms | 64.5ms | 1.00 | FAIL |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 6.0ms | 0.205 | 0.165 | 13.0ms | 32.6ms | 41.7ms | 0.46 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 9.0ms | 0.181 | 35.0ms | 17.0ms | 28.8ms | 38.4ms | 0.53 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 12.0ms | 0.311 | 38.0ms | 16.0ms | 32.1ms | 70.7ms | 0.75 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 12.0ms | 0.405 | 43.0ms | 25.0ms | 38.2ms | 98.2ms | 0.48 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 9.0ms | 0.177 | 74.0ms | 15.0ms | 34.4ms | 44.8ms | 0.60 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 14.0ms | 0.247 | 46.0ms | 28.0ms | 35.9ms | 50.6ms | 0.50 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 14.0ms | 0.432 | 0.238 | 17.0ms | 43.0ms | 91.0ms | 0.82 | PASS |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 20.0ms | 0.571 | 88.0ms | 45.0ms | 52.2ms | 0.147 | 0.44 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 21.0ms | 1.306 | 0.156 | 43.0ms | 0.174 | 0.201 | 0.49 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 40.0ms | 1.260 | 0.137 | 53.0ms | 0.169 | 0.236 | 0.75 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 35.0ms | 2.763 | 0.158 | 0.126 | 0.216 | 0.750 | 0.28 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 78.0ms | 2.972 | 0.216 | 87.0ms | 0.225 | 0.974 | 0.90 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | 36.0ms | 0.666 | 0.247 | 87.0ms | 0.301 | 0.343 | 0.41 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | 78.0ms | 1.087 | 0.268 | 0.137 | 0.307 | 0.440 | 0.57 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 31.0ms | 1.369 | 0.247 | 69.0ms | 0.244 | 0.290 | 0.45 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 61.0ms | 1.800 | 0.262 | 0.122 | 0.252 | 0.399 | 0.50 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | 51.0ms | 2.032 | 0.396 | 0.219 | 0.421 | 1.105 | 0.23 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | 0.132 | 3.000 | 0.649 | 0.243 | 0.438 | 1.754 | 0.54 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 49.0ms | 3.488 | 0.341 | 0.167 | 0.381 | 1.057 | 0.29 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.119 | 4.503 | 0.651 | 0.224 | 0.399 | 1.692 | 0.53 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 38.0ms | 1.878 | 0.299 | 0.114 | 0.306 | 0.368 | 0.33 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | 0.111 | 2.518 | 0.377 | 0.215 | 0.318 | 0.551 | 0.52 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 74.0ms | 4.650 | 0.656 | 0.442 | 0.547 | 1.431 | 0.17 | PASS |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.297 | 6.060 | 0.865 | 0.416 | 0.597 | 2.560 | 0.71 | PASS |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 0.148 | 11.714 | 0.874 | 0.507 | 1.823 | 2.210 | 0.29 | PASS |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.290 | 31.417 | 1.930 | 1.268 | 2.613 | 13.120 | 0.23 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | 0.291 | 7.041 | 1.775 | 1.988 | 3.292 | 4.040 | 0.16 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 0.246 | 14.029 | 1.790 | 0.841 | 2.594 | 3.148 | 0.29 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | 0.534 | 21.049 | 3.904 | 3.537 | 4.521 | 17.356 | 0.15 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.499 | 36.610 | 3.875 | 4.008 | 3.628 | 16.320 | 0.14 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | 0.353 | 21.139 | 2.630 | 1.423 | 3.636 | 4.366 | 0.25 | PASS |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.908 | 60.546 | 6.685 | 5.448 | 6.519 | 22.431 | 0.17 | PASS |
 
 Coefficient gap:
 
 | config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
 | `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 3.8e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 1.5e-15 | 1.2e-15 |  | 8.1e-16 | 8.1e-16 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.7e-15 | 5.6e-15 | 2.6e-13 | 4.2e-12 | 6.7e-15 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 2.5e-13 | 2.5e-13 |  | 4.6e-13 | 2.5e-13 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.5e-15 | 3.7e-15 | 1.2e-15 | 4.7e-15 | 4.7e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 5.4e-15 | 3.6e-15 |  | 4.6e-15 | 4.2e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 6.9e-15 | 6.1e-15 | 1.8e-12 | 1.3e-11 | 6.9e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 1.8e-12 | 1.8e-12 |  | 1.2e-11 | 1.8e-12 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 4.6e-15 | 2.4e-15 | 9.5e-15 | 2.4e-15 | 2.6e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 1.4e-14 | 7.0e-15 |  | 6.6e-15 | 7.3e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-13 | 3.1e-15 | 3.3e-10 | 6.7e-08 | 4.6e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 3.3e-10 | 3.3e-10 |  | 6.8e-08 | 3.3e-10 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.5e-14 | 2.2e-15 | 2.1e-14 | 2.0e-15 | 2.0e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 3.4e-14 | 2.1e-14 |  | 2.1e-14 | 2.2e-14 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.3e-12 | 4.7e-15 | 1.7e-09 | 7.9e-07 | 8.4e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 1.7e-09 | 1.7e-09 |  | 7.9e-07 | 1.7e-09 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 8.7e-16 | 2.2e-16 | 2.6e-15 | 0.0e+00 | 2.2e-16 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 3.3e-15 | 2.8e-15 |  | 2.6e-15 | 2.4e-15 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.4e-16 | 8.7e-16 | 5.9e-15 | 6.6e-16 | 1.5e-15 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 5.7e-15 | 5.0e-15 |  | 5.0e-15 | 4.4e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.1e-15 | 5.7e-15 | 2.2e-15 | 5.7e-15 | 5.9e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 6.7e-15 | 7.0e-15 |  | 6.8e-15 | 6.7e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 6.5e-15 | 6.7e-15 | 5.0e-15 | 6.5e-15 | 7.4e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 4.7e-15 | 5.2e-15 |  | 6.1e-15 | 5.8e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 3.1e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.7e-15 | 4.5e-15 | 2.6e-13 | 4.2e-12 | 5.7e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.8e-15 | 4.5e-15 | 2.6e-13 | 2.1e-13 | 5.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.6e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.3e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.4e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 6.1e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.9e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.5e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-14 | 8.6e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.0e-14 | 8.5e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.0e-14 | 6.8e-15 | 5.9e-12 | 6.7e-11 | 7.0e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 6.8e-15 | 5.9e-12 | 1.1e-11 | 7.0e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 8.8e-16 | 1.1e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 1.3e-15 | 6.6e-16 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-13 | 2.0e-15 | 3.3e-10 | 6.7e-08 | 3.5e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.2e-13 | 2.0e-15 | 3.3e-10 | 6.7e-08 | 3.7e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 3.2e-15 | 3.5e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 2.6e-15 | 3.9e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.4e-14 | 2.9e-15 | 2.9e-14 | 3.2e-15 | 3.7e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.5e-14 | 3.2e-15 | 2.9e-14 | 3.2e-15 | 3.9e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.6e-06 | 7.2e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.5e-06 | 7.5e-15 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.0e-14 | 6.6e-16 | 3.0e-14 | 6.6e-16 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.1e-14 | 6.6e-16 | 3.0e-14 | 2.4e-15 | 1.8e-15 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.8e-14 | 1.1e-15 | 1.4e-06 | 4.0e-06 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 7.9e-14 | 1.1e-15 | 1.4e-06 | 3.7e-06 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | regfast |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 4.5e-06 | 3.8e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | regfast |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.0e-14 | 2.5e-15 | 7.3e-14 | 1.5e-15 | 4.0e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.8e-14 | 2.3e-15 | 7.3e-14 | 1.5e-15 | 3.5e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.7e-13 | 2.0e-15 | 4.3e-06 | 1.0e-05 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.4e-13 | 2.0e-15 | 4.3e-06 | 1.1e-05 | 3.7e-15 |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 2.0e-15 | 6.5e-14 | 1.6e-15 | 1.3e-15 |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 2.2e-15 | 1.6e-08 | 8.6e-07 | 1.6e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  |  | 4.7e-15 | 1.5e-06 |  | 4.4e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 4.7e-15 | 1.5e-06 |  | 7.4e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.5e-13 | 5.2e-15 | 2.2e-13 | 8.2e-15 | 8.9e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 4.8e-15 | 4.6e-06 |  | 1.1e-13 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 4.4e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.2e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-15 | 1.7e-15 | 6.8e-15 | 1.5e-15 | 2.4e-15 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-15 | 1.7e-15 | 6.8e-15 | 1.7e-15 | 2.4e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 9.2e-15 | 9.3e-15 | 7.5e-15 | 9.2e-15 | 1.0e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 8.9e-15 | 9.3e-15 | 7.5e-15 | 1.0e-14 | 1.0e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 8.9e-15 | 8.1e-15 | 1.5e-15 | 7.7e-15 | 7.7e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 9.7e-15 | 8.1e-15 | 1.5e-15 | 8.1e-15 | 7.7e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 9.2e-15 | 1.1e-14 | 9.9e-15 | 9.9e-15 | 1.2e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.1e-14 | 9.9e-15 | 1.1e-14 | 1.2e-14 |
 | `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 0.0e+00 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 2.4e-14 | 8.1e-15 |  | 7.7e-15 | 8.1e-15 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.1e-14 | 1.1e-15 | 9.3e-15 | 2.2e-16 | 0.0e+00 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 2.0e-14 | 8.2e-15 |  | 8.6e-15 | 9.9e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 1.8e-15 | 2.6e-14 | 2.0e-15 | 2.1e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 3.3e-14 | 2.5e-14 |  | 2.5e-14 | 2.4e-14 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.2e-14 | 2.2e-15 | 2.1e-14 | 1.8e-15 | 2.5e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fixest |  | 9.8e-15 | 1.9e-14 |  | 1.9e-14 | 1.9e-14 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 4.4e-16 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.1e-14 | 1.3e-15 | 9.5e-15 | 4.4e-16 | 2.2e-16 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.3e-15 | 9.5e-15 | 8.8e-16 | 4.4e-16 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-14 | 2.9e-15 | 2.2e-14 | 2.6e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.2e-14 | 2.9e-15 | 2.2e-14 | 2.7e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 3.9e-15 | 2.5e-14 | 3.9e-15 | 3.2e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.0e-14 | 3.7e-15 | 2.5e-14 | 4.2e-15 | 3.7e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.6e-14 | 2.3e-15 | 2.2e-14 | 2.3e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.5e-14 | 2.8e-15 | 2.2e-14 | 2.5e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-15 | 1.0e-15 | 2.3e-15 | 1.1e-16 | 1.1e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.4e-15 | 1.0e-15 | 2.3e-15 | 6.7e-16 | 4.4e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 4.4e-16 | 4.4e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 0.0e+00 | 1.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.8e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | regfast |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.2e-15 | 1.5e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.4e-15 | 1.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.3e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 2.4e-15 | 8.7e-14 | 2.2e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.3e-14 | 2.0e-15 | 8.7e-14 | 2.2e-15 | 2.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.9e-14 | 1.7e-15 | 5.6e-14 | 2.9e-15 | 3.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.7e-14 | 1.6e-15 | 5.6e-14 | 2.3e-15 | 3.4e-15 |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-13 | 3.2e-15 | 4.7e-14 | 1.1e-15 | 8.9e-16 |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.6e-13 | 4.9e-15 | 2.0e-14 | 1.2e-15 | 1.2e-15 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 1.0e-14 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 5.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.3e-13 | 5.6e-15 | 2.7e-13 | 9.2e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.1e-13 | 5.5e-15 | 1.7e-13 | 5.4e-15 | 1.1e-14 |
 
 ## G2 AKM
 
-| config | T | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.141 | 31.0ms | 13.0ms | 70.4ms | 12.4ms |  | n/a |
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.100 | 20.0ms | 20.0ms | 0.119 | 13.2ms |  | n/a |
+| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.164 | 6.436 | 0.745 | 0.425 | 6.777 | 0.471 | 0.39 | PASS |
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.234 | 10.744 | 2.224 | 0.829 | 10.356 | 0.949 | 0.28 | PASS |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.125 | 9.957 | 1.136 | 0.552 | 17.859 | 0.575 | 0.23 | PASS |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.205 | 13.301 | 2.003 | 0.964 | 15.060 | 0.950 | 0.22 | PASS |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.126 | 14.928 | 1.554 | 1.232 | 19.287 | 0.775 | 0.16 | PASS |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.200 | 12.276 | 2.017 | 1.670 | 22.908 | 0.840 | 0.24 | PASS |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 89.0ms | 7.438 | 0.865 | 0.476 | 8.295 | 0.491 | 0.19 | PASS |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.166 | 12.095 | 1.828 | 0.930 | 13.685 | 0.963 | 0.18 | PASS |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 73.0ms | 10.628 | 1.017 | 0.753 | 15.710 | 0.518 | 0.14 | PASS |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.151 | 13.897 | 2.062 | 1.228 | 19.560 | 0.908 | 0.17 | PASS |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 56.0ms | 12.054 | 1.073 | 1.068 | 33.232 | 0.545 | 0.10 | PASS |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.127 | 15.786 | 2.265 | 1.912 | 24.496 | 0.755 | 0.17 | PASS |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 55.0ms | 15.932 | 1.536 | 1.842 | error | 0.573 | 0.10 | PASS |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.117 | 32.008 | 3.399 | 3.035 | error | 0.683 | 0.17 | PASS |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 75.0ms | 6.005 | 0.537 | 0.278 | 1.356 | 0.728 | 0.27 | PASS |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.205 | 5.590 | 0.679 | 0.413 | 1.769 | 0.987 | 0.50 | PASS |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 77.0ms | 4.903 | 2.142 | 0.220 | 1.282 | 0.807 | 0.35 | PASS |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.212 | 6.386 | 2.579 | 0.347 | 1.347 | 1.107 | 0.61 | PASS |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 53.0ms | 8.208 | 0.878 | 0.840 | 16.093 | 0.405 | 0.13 | PASS |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.125 | 12.432 | 1.817 | 1.430 | 23.808 | 0.758 | 0.16 | PASS |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 60.0ms | 28.902 | 1.806 | 2.608 | error | 0.568 | 0.11 | PASS |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.136 | 31.375 | 4.243 | 4.008 | error | 0.816 | 0.17 | PASS |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 58.0ms | 3.116 | 0.245 | 0.106 | 0.267 | 0.811 | 0.55 | PASS |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.125 | 3.581 | 0.339 | 0.146 | 0.299 | 1.210 | 0.86 | PASS |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 80.0ms | 3.817 | 1.208 | 0.207 | 0.824 | 0.551 | 0.39 | PASS |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.211 | 5.061 | 1.591 | 0.330 | 1.047 | 0.896 | 0.64 | PASS |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 76.0ms | 7.434 | 0.774 | 0.686 | 10.315 | 0.427 | 0.18 | PASS |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.149 | 11.335 | 1.806 | 1.172 | 15.429 | 0.782 | 0.19 | PASS |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 49.0ms | 11.061 | 1.372 | 1.145 | 21.857 | 0.359 | 0.14 | PASS |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.115 | 13.709 | 2.888 | 2.340 | 29.990 | 0.598 | 0.19 | PASS |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 49.0ms | 13.308 | 0.959 | 1.437 | error | 0.374 | 0.13 | PASS |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.120 | 20.450 | 2.648 | 2.591 | error | 0.697 | 0.17 | PASS |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 43.0ms | 19.795 | 1.750 | 1.467 | error | 0.360 | 0.12 | PASS |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.113 | 32.350 | 4.263 | 2.618 | error | 0.653 | 0.17 | PASS |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 6.0ms | 0.135 | 32.0ms | 16.0ms | 83.0ms | 25.1ms | 0.38 | PASS |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 6.0ms | 0.112 | 22.0ms | 21.0ms | 0.118 | 12.4ms | 0.49 | PASS |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 17.0ms | 0.682 | 97.0ms | 64.0ms | 0.401 | 51.2ms | 0.33 | PASS |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 21.0ms | 0.884 | 0.114 | 0.109 | 0.770 | 69.3ms | 0.30 | PASS |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.131 | 5.533 | 0.711 | 0.344 | 3.794 | 0.453 | 0.38 | PASS |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.213 | 7.431 | 1.292 | 0.589 | 4.990 | 0.828 | 0.36 | PASS |
+| `akm_scale_4_10000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.922 | 61.884 | 7.384 | 4.616 | 47.856 | 4.379 | 0.21 | PASS |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 86.0ms | 5.205 | 0.698 | 0.313 | 3.251 | 0.409 | 0.27 | PASS |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.161 | 6.749 | 1.066 | 0.523 | 3.808 | 0.750 | 0.31 | PASS |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.181 | 6.250 | 0.773 | 0.476 | 6.387 | 0.450 | 0.40 | PASS |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.442 | 9.270 | 1.572 | 0.829 | 9.480 | 0.819 | 0.54 | PASS |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.265 | 8.590 | 0.986 | 0.508 | 5.353 | 0.661 | 0.52 | PASS |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.495 | 9.072 | 1.731 | 0.855 | 7.077 | 0.830 | 0.60 | PASS |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.284 | 7.260 | 0.914 | 0.463 | 8.786 | 0.678 | 0.61 | PASS |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.531 | 9.449 | 2.000 | 0.829 | 10.257 | 0.919 | 0.64 | PASS |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.258 | 7.681 | 0.959 | 0.712 | 14.752 | 0.482 | 0.54 | PASS |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.411 | 11.748 | 2.372 | 1.270 | 17.849 | 0.806 | 0.51 | PASS |
 
 Coefficient gap:
 
-| config | T | vs | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
-|---|---:|---|---:|---:|---:|---:|---:|
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fixest | 5.6e-12 | 5.6e-12 |  | 1.2e-10 | 5.6e-12 |
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fixest | 5.7e-12 | 5.6e-12 |  | 1.2e-10 | 5.6e-12 |
+| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.7e-14 | 2.2e-15 | 4.6e-14 | 7.9e-14 | 1.3e-15 |
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.5e-14 | 2.2e-15 | 4.6e-14 | 7.7e-14 | 1.6e-15 |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.1e-14 | 8.9e-16 | 2.6e-14 | 4.1e-14 | 1.6e-15 |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.5e-14 | 8.9e-16 | 2.6e-14 | 2.1e-14 | 1.3e-15 |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 8.3e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 2.2e-16 |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.4e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 1.1e-15 |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.5e-14 | 2.3e-15 | 6.9e-14 | 6.9e-14 | 4.0e-15 |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.2e-15 | 2.3e-15 | 6.9e-14 | 9.8e-14 | 3.4e-15 |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.5e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.4e-15 |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.1e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.1e-15 |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 1.6e-15 | 1.4e-14 | 9.6e-13 | 3.8e-15 |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.3e-14 | 1.6e-15 | 1.4e-14 | 9.8e-13 | 4.9e-15 |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 9.7e-13 | 4.4e-16 | 3.2e-10 |  | 8.9e-16 |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 9.0e-13 | 4.4e-16 | 3.2e-10 |  | 4.4e-16 |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 1.6e-15 | 4.4e-16 |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 2.4e-15 | 1.6e-15 |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.8e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 2.7e-15 |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.9e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 3.3e-15 |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.9e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 5.6e-16 |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.7e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 2.2e-15 |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.0e-15 |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.3e-15 |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.3e-14 | 2.2e-16 | 6.9e-14 | 1.3e-13 | 1.3e-15 |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.5e-14 | 2.2e-16 | 6.9e-14 | 1.3e-14 | 3.1e-15 |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 2.4e-15 | 2.2e-15 |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 8.9e-16 | 1.6e-15 |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.8e-14 | 0.0e+00 | 7.0e-14 | 1.9e-13 | 2.2e-16 |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.0e-14 | 0.0e+00 | 7.0e-14 | 2.1e-13 | 1.3e-15 |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 4.7e-14 | 1.4e-15 | 9.1e-13 | 8.4e-13 | 1.2e-15 |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.1e-14 | 1.4e-15 | 9.1e-13 | 9.4e-13 | 2.2e-15 |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.3e-13 | 1.1e-16 | 4.7e-10 |  | 1.4e-15 |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 8.5e-14 | 1.1e-16 | 4.7e-10 |  | 5.6e-16 |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 4.6e-12 | 1.3e-15 | 5.4e-07 |  | 2.2e-15 |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.8e-12 | 1.3e-15 | 5.4e-07 |  | 1.7e-15 |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.1e-14 | 5.3e-15 | 5.6e-12 | 1.2e-10 | 5.5e-15 |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.6e-14 | 5.3e-15 | 5.6e-12 | 1.2e-10 | 5.5e-15 |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.0e-15 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 1.1e-15 |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.6e-16 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 5.6e-16 |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.9e-14 | 6.7e-16 | 2.8e-14 | 8.4e-15 | 2.2e-16 |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.0e-14 | 6.7e-16 | 2.8e-14 | 9.8e-15 | 8.9e-16 |
+| `akm_scale_4_10000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 7.8e-14 | 1.1e-14 | 2.1e-13 | 6.7e-16 | 2.1e-15 |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.0e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 8.8e-16 |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.6e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 0.0e+00 |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.0e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 1.1e-15 |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.9e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 2.4e-15 |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.3e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 1.3e-15 |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.5e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 0.0e+00 |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.1e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.0e-15 |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.2e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.7e-15 |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 8.2e-15 | 8.8e-16 | 7.1e-12 | 7.7e-11 | 1.1e-15 |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.8e-15 | 8.8e-16 | 7.1e-12 | 6.8e-11 | 6.6e-16 |
+
+## G3 AKM with occupation FE
+
+| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.137 | 7.966 | 1.310 | 0.696 | 4.653 | 0.695 | 0.20 | PASS |
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.256 | 9.852 | 2.337 | 1.243 | 6.924 | 1.276 | 0.21 | PASS |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.152 | 12.417 | 1.741 | 0.816 | 6.457 | 0.908 | 0.19 | PASS |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.269 | 11.124 | 2.203 | 1.246 | 6.810 | 1.374 | 0.22 | PASS |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.142 | 9.118 | 1.365 | 0.883 | 6.945 | 0.715 | 0.20 | PASS |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.258 | 11.028 | 2.438 | 1.590 | 9.488 | 1.323 | 0.20 | PASS |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.179 | 8.824 | 1.394 | 0.978 | 5.719 | 0.773 | 0.23 | PASS |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.294 | 10.560 | 2.523 | 1.736 | 8.012 | 1.407 | 0.21 | PASS |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.136 | 14.886 | 1.685 | 2.303 | 24.836 | 0.830 | 0.16 | PASS |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.249 | 21.731 | 3.479 | 4.265 | 35.423 | 1.601 | 0.16 | PASS |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.127 | 7.876 | 1.113 | 0.633 | 5.668 | 0.580 | 0.22 | PASS |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.227 | 9.857 | 1.988 | 1.278 | 9.818 | 1.116 | 0.20 | PASS |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.141 | 9.711 | 1.262 | 0.832 | 6.142 | 0.641 | 0.22 | PASS |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.262 | 10.663 | 2.277 | 1.118 | 7.149 | 1.111 | 0.24 | PASS |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.242 | 9.211 | 1.121 | 1.269 | 8.152 | 0.825 | 0.29 | PASS |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.344 | 11.201 | 2.298 | 2.120 | 10.323 | 1.517 | 0.23 | PASS |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.795 | 14.388 | 2.190 | 2.310 | 32.982 | 1.398 | 0.57 | PASS |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 1.539 | 18.292 | 4.032 | 3.668 | 46.309 | 2.806 | 0.55 | PASS |
+
+Coefficient gap:
+
+| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.8e-15 | 1.1e-15 | 2.2e-14 | 1.3e-14 | 1.7e-14 |
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 6.4e-15 | 1.1e-15 | 2.2e-14 | 2.4e-14 | 1.6e-14 |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 4.5e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.8e-14 |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 4.3e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.6e-14 |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 5.8e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.2e-14 |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 7.2e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.1e-14 |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 3.4e-14 | 3.3e-16 | 3.0e-13 | 1.4e-13 | 2.1e-14 |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 2.8e-14 | 3.3e-16 | 3.0e-13 | 1.2e-13 | 2.2e-14 |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.5e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 2.2e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 5.9e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.1e-15 |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 5.5e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.3e-15 |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.2e-14 | 1.1e-15 | 1.6e-14 | 6.9e-14 | 7.3e-15 |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.1e-15 | 1.6e-14 | 7.1e-14 | 7.5e-15 |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 3.2e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 1.3e-14 |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 5.3e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 6.8e-15 |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 7.3e-14 | 1.1e-15 | 2.2e-08 | 1.6e-10 | 1.4e-13 |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 8.1e-14 | 1.1e-15 | 2.2e-08 | 4.7e-10 | 1.6e-13 |
 
 ## G4 IV/2SLS
 
-| config | T | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 0.209 | 38.0ms | 26.0ms | 54.6ms | 0.106 |  | n/a |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 0.283 | 35.0ms | 26.0ms | 56.2ms | 67.2ms |  | n/a |
+| config | T | regfast | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 8.0ms | 0.205 | 33.0ms | 20.0ms | 54.4ms | 59.0ms | 0.40 | PASS |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 12.0ms | 0.286 | 36.0ms | 26.0ms | 57.4ms | 65.8ms | 0.46 | PASS |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 13.0ms | 0.840 | 84.0ms | 0.116 | 1.473 | 97.1ms | 0.15 | PASS |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | 18.0ms | 1.603 | 0.195 | 0.261 | 3.071 | 0.171 | 0.11 | PASS |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 35.0ms | 1.847 | 0.223 | 0.113 | 0.423 | 0.483 | 0.31 | PASS |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 93.0ms | 2.678 | 0.272 | 0.169 | 0.432 | 0.641 | 0.55 | PASS |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 63.0ms | 43.386 | 1.195 | 3.022 | 71.852 | 1.180 | 0.05 | PASS |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.188 | 81.101 | 1.912 | 6.066 | 90.695 | 2.203 | 0.10 | PASS |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 0.273 | 19.098 | 1.952 | 1.321 | 4.717 | 5.406 | 0.21 | PASS |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.593 | timeout | 18.169 | 68.012 | timeout | 20.033 | 0.03 | PASS |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 8.0ms | 0.209 | 38.0ms | 26.0ms | 54.6ms | 0.106 | 0.31 | PASS |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 12.0ms | 0.283 | 35.0ms | 26.0ms | 56.2ms | 67.2ms | 0.46 | PASS |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 13.0ms | 0.358 | 54.0ms | 26.0ms | 60.6ms | 96.0ms | 0.50 | PASS |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | 18.0ms | 0.474 | 43.0ms | 33.0ms | 71.9ms | 0.147 | 0.55 | PASS |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 35.0ms | 1.846 | 0.237 | 0.113 | 0.423 | 0.483 | 0.31 | PASS |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 91.0ms | 2.669 | 0.268 | 0.168 | 0.432 | 0.646 | 0.54 | PASS |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 53.0ms | 3.769 | 0.335 | 0.166 | 0.599 | 1.397 | 0.32 | PASS |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.148 | 5.074 | 0.570 | 0.251 | 0.651 | 2.330 | 0.59 | PASS |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 0.274 | 19.053 | 1.962 | 1.314 | 4.687 | 5.439 | 0.21 | PASS |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.499 | 41.533 | 4.098 | 2.672 | 6.996 | 22.721 | 0.19 | PASS |
 
 Coefficient gap:
 
-| config | T | vs | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
-|---|---:|---|---:|---:|---:|---:|---:|
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fixest | 2.2e-14 | 2.5e-14 |  | 2.2e-14 | 2.2e-14 |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | fixest | 2.2e-14 | 2.5e-14 |  | 2.2e-14 | 2.2e-14 |
+| config | T | vs | regfast | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.4e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 6.6e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 6.2e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.5e-15 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 6.8e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.1e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.6e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 6.7e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 2.6e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 8.9e-16 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 3.3e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 6.7e-16 |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-15 | 4.4e-15 | 3.5e-13 | 6.0e-15 | 6.9e-15 |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 4.5e-14 | 2.4e-06 |  | 2.1e-14 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.3e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.3e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.0e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.2e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.8e-15 | 1.1e-15 | 5.7e-15 | 1.3e-15 | 3.1e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 1.8e-15 | 1.1e-15 | 5.7e-15 | 1.3e-15 | 3.3e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 2.2e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.3e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.3e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.4e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 8.9e-16 | 8.9e-16 | 5.8e-14 | 1.4e-15 | 1.0e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 6.7e-16 | 8.9e-16 | 5.8e-14 | 1.6e-15 | 8.9e-16 |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-15 | 5.7e-15 | 1.7e-13 | 2.9e-15 | 5.6e-16 |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 2.4e-15 | 1.4e-14 | 2.4e-13 | 6.7e-16 | 2.7e-15 |
 
 ## G5 PPML
 
-| config | T | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
-|---|---:|---:|---:|---:|---:|---:|---|
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 0.571 | 49.0ms | 0.130 | 0.320 |  | n/a |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 0.841 | 62.0ms | 0.134 | 0.487 |  | n/a |
+| config | T | regfast | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 30.0ms | 0.604 | 52.0ms | 0.138 | 0.322 | 0.58 | PASS |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 50.0ms | 0.852 | 64.0ms | 0.140 | 0.501 | 0.78 | PASS |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 50.0ms | 3.903 | 0.895 | error | 0.440 | 0.11 | PASS |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 95.0ms | 5.907 | 1.572 | 26.324 | 0.789 | 0.12 | PASS |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 39.0ms | 1.119 | 71.0ms | 0.162 | 0.478 | 0.55 | PASS |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | 71.0ms | 1.819 | 0.146 | 0.218 | 1.261 | 0.49 | PASS |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 63.0ms | 7.486 | 0.998 | error | 0.673 | 0.09 | PASS |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.103 | 14.327 | 4.247 | error | 2.031 | 0.05 | PASS |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 0.172 | 5.270 | 0.361 | 1.376 | 3.691 | 0.48 | PASS |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 0.409 | 7.990 | 0.528 | 1.462 | 8.212 | 0.77 | PASS |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.359 | 167.613 | 40.142 | error | 6.825 | 0.05 | PASS |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 1.253 | 286.972 | 68.736 | error | 17.954 | 0.07 | PASS |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 0.289 | 12.953 | 0.627 | 2.284 | 9.349 | 0.46 | PASS |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | 0.641 | 19.093 | 1.367 | 2.437 | 21.547 | 0.47 | PASS |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.496 | timeout | 137.512 | error | 18.248 | 0.03 | PASS |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 1.484 | timeout | 216.931 | error | 39.497 | 0.04 | PASS |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 1.766 | 61.869 | 4.078 | 15.348 | 49.447 | 0.43 | PASS |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 3.447 | timeout | timeout | error | 109.599 | 0.03 | PASS |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 2.867 | 122.691 | 6.981 | 24.084 | 126.197 | 0.41 | PASS |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 5.768 | timeout | timeout | timeout | 247.045 | 0.02 | PASS |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 29.0ms | 0.693 | 74.0ms | 0.170 | 0.374 | 0.39 | PASS |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 51.0ms | 0.944 | 79.0ms | 0.134 | 0.487 | 0.65 | PASS |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 52.0ms | 1.053 | 88.0ms | 0.227 | 0.477 | 0.59 | PASS |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.100 | 1.358 | 0.132 | 0.259 | 0.907 | 0.76 | PASS |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 38.0ms | 1.099 | 68.0ms | 0.162 | 0.454 | 0.56 | PASS |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | 71.0ms | 1.753 | 0.142 | 0.210 | 1.175 | 0.50 | PASS |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 69.0ms | 1.771 | 0.115 | 0.252 | 0.646 | 0.60 | PASS |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.118 | 2.734 | 0.349 | 0.584 | 2.242 | 0.34 | PASS |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 0.162 | 5.114 | 0.355 | 1.336 | 3.577 | 0.46 | PASS |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 0.401 | 7.665 | 0.504 | 1.374 | 7.871 | 0.80 | PASS |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.261 | 11.669 | 1.110 | 3.677 | 8.550 | 0.24 | PASS |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 0.769 | 16.069 | 1.715 | 4.410 | 18.365 | 0.45 | PASS |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 0.271 | 11.613 | 0.635 | 2.179 | 8.792 | 0.43 | PASS |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | 0.606 | 17.210 | 1.316 | 2.307 | 20.359 | 0.46 | PASS |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 0.444 | 25.895 | 4.216 | 11.347 | 18.015 | 0.11 | PASS |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | 1.254 | 37.528 | 5.239 | 13.349 | 47.009 | 0.24 | PASS |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 1.904 | 67.272 | 4.224 | 16.104 | 53.108 | 0.45 | PASS |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 3.166 | 235.610 | 43.144 | 394.828 | 202.763 | 0.07 | PASS |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | 3.097 | 137.429 | 7.291 | 26.552 | 140.230 | 0.42 | PASS |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | 6.033 | 443.293 | 94.012 | timeout | 402.220 | 0.06 | PASS |
 
 Coefficient gap:
 
-| config | T | vs | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr |
-|---|---:|---|---:|---:|---:|---:|
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fixest | 1.1e-16 |  | 7.5e-15 | 1.0e-12 |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | fixest | 5.6e-16 |  | 7.1e-15 | 1.0e-12 |
+| config | T | vs | regfast | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|---:|
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.1e-15 | 6.7e-16 | 1.7e-15 | 6.2e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.2e-15 | 6.7e-16 | 4.5e-15 | 4.2e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.8e-13 | 5.4e-12 |  | 5.4e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 8.2e-14 | 5.4e-12 | 7.9e-08 | 5.4e-13 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-14 | 1.4e-14 | 2.7e-13 | 1.5e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 1.4e-14 | 1.4e-14 | 2.6e-13 | 1.5e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.6e-13 | 1.2e-09 |  | 1.3e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 7.7e-14 | 1.2e-09 |  | 1.3e-12 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.9e-14 | 7.8e-16 | 1.1e-16 | 3.7e-13 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.8e-14 | 7.8e-16 | 0.0e+00 | 3.7e-13 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.9e-14 | 4.4e-14 | 2.0e-13 | 2.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 5.8e-14 | 4.4e-14 | 1.1e-13 | 2.6e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 5.6e-05 |  | 1.9e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  |  | 5.6e-05 |  | 1.9e-12 |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.7e-13 | 1.2e-14 | 1.3e-15 | 3.7e-13 |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 6.6e-06 |  | 3.6e-12 |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-13 | 2.6e-13 | 4.6e-14 | 2.1e-12 |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  |  |  | 1.9e-11 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.9e-15 | 4.1e-15 | 6.2e-15 | 1.0e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.5e-15 | 4.1e-15 | 3.0e-15 | 1.0e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.3e-15 | 7.5e-15 | 8.6e-14 | 1.3e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 8.8e-16 | 7.5e-15 | 1.3e-13 | 1.3e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-14 | 1.8e-14 | 9.0e-14 | 3.5e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 1.3e-14 | 1.8e-14 | 9.2e-14 | 3.8e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 7.5e-15 | 1.4e-13 | 5.0e-13 | 2.1e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 8.1e-15 | 1.4e-13 | 5.0e-13 | 2.0e-12 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.3e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.2e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 3.0e-14 | 2.2e-14 | 1.5e-13 | 7.9e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 2.9e-14 | 2.2e-14 | 1.2e-13 | 8.0e-13 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.6e-14 | 8.1e-14 | 2.5e-14 | 2.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 4.6e-14 | 8.1e-14 | 3.0e-14 | 2.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 4.7e-14 | 2.1e-13 | 1.7e-13 | 1.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 4.7e-14 | 2.1e-13 | 1.8e-13 | 1.8e-12 |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.6e-14 | 6.1e-14 | 6.2e-15 | 4.6e-13 |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 3.9e-14 | 1.1e-11 | 3.2e-15 | 3.4e-12 |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.1e-14 | 1.5e-13 | 5.5e-13 | 9.1e-13 |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.5e-13 | 2.0e-12 |  | 9.6e-12 |
 
 ## G6 Logit
 
-| config | T | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
-|---|---:|---:|---:|---:|---:|---|
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 43.0ms | 0.161 | 0.319 |  | n/a |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 50.0ms | 0.143 | 0.362 |  | n/a |
+| config | T | regfast | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 22.0ms | 38.0ms | 0.135 | 0.283 | 0.58 | PASS |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 40.0ms | 48.0ms | 0.144 | 0.386 | 0.83 | PASS |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 46.0ms | 0.460 | 4.478 | 0.563 | 0.10 | PASS |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 87.0ms | 0.774 | 7.566 | 0.899 | 0.11 | PASS |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 28.0ms | 58.0ms | 0.220 | 0.438 | 0.48 | PASS |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 62.0ms | 0.102 | 0.218 | 0.888 | 0.61 | PASS |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 56.0ms | 0.596 | 6.191 | 0.858 | 0.09 | PASS |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 92.0ms | 2.087 | 23.444 | 2.029 | 0.05 | PASS |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 0.122 | 0.271 | 1.486 | 3.090 | 0.45 | PASS |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 0.366 | 0.403 | 1.531 | 6.238 | 0.91 | PASS |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.255 | 17.635 | error | 6.903 | 0.04 | PASS |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.951 | 30.193 | error | 14.916 | 0.06 | PASS |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 0.202 | 0.512 | 2.447 | 6.777 | 0.39 | PASS |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 0.485 | 0.980 | 2.657 | 14.933 | 0.49 | PASS |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.403 | 72.274 | error | 22.672 | 0.02 | PASS |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 1.273 | 103.166 | error | 50.058 | 0.03 | PASS |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 1.234 | 2.959 | 17.712 | 42.518 | 0.42 | PASS |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 2.463 | timeout | timeout | 114.788 | 0.02 | PASS |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 2.068 | 5.356 | 28.051 | 94.733 | 0.39 | PASS |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 4.283 | timeout | timeout | 418.058 | 0.01 | PASS |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 21.0ms | 43.0ms | 0.161 | 0.319 | 0.49 | PASS |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 42.0ms | 50.0ms | 0.143 | 0.362 | 0.84 | PASS |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 41.0ms | 59.0ms | 0.179 | 0.603 | 0.69 | PASS |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 83.0ms | 85.0ms | 0.188 | 0.894 | 0.98 | PASS |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 29.0ms | 57.0ms | 0.219 | 0.426 | 0.51 | PASS |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 54.0ms | 0.102 | 0.214 | 0.838 | 0.53 | PASS |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 51.0ms | 87.0ms | 0.255 | 0.971 | 0.59 | PASS |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.105 | 0.214 | 0.346 | 2.639 | 0.49 | PASS |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 0.122 | 0.268 | 1.472 | 3.073 | 0.46 | PASS |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 0.372 | 0.396 | 1.505 | 6.203 | 0.94 | PASS |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.190 | 0.524 | 1.996 | 9.874 | 0.36 | PASS |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.607 | 0.814 | 2.145 | 19.250 | 0.75 | PASS |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 0.192 | 0.522 | 2.479 | 6.707 | 0.37 | PASS |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | 0.487 | 0.969 | 2.596 | 14.642 | 0.50 | PASS |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 0.344 | 1.700 | 3.847 | 27.925 | 0.20 | PASS |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | 0.989 | 2.230 | 4.341 | 67.534 | 0.44 | PASS |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 1.245 | 3.423 | 18.477 | 45.549 | 0.36 | PASS |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | 2.273 | 8.835 | 26.674 | 224.324 | 0.26 | PASS |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | 2.292 | 5.432 | 29.434 | 117.308 | 0.42 | PASS |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | 4.426 | 24.112 | 46.245 | timeout | 0.18 | PASS |
 
 Coefficient gap:
 
-| config | T | vs | fixest | pyfixest_map | pyfixest_lsmr |
-|---|---:|---|---:|---:|---:|
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fixest |  | 1.1e-09 | 1.1e-09 |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | fixest |  | 1.1e-09 | 1.1e-09 |
+| config | T | vs | regfast | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.6e-11 | 2.4e-14 | 3.8e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-11 | 2.5e-14 | 3.8e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.8e-09 | 8.1e-15 | 6.9e-14 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.8e-09 | 8.5e-15 | 6.8e-14 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 5.9e-08 |  | 1.1e-13 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.9e-08 |  | 1.2e-13 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 7.7e-12 | 1.2e-14 | 5.0e-14 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 7.7e-12 | 1.7e-14 | 5.1e-14 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.1e-07 |  | 6.8e-13 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.1e-07 |  | 6.9e-13 |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.1e-09 | 7.1e-15 | 7.5e-14 |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-06 |  | 4.2e-13 |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.9e-11 | 1.3e-14 | 6.6e-14 |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  |  | 1.5e-09 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-09 | 1.2e-14 | 1.8e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.1e-09 | 1.2e-14 | 1.9e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-11 | 1.7e-14 | 4.1e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-11 | 1.6e-14 | 4.1e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.5e-11 | 1.6e-14 | 3.7e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.5e-11 | 1.5e-14 | 3.7e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-09 | 3.8e-15 | 3.0e-13 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.3e-09 | 5.3e-15 | 3.1e-13 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.4e-09 | 6.6e-15 | 5.7e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.4e-09 | 6.4e-15 | 5.6e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.5e-10 | 9.7e-15 | 7.9e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.5e-10 | 9.3e-15 | 8.2e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.9e-12 | 9.1e-15 | 6.7e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.9e-12 | 2.9e-14 | 6.6e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.3e-13 | 6.1e-15 | 5.1e-14 |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.8e-08 | 8.5e-15 | 1.9e-13 |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.4e-08 | 1.7e-14 | 3.0e-14 |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.1e-13 | 9.4e-09 | 9.2e-09 |
 
 ## G7 Heterogeneous slopes
 
-| config | T | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 0.330 | 41.0ms | 16.0ms | unsupported | unsupported |  | n/a |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 0.334 | 40.0ms | 18.0ms | unsupported | unsupported |  | n/a |
+| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 23.0ms | 1.040 | 3.445 | 0.148 | unsupported | unsupported | 0.16 | PASS |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 30.0ms | 1.126 | 10.112 | 0.269 | unsupported | unsupported | 0.11 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 0.101 | 54.779 | 20.650 | 4.148 | unsupported | unsupported | 0.02 | PASS |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 0.260 | 51.460 | 68.619 | 6.503 | unsupported | unsupported | 0.04 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 11.0ms | 0.350 | 0.100 | 18.0ms | unsupported | unsupported | 0.61 | PASS |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 15.0ms | 0.354 | 45.0ms | 21.0ms | unsupported | unsupported | 0.71 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 48.0ms | 3.582 | 0.361 | 0.120 | unsupported | unsupported | 0.40 | PASS |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 0.125 | 3.850 | 0.620 | 0.166 | unsupported | unsupported | 0.75 | PASS |
 
 Coefficient gap:
 
-| config | T | vs | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
-|---|---:|---|---:|---:|---:|---:|---:|
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | fixest | 1.3e-14 | 9.2e-15 |  |  |  |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | fixest | 1.3e-14 | 9.2e-15 |  |  |  |
+| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 2.1e-14 | 3.8e-12 | 4.9e-07 |  |  |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 1.7e-14 | 3.8e-12 | 4.9e-07 |  |  |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 4.6e-15 | 4.4e-16 | 8.8e-15 |  |  |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 3.7e-15 | 4.4e-16 | 8.8e-15 |  |  |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |

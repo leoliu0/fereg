@@ -1092,22 +1092,25 @@ impl Ops<'_> {
                     let k1 = ((rbk + 1) * rows_per).min(ms);
                     let base = tri(k0);
                     let mut acc = vec![0.0; tri(k1) - base];
-                    // Per-segment level sums through a stamped dense scratch.
-                    let mut stamp = vec![u32::MAX; ms];
+                    // Per-segment level sums: a bitmap of the touched coordinates, read back in
+                    // ascending order (and cleared) after the segment, and their sums.
+                    let mut bits = vec![0u64; ms.div_ceil(64)];
                     let mut cv = vec![0.0; ms];
                     let mut touched: Vec<u32> = Vec::new();
                     let mut tvals: Vec<f64> = Vec::new();
                     for s in tb[t] as usize..tb[t + 1] as usize {
-                        touched.clear();
+                        let (mut wlo, mut whi) = (usize::MAX, 0usize);
                         for c in st.cells_of(s) {
                             let w = ws.cw(c);
                             let cc = &st.cell_codes[c * nb..c * nb + ns];
                             for (&code, &off) in cc.iter().zip(&offs) {
                                 let kb = off + code as usize;
-                                if stamp[kb] != s as u32 {
-                                    stamp[kb] = s as u32;
+                                let (wi, bit) = (kb >> 6, 1u64 << (kb & 63));
+                                if bits[wi] & bit == 0 {
+                                    bits[wi] |= bit;
                                     cv[kb] = 0.0;
-                                    touched.push(kb as u32);
+                                    wlo = wlo.min(wi);
+                                    whi = whi.max(wi);
                                 }
                                 cv[kb] += w;
                                 if kb >= k0 && kb < k1 {
@@ -1122,11 +1125,19 @@ impl Ops<'_> {
                             }
                         }
                         let inv = 1.0 / ws.n1[s];
-                        // Sorted, the coordinates l ≤ k of row k are a prefix; their values
+                        // Ascending, the coordinates l ≤ k of row k are a prefix; their values
                         // are gathered once.
-                        touched.sort_unstable();
+                        touched.clear();
                         tvals.clear();
-                        tvals.extend(touched.iter().map(|&l| cv[l as usize]));
+                        for wi in wlo..=whi {
+                            let mut x = std::mem::take(&mut bits[wi]);
+                            while x != 0 {
+                                let l = wi * 64 + x.trailing_zeros() as usize;
+                                touched.push(l as u32);
+                                tvals.push(cv[l]);
+                                x &= x - 1;
+                            }
+                        }
                         for (i, &k) in touched.iter().enumerate() {
                             let k = k as usize;
                             if k < k0 || k >= k1 {
