@@ -1,0 +1,7 @@
+target/
+bench/data/
+bench/.venv/
+bench/results/raw/
+stata/*.plugin
+tests/stata/*.log
+tests/stata/*.smcl
