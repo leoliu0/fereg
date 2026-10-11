@@ -100,7 +100,8 @@ struct Run {
     log: Vec<String>,
 }
 
-fn run_once(d: &Data, nfe: usize, r: usize, threads: usize, verbose: bool) -> Run {
+/// `fe`: "2" (indiv + year), "3" (+ firm) or "3s" (indiv + year + firm##c.x2, plan G7).
+fn run_once(d: &Data, fe: &str, r: usize, threads: usize, verbose: bool) -> Run {
     let log = RefCell::new(Vec::new());
     let sink = |s: &str| log.borrow_mut().push(s.to_string());
     let never = || false;
@@ -109,11 +110,15 @@ fn run_once(d: &Data, nfe: usize, r: usize, threads: usize, verbose: bool) -> Ru
     let ctx = Ctx { threads, verbose: 2, interrupt: &never, log: &sink };
     let n = d.indiv.len();
     let factors = vec![FactorValues::Num(&d.indiv), FactorValues::Num(&d.year), FactorValues::Num(&d.firm)];
+    let nfe: usize = fe[..1].parse().expect("fe");
+    let slopes = fe.ends_with('s');
     let prep = Prep {
         n,
         factors,
-        absorb: (0..nfe).map(|q| AbsorbTerm { factors: vec![q], intercept: true, slopes: vec![], save: false }).collect(),
-        slope_vars: vec![],
+        absorb: (0..nfe)
+            .map(|q| AbsorbTerm { factors: vec![q], intercept: true, slopes: if slopes && q == 2 { vec![0] } else { vec![] }, save: false })
+            .collect(),
+        slope_vars: if slopes { vec![&d.cols[2]] } else { vec![] },
         weights: None,
         weight_kind: WeightKind::None,
         vce: Vce::Unadjusted,
@@ -154,6 +159,7 @@ fn main() {
     let ns: Vec<usize> = get("--n").unwrap_or_else(|| "1e6,1e7".into()).split(',').map(|v| v.parse::<f64>().expect("n") as usize).collect();
     let reps: usize = get("--reps").and_then(|v| v.parse().ok()).unwrap_or(3);
     let verbose = args.iter().any(|a| a == "--verbose");
+    let fes: Vec<String> = get("--fe").unwrap_or_else(|| "2,3".into()).split(',').map(str::to_string).collect();
     let bw16 = get("--bw").and_then(|v| v.parse().ok()).unwrap_or_else(|| stream_bandwidth(16));
     let bw1 = get("--bw1").and_then(|v| v.parse().ok()).unwrap_or_else(|| stream_bandwidth(1));
     println!("bandwidth: {bw16:.1} GB/s (16 threads), {bw1:.1} GB/s (1 thread); tol 1e-8; best of {reps} cold runs");
@@ -164,7 +170,8 @@ fn main() {
     for &n in &ns {
         for difficult in [false, true] {
             let d = generate(n, difficult);
-            for nfe in [2usize, 3] {
+            for fe in &fes {
+                let nfe: usize = fe[..1].parse().expect("fe");
                 let mut threads = vec![16];
                 if n <= 1_000_000 {
                     threads.push(1);
@@ -173,7 +180,7 @@ fn main() {
                     for r in [2usize, 11] {
                         let mut best: Option<Run> = None;
                         for k in 0..reps {
-                            let run = run_once(&d, nfe, r, t, verbose && k == 0);
+                            let run = run_once(&d, fe, r, t, verbose && k == 0);
                             if k == 0 && verbose {
                                 for l in &run.log {
                                     eprintln!("    {l}");
@@ -196,7 +203,7 @@ fn main() {
                             "{:>9} {:>9} {:>3} {:>3} {:>3} | {:>8.4} {:>8.4} {:>8.4} {:>8.4} | {:>5} {:>4} | {:>8.4} {:>6.2}",
                             n,
                             if difficult { "difficult" } else { "simple" },
-                            nfe,
+                            fe,
                             t,
                             r,
                             b.prepare,

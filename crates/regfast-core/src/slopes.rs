@@ -317,9 +317,9 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
         }
     });
 
-    // Level-sorted rows of every block.
-    for q in 0..nb {
-        let col: Vec<u32> = (0..n).map(|i| codes[i * nb + q]).collect();
+    // Level-sorted rows of every large block (small blocks are covered by the dense factor).
+    for q in nsmall..nb {
+        let col: Vec<u32> = pool.install(|| (0..n).into_par_iter().map(|i| codes[i * nb + q]).collect());
         let (poff, mut perm) = scatter_by_code(&col, blocks[q].g, pool)?;
         let lg = obs_groups(&poff);
         let lb: Vec<usize> = lg.iter().map(|&g| poff[g as usize] as usize).collect();
@@ -466,10 +466,17 @@ pub fn slope_weights(st: &SlopeStructure, w_rows: Option<Vec<f64>>, pool: &Pool)
     pool.install(|| {
         minv.par_chunks_mut(be2).enumerate().with_min_len(256).for_each_init(Vec::new, |sc, (s, out)| level_minv(st, &w_rows, s, out, sc))
     });
+    // Diagonal blocks / block-Jacobi inverses of the large blocks. Small blocks get empty
+    // entries; their redundancy flags are set from the assembled dense block (`ensure_basic`).
     let mut dblk = Vec::with_capacity(st.nb);
     let mut jinv = Vec::with_capacity(st.nb);
     let mut redundant = alloc_vec(st.m, false)?;
     for blk in &st.blocks {
+        if blk.small {
+            dblk.push(Vec::new());
+            jinv.push(Vec::new());
+            continue;
+        }
         let b = blk.b;
         let b2 = b * b;
         let mut d = alloc_vec(blk.g * b2, 0.0)?;
@@ -577,10 +584,39 @@ impl Scratch {
     }
 }
 
+/// Calls `$s.$f::<RC>(args)` with RC = `$r` for 1 ≤ r ≤ 12 (the column count becomes a
+/// compile-time constant, so the per-row loops unroll) and RC = 0 (dynamic) otherwise.
+macro_rules! by_width {
+    ($r:expr, $s:ident . $f:ident ( $($a:expr),* )) => {
+        match $r {
+            1 => $s.$f::<1>($($a),*),
+            2 => $s.$f::<2>($($a),*),
+            3 => $s.$f::<3>($($a),*),
+            4 => $s.$f::<4>($($a),*),
+            5 => $s.$f::<5>($($a),*),
+            6 => $s.$f::<6>($($a),*),
+            7 => $s.$f::<7>($($a),*),
+            8 => $s.$f::<8>($($a),*),
+            9 => $s.$f::<9>($($a),*),
+            10 => $s.$f::<10>($($a),*),
+            11 => $s.$f::<11>($($a),*),
+            12 => $s.$f::<12>($($a),*),
+            _ => $s.$f::<0>($($a),*),
+        }
+    };
+}
+
+/// The column count of a kernel monomorphized for `RC` (0 = dynamic `r`).
+#[inline(always)]
+const fn width<const RC: usize>(r: usize) -> usize {
+    if RC == 0 { r } else { RC }
+}
+
 impl SOps<'_> {
     /// u = Σ_q h_{q,i}'P[q, g_q(i)] (r columns).
-    #[inline]
-    fn u_row(&self, i: usize, p: &[f64], r: usize, u: &mut [f64]) {
+    #[inline(always)]
+    fn u_row<const RC: usize>(&self, i: usize, p: &[f64], r: usize, u: &mut [f64]) {
+        let r = width::<RC>(r);
         let st = self.st;
         u.iter_mut().for_each(|v| *v = 0.0);
         let codes = &st.codes[i * st.nb..(i + 1) * st.nb];
@@ -602,8 +638,9 @@ impl SOps<'_> {
     }
 
     /// acc[q, g_q(i)] += h_{q,i} z for the first `nblk` blocks (acc indexed from coordinate 0).
-    #[inline]
-    fn scatter_row(&self, i: usize, z: &[f64], r: usize, acc: &mut [f64], nblk: usize) {
+    #[inline(always)]
+    fn scatter_row<const RC: usize>(&self, i: usize, z: &[f64], r: usize, acc: &mut [f64], nblk: usize) {
+        let r = width::<RC>(r);
         let st = self.st;
         let codes = &st.codes[i * st.nb..i * st.nb + nblk];
         for (blk, &g) in st.blocks[..nblk].iter().zip(codes) {
@@ -625,10 +662,42 @@ impl SOps<'_> {
 
     /// Projects out E within segment s: with d (rows × r) on input, t = M_s⁺ Σ w h_E d' and
     /// d_i −= h_{E,i}'t. `sc.t` holds t (be × r) on return.
-    fn seg_project(&self, s: usize, rows: Range<usize>, d: &mut [f64], r: usize, sc: &mut Scratch) {
+    #[inline(always)]
+    fn seg_project<const RC: usize>(&self, s: usize, rows: Range<usize>, d: &mut [f64], r: usize, sc: &mut Scratch) {
+        let r = width::<RC>(r);
         let (st, ws) = (self.st, self.ws);
         let be = st.be;
         let Scratch { a, t, he, .. } = sc;
+        if st.e_icpt && be == 1 {
+            // Intercept-only E: t = Σ w d / Σ w (M_s⁺ = 1/Σw), d_i −= t.
+            a.iter_mut().for_each(|v| *v = 0.0);
+            match &ws.w_rows {
+                None => {
+                    for dr in d.chunks_exact(r) {
+                        for (av, dv) in a.iter_mut().zip(dr) {
+                            *av += dv;
+                        }
+                    }
+                }
+                Some(w) => {
+                    for (dr, &wi) in d.chunks_exact(r).zip(&w[rows]) {
+                        for (av, dv) in a.iter_mut().zip(dr) {
+                            *av += wi * dv;
+                        }
+                    }
+                }
+            }
+            let inv = ws.minv[s];
+            for (tv, av) in t.iter_mut().zip(a.iter()) {
+                *tv = inv * av;
+            }
+            for dr in d.chunks_exact_mut(r) {
+                for (dv, tv) in dr.iter_mut().zip(t.iter()) {
+                    *dv -= tv;
+                }
+            }
+            return;
+        }
         a.iter_mut().for_each(|v| *v = 0.0);
         for (k, i) in rows.clone().enumerate() {
             let w = ws.w(i);
@@ -669,7 +738,7 @@ impl SOps<'_> {
     /// Fused pass: per segment, `fill` loads d (rows × r), E is projected out, z_i = w_i d_i is
     /// scattered into `y` (m × r; fully overwritten). With `stats`, returns per column
     /// [Σwv², Σwv, Σw·e²] of the loaded values v and the E-residuals e.
-    fn scatter_pass(
+    fn scatter_pass<const RC: usize>(
         &self,
         r: usize,
         y: &mut [f64],
@@ -678,6 +747,7 @@ impl SOps<'_> {
         pool: &Pool,
         fill: impl Fn(usize, Range<usize>, &mut [f64]) + Sync,
     ) -> Vec<f64> {
+        let r = width::<RC>(r);
         let st = self.st;
         let all = st.accumulates_all(r);
         let nacc = if all { st.nb } else { st.nsmall };
@@ -691,6 +761,8 @@ impl SOps<'_> {
             split_bounds(zbuf, &rb).into_iter().map(Some).collect()
         };
         let ne = if stats { 3 * r } else { 0 };
+        // Intercept-only E: the projection is fused into the two row loops below.
+        let fused = st.e_icpt && st.be == 1;
         let results: Vec<(Vec<f64>, Vec<f64>)> = pool.install(|| {
             zp.into_par_iter()
                 .enumerate()
@@ -701,10 +773,44 @@ impl SOps<'_> {
                     let row0 = st.seg_off[tb[t] as usize] as usize;
                     for s in tb[t] as usize..tb[t + 1] as usize {
                         let rows = st.rows(s);
-                        let mut d = std::mem::take(&mut sc.d);
-                        d.clear();
-                        d.resize(rows.len() * r, 0.0);
-                        fill(s, rows.clone(), &mut d);
+                        let len = rows.len() * r;
+                        if sc.d.len() < len {
+                            sc.d.resize(len, 0.0);
+                        }
+                        let d = &mut sc.d[..len];
+                        fill(s, rows.clone(), d);
+                        if fused {
+                            let a = &mut sc.a;
+                            a.iter_mut().for_each(|v| *v = 0.0);
+                            for (dr, i) in d.chunks_exact(r).zip(rows.clone()) {
+                                let w = self.ws.w(i);
+                                for j in 0..r {
+                                    let v = dr[j];
+                                    a[j] += w * v;
+                                    if stats {
+                                        ex[j] += w * v * v;
+                                        ex[r + j] += w * v;
+                                    }
+                                }
+                            }
+                            let inv = self.ws.minv[s];
+                            a.iter_mut().for_each(|v| *v *= inv);
+                            for (z, i) in d.chunks_exact_mut(r).zip(rows) {
+                                let w = self.ws.w(i);
+                                for j in 0..r {
+                                    let e = z[j] - a[j];
+                                    if stats {
+                                        ex[2 * r + j] += w * e * e;
+                                    }
+                                    z[j] = w * e;
+                                }
+                                self.scatter_row::<RC>(i, z, r, &mut acc, nacc);
+                                if let Some(zp) = zp.as_deref_mut() {
+                                    zp[(i - row0) * r..(i - row0 + 1) * r].copy_from_slice(z);
+                                }
+                            }
+                            continue;
+                        }
                         if stats {
                             for (k, i) in rows.clone().enumerate() {
                                 let w = self.ws.w(i);
@@ -714,7 +820,8 @@ impl SOps<'_> {
                                 }
                             }
                         }
-                        self.seg_project(s, rows.clone(), &mut d, r, &mut sc);
+                        let mut d = std::mem::take(&mut sc.d);
+                        self.seg_project::<RC>(s, rows.clone(), &mut d[..len], r, &mut sc);
                         for (k, i) in rows.enumerate() {
                             let w = self.ws.w(i);
                             let z = &mut d[k * r..(k + 1) * r];
@@ -724,7 +831,7 @@ impl SOps<'_> {
                                 }
                             }
                             z.iter_mut().for_each(|v| *v *= w);
-                            self.scatter_row(i, z, r, &mut acc, nacc);
+                            self.scatter_row::<RC>(i, z, r, &mut acc, nacc);
                             if let Some(zp) = zp.as_deref_mut() {
                                 zp[(i - row0) * r..(i - row0 + 1) * r].copy_from_slice(z);
                             }
@@ -748,7 +855,7 @@ impl SOps<'_> {
             })
         });
         if !all {
-            self.pull_large(zbuf, r, y, pool);
+            self.pull_large::<RC>(zbuf, r, y, pool);
         }
         let mut extra = vec![0.0; ne];
         for (_, ex) in &results {
@@ -760,7 +867,8 @@ impl SOps<'_> {
     }
 
     /// Y[q, g] = Σ_{i ∈ rows of g} h_{q,i} z_i for every large block (level pulls).
-    fn pull_large(&self, zbuf: &[f64], r: usize, y: &mut [f64], pool: &Pool) {
+    fn pull_large<const RC: usize>(&self, zbuf: &[f64], r: usize, y: &mut [f64], pool: &Pool) {
+        let r = width::<RC>(r);
         let st = self.st;
         for blk in &st.blocks[st.nsmall..] {
             let ys = &mut y[blk.off * r..(blk.off + blk.g * blk.b) * r];
@@ -795,9 +903,14 @@ impl SOps<'_> {
 
     /// Y = S·P (m × r row-major).
     pub fn apply(&self, p: &[f64], r: usize, y: &mut [f64], zbuf: &mut [f64], pool: &Pool) {
-        self.scatter_pass(r, y, zbuf, false, pool, |_, rows, d| {
+        by_width!(r, self.apply_n(p, r, y, zbuf, pool))
+    }
+
+    fn apply_n<const RC: usize>(&self, p: &[f64], r: usize, y: &mut [f64], zbuf: &mut [f64], pool: &Pool) {
+        let r = width::<RC>(r);
+        self.scatter_pass::<RC>(r, y, zbuf, false, pool, |_, rows, d| {
             for (k, i) in rows.enumerate() {
-                self.u_row(i, p, r, &mut d[k * r..(k + 1) * r]);
+                self.u_row::<RC>(i, p, r, &mut d[k * r..(k + 1) * r]);
             }
         });
     }
@@ -806,12 +919,22 @@ impl SOps<'_> {
     /// residual after E alone.
     pub fn rhs(&self, v: &[f64], r: usize, zbuf: &mut [f64], pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
         let mut y = alloc_vec(self.st.m * r, 0.0)?;
-        let ex = self.scatter_pass(r, &mut y, zbuf, true, pool, |_, rows, d| d.copy_from_slice(&v[rows.start * r..rows.end * r]));
+        let ex = by_width!(r, self.rhs_n(v, r, &mut y, zbuf, pool));
         Ok((y, ex))
+    }
+
+    fn rhs_n<const RC: usize>(&self, v: &[f64], r: usize, y: &mut [f64], zbuf: &mut [f64], pool: &Pool) -> Vec<f64> {
+        let r = width::<RC>(r);
+        self.scatter_pass::<RC>(r, y, zbuf, true, pool, |_, rows, d| d.copy_from_slice(&v[rows.start * r..rows.end * r]))
     }
 
     /// In place: v_i ← d_i − h_{E,i}'t with d = v − u(x); writes α_E (ge·be × r) when given.
     pub fn residualize_rows(&self, v: &mut [f64], r: usize, x: &[f64], alpha: Option<&mut [f64]>, pool: &Pool) {
+        by_width!(r, self.residualize_rows_n(v, r, x, alpha, pool))
+    }
+
+    fn residualize_rows_n<const RC: usize>(&self, v: &mut [f64], r: usize, x: &[f64], alpha: Option<&mut [f64]>, pool: &Pool) {
+        let r = width::<RC>(r);
         let st = self.st;
         let be = st.be;
         let rb: Vec<usize> = st.parts.iter().map(|&s| st.seg_off[s as usize] as usize * r).collect();
@@ -834,13 +957,13 @@ impl SOps<'_> {
                     let d = &mut vs[(rows.start - row0) * r..(rows.end - row0) * r];
                     if st.m > 0 {
                         for (kk, i) in rows.clone().enumerate() {
-                            self.u_row(i, x, r, &mut u);
+                            self.u_row::<RC>(i, x, r, &mut u);
                             for (dv, uv) in d[kk * r..(kk + 1) * r].iter_mut().zip(&u) {
                                 *dv -= uv;
                             }
                         }
                     }
-                    self.seg_project(s, rows, d, r, &mut sc);
+                    self.seg_project::<RC>(s, rows, d, r, &mut sc);
                     if let Some(a) = a.as_deref_mut() {
                         a[(s - s0) * be * r..(s - s0 + 1) * be * r].copy_from_slice(&sc.t);
                     }
@@ -864,7 +987,7 @@ impl SOps<'_> {
                     design(st.e_icpt, st.he_raw(i), &mut he);
                     let mut f: f64 = (0..be).map(|l| he[l] * alpha[s * be + l]).sum();
                     if st.m > 0 {
-                        self.u_row(i, x, 1, &mut u);
+                        self.u_row::<1>(i, x, 1, &mut u);
                         f += u[0];
                     }
                     *o = f;
@@ -874,8 +997,9 @@ impl SOps<'_> {
         out
     }
 
-    /// Dense S restricted to the small coordinates (m_s × m_s, row-major).
-    pub fn assemble_small(&self, pool: &Pool) -> Result<Vec<f64>, RfError> {
+    /// Dense S restricted to the small coordinates (m_s × m_s, row-major) and the diagonal of
+    /// the level Gram Σ w h_c² of every small coordinate (the redundancy reference).
+    pub fn assemble_small(&self, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
         let (st, ws) = (self.st, self.ws);
         let ms = st.m_small;
         let be = st.be;
@@ -996,7 +1120,23 @@ impl SOps<'_> {
                 full[l * ms + k] = full[k * ms + l];
             }
         }
-        Ok(full)
+        let gram = sum_chunks(pool, st.n, CHUNK, ms, |rows, acc| {
+            for i in rows {
+                let w = ws.w(i);
+                for (q, blk) in st.blocks[..st.nsmall].iter().enumerate() {
+                    let mut c = blk.off + st.codes[i * st.nb + q] as usize * blk.b;
+                    if blk.icpt {
+                        acc[c] += w;
+                        c += 1;
+                    }
+                    for &x in st.hq_raw(i, blk) {
+                        acc[c] += w * x * x;
+                        c += 1;
+                    }
+                }
+            }
+        });
+        Ok((full, gram))
     }
 
     /// Per-segment aggregation of block `q`.
@@ -1428,6 +1568,11 @@ impl SlopeSolver {
         })
     }
 
+    /// Kernels bound to the current structure and weights.
+    pub fn ops(&self) -> SOps<'_> {
+        SOps { st: &self.st, ws: &self.ws }
+    }
+
     pub fn structure(&self) -> &SlopeStructure {
         &self.st
     }
@@ -1448,10 +1593,13 @@ impl SlopeSolver {
         if self.basic_fresh {
             return Ok(());
         }
-        self.pre.small = if self.st.m_small > 0 {
-            let ops = SOps { st: &self.st, ws: &self.ws };
-            let a = ops.assemble_small(pool)?;
-            Some(Dense::factor(&a, self.st.m_small, &self.ws.redundant[..self.st.m_small], pool)?)
+        let ms = self.st.m_small;
+        self.pre.small = if ms > 0 {
+            let (a, gram) = SOps { st: &self.st, ws: &self.ws }.assemble_small(pool)?;
+            for (k, red) in self.ws.redundant[..ms].iter_mut().enumerate() {
+                *red = !(a[k * ms + k] > REDUNDANT * gram[k]);
+            }
+            Some(Dense::factor(&a, ms, &self.ws.redundant[..ms], pool)?)
         } else {
             None
         };
