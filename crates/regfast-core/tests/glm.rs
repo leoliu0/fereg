@@ -438,7 +438,7 @@ fn check_poisson(g: &G, kind: AbsorberKind) {
     e.vec(&format!("{} b", g.fixture), mat(r, "b"), &fx.get("b").unwrap().nums(), 1e-7);
     e.vec(&format!("{} V", g.fixture), mat(r, "V"), &fx.get("V").unwrap().nums(), g.v_tol);
     let want = |k: &str| g.exact.iter().find(|(n, _)| *n == k).map_or_else(|| sc(k), |(_, v)| *v);
-    for k in ["ll", "ll_0", "deviance", "chi2", "r2_p"] {
+    for k in ["ll", "ll_0", "deviance", "chi2", "r2_p", "rss", "rmse"] {
         if !g.skip.contains(&k) {
             e.scalar(k, scalar(r, k), want(k), 1e-6);
         }

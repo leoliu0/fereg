@@ -127,7 +127,10 @@ impl Session {
         if !(g.tol > 0.0 && g.tol <= 1.0 && g.itol > 0.0 && g.maxiter > 0) {
             return Err(RfError::InvalidInput("glm: tolerances must be in (0, 1] and maxiter positive".into()));
         }
-        par::with_pool(ctx.threads, |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, ctx, pool))?
+        // Small-n rule: no more threads than fixed chunks of work (switch to par::threads_for
+        // once it lands on main).
+        let threads = par::resolve_threads(ctx.threads).min(self.n().div_ceil(CHUNK)).max(1);
+        par::with_pool(threads, |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, ctx, pool))?
     }
 
     /// ppmlhdfe `remove_collinears` on the current sample, with the true weights.
@@ -529,6 +532,14 @@ impl Session {
             v_s.iter_mut().for_each(|v| *v = 0.0);
         }
         let chi2 = wald * df_m;
+        // ppmlhdfe leaves reghdfe5's e(rss) and e(rmse) of the final weighted least squares.
+        let rss = par::sum_chunks(pool, n, CHUNK, 1, |range, acc| {
+            for i in range {
+                acc[0] += wv[i] * e[i] * e[i];
+            }
+        })[0];
+        let used_df_r = big_n - dof.df_a as f64 - df_m - dof.df_a_nested as f64;
+        let rmse = if used_df_r != 0.0 { (rss / used_df_r).sqrt() } else { rss.sqrt() };
 
         // Undo the standardization.
         let sx: Vec<f64> = d.sd_x.iter().copied().chain(std::iter::once(1.0)).collect();
@@ -600,6 +611,8 @@ impl Session {
         scal(&mut res, "rank", df_m);
         if fam == Family::Poisson {
             scal(&mut res, "df", df_r);
+            scal(&mut res, "rss", rss);
+            scal(&mut res, "rmse", rmse);
         }
         scal(&mut res, "df_m", df_m);
         scal(&mut res, "ll", ll);
