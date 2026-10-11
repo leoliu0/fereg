@@ -304,6 +304,9 @@ program _rf_glm, eclass
 	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
+	* No if, in, weight, exposure, offset or markout: touse is 1 everywhere and the plugin does
+	* not read it
+	if (`"`if'`in'`weight'`exposure'`offset'`rf_markvars'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
 	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'

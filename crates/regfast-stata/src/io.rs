@@ -112,9 +112,10 @@ pub struct Sample {
 }
 
 /// Sample of a `prepare` call: the observations of the `in` range whose `touse` is not 0
-/// (ascending) with the numeric `col_vars` at those observations as columns and the numeric
-/// `block_vars` as a row-major block (NaN for missing), and the number of missing values read.
-/// `if` is not evaluated: callers fold it into touse (protocol).
+/// (ascending; `touse` 0: every observation, without reading touse) with the numeric
+/// `col_vars` at those observations as columns and the numeric `block_vars` as a row-major
+/// block (NaN for missing), and the number of missing values read. `if` is not evaluated:
+/// callers fold it into touse (protocol).
 ///
 /// One reader thread scans the range once into outputs sized for the whole range. Several
 /// make two parallel passes over contiguous observation ranges: the first counts each

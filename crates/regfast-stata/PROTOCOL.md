@@ -52,6 +52,8 @@ Keys:
   joined by `*` or `-` for none, save 0/1. Example: `1|1|-|0;2*3|1|-|1;4|0|1*2|1`.
 - `vce=unadjusted|robust|cluster`, with `cluster=<dims>` (`;`-separated, each `f1*f2`).
 - `wtype=none|fw|aw|pw`, `singletons=0|1`.
+- `sample=touse|all` (default touse): `all` asserts that touse is 1 at every observation of
+  the range (no `if`, `in`, weights or ado markouts), so the scan does not read it.
 - `family=gaussian|poisson|logit`; `sep=fe|none` (GLM only): the fe rule (Poisson: drop groups
   with Σy = 0; logit: Σy ∈ {0, count}) runs inside the singleton loop. ppmlfast sends `sep=fe`
   only when singletons are dropped, as ppmlhdfe.

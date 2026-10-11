@@ -358,6 +358,8 @@ program Estimate, eclass
 	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
+	* No if, in, weight or markout: touse is 1 everywhere and the plugin does not read it
+	if (`"`if'`in'`weight'`rf_markvars'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
 	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'

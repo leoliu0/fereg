@@ -51,8 +51,10 @@ RF_HIDDEN int rf_read_rows(const int *vars, int nv, const int *obs, int n, doubl
     return 0;
 }
 
-/* Number of observations in o1..o2 whose touse value (variable tv) is not 0, or -rc. */
+/* Number of observations in o1..o2 whose touse value (variable tv) is not 0, or -rc. With
+   tv = 0 every observation counts (nothing is read). */
 RF_HIDDEN int rf_count_sample(int tv, int o1, int o2) {
+    if (tv == 0) return o2 >= o1 ? o2 - o1 + 1 : 0;
     int c = 0;
     for (int o = o1; o <= o2; o++) {
         ST_double t;
@@ -64,20 +66,23 @@ RF_HIDDEN int rf_count_sample(int tv, int o1, int o2) {
 }
 
 /* Sample scan for cmd=prepare over o1..o2: for the c-th observation whose touse value
-   (variable tv) is not 0, writes the observation to obs_out[c] and the value of vars[j] to
-   cols[j][c * strides[j]] (NaN for missing, counted in *nmiss); every output has room for cap
-   observations. Returns the number of observations written, -rc on a Stata error, or -9999
-   when more than cap are found. */
+   (variable tv; tv = 0: every observation, touse is not read) is not 0, writes the observation
+   to obs_out[c] and the value of vars[j] to cols[j][c * strides[j]] (NaN for missing, counted
+   in *nmiss); every output has room for cap observations. Returns the number of observations
+   written, -rc on a Stata error, or -9999 when more than cap are found. */
 RF_HIDDEN int rf_read_sample(int tv, const int *vars, int nv, int o1, int o2, int cap, int *obs_out, double *const *cols,
                              const int *strides, long long *nmiss) {
     ST_double mv = SV_missval;
     long long miss = 0;
     int c = 0;
     for (int o = o1; o <= o2; o++) {
-        ST_double t;
-        ST_retcode rc = SF_vdata(tv, o, &t);
-        if (rc) return -rc;
-        if (t == 0) continue;
+        ST_retcode rc;
+        if (tv) {
+            ST_double t;
+            rc = SF_vdata(tv, o, &t);
+            if (rc) return -rc;
+            if (t == 0) continue;
+        }
         if (c == cap) return -9999;
         obs_out[c] = o;
         for (int j = 0; j < nv; j++) {

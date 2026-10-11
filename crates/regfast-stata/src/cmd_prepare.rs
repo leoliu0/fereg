@@ -29,6 +29,12 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
         "none" => false,
         v => return Err(RfError::InvalidInput(format!("regfast plugin: invalid sep `{v}` (fe|none)"))),
     };
+    // `sample=all`: touse is 1 at every observation, so the scan does not read it.
+    let read_touse = match a.str_or("sample", "touse") {
+        "touse" => true,
+        "all" => false,
+        v => return Err(RfError::InvalidInput(format!("regfast plugin: invalid sample `{v}` (touse|all)"))),
+    };
     let kind = a.absorber()?;
     a.finish()?;
 
@@ -86,7 +92,8 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
     with_ctx(&common, |ctx| {
         let mut ph = Phases::new(ctx.verbose);
         let parallel = !common.serialio;
-        let (mut sample, nmiss) = io::read_sample(touse_var, &col_vars, &block_vars, ctx.threads, parallel)?;
+        let scan_touse = if read_touse { touse_var } else { 0 };
+        let (mut sample, nmiss) = io::read_sample(scan_touse, &col_vars, &block_vars, ctx.threads, parallel)?;
         ctx.check()?;
         // A missing value of any factor, slope, weight or model variable excludes the
         // observation (the ado leaves these to the plugin: protocol); touse is zeroed below.

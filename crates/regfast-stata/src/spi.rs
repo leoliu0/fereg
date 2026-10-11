@@ -107,13 +107,14 @@ pub fn read_rows(vars: &[i32], obs: &[i32], out: &mut [MaybeUninit<f64>]) -> Res
     if rc != 0 { Err(rc_err(rc, "reading variables")) } else { Ok(nmiss as u64) }
 }
 
-/// Number of observations in `o1..=o2` whose `touse` value is not 0.
+/// Number of observations in `o1..=o2` whose `touse` value is not 0 (`touse` 0: all of them).
 pub fn count_sample(touse: i32, o1: i32, o2: i32) -> Result<usize, RfError> {
     let c = unsafe { rf_count_sample(touse, o1, o2) };
     if c < 0 { Err(rc_err(-c, "reading the estimation sample")) } else { Ok(c as usize) }
 }
 
 /// Sample scan of observations `o1..=o2`: the c-th observation whose `touse` value is not 0
+/// (`touse` 0: every observation; touse is not read)
 /// goes to `obs_out[c]`, its value of the leading `cols.len()` variables to `cols[j][c]` and
 /// that of the remaining `w` variables to row c of the row-major `block` (`block[c·w + j]`);
 /// NaN for missing. Returns the number of such observations and the number of missing values
