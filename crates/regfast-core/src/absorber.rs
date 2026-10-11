@@ -31,6 +31,9 @@ pub struct SolveInfo {
     pub escalated: bool,
     /// FE coefficients of every column, when requested (also usable as the next warm start).
     pub coefs: Option<FeCoefs>,
+    /// The reduced system was solved by a direct factorization or in closed form (residuals
+    /// exact up to rounding), not to the iterative tolerance.
+    pub exact: bool,
 }
 
 /// FE coefficients for R columns, in absorber-specific coordinates (`p` rows, row-major p×R).

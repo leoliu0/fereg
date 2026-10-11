@@ -4,6 +4,8 @@
 //! compacts every per-observation array to the kept sample, and builds the [`Absorber`].
 //! Estimators (`ols`, `iv`, `glm`) are implemented in their own modules as `impl Session`.
 
+use rayon::prelude::*;
+
 use crate::absorber::Absorber;
 use crate::api::{Ctx, Family, FactorValues, Prep, Vce, WeightKind};
 use crate::error::RfError;
@@ -245,6 +247,50 @@ fn filter(v: &[f64], alive: &[bool]) -> Vec<f64> {
     v.iter().zip(alive).filter(|(_, a)| **a).map(|(x, _)| *x).collect()
 }
 
+/// Ascending indices of the `alive` observations.
+fn kept_indices(alive: &[bool], dropped: bool, pool: &Pool) -> Result<Vec<u32>, RfError> {
+    let counts: Vec<usize> = if dropped {
+        pool.install(|| alive.par_chunks(par::CHUNK).map(|a| a.iter().filter(|x| **x).count()).collect())
+    } else {
+        alive.chunks(par::CHUNK).map(<[bool]>::len).collect()
+    };
+    let mut bounds = vec![0usize];
+    bounds.extend(counts.iter().scan(0usize, |s, &c| {
+        *s += c;
+        Some(*s)
+    }));
+    let mut out = par::alloc_uninit::<u32>(bounds[counts.len()])?;
+    let pieces = crate::structure::split_bounds(&mut out, &bounds);
+    pool.install(|| {
+        pieces.into_par_iter().zip(alive.par_chunks(par::CHUNK)).enumerate().for_each(|(c, (o, a))| {
+            let base = (c * par::CHUNK) as u32;
+            let mut w = 0;
+            for (k, &x) in a.iter().enumerate() {
+                if x {
+                    o[w].write(base + k as u32);
+                    w += 1;
+                }
+            }
+        })
+    });
+    // SAFETY: each chunk's piece holds exactly its alive count, and all of them were written.
+    Ok(unsafe { par::assume_init(out) })
+}
+
+/// `v` at the `kept` observations.
+fn gather_kept(v: &[f64], kept: &[u32], pool: &Pool) -> Result<Vec<f64>, RfError> {
+    let mut out = par::alloc_uninit::<f64>(kept.len())?;
+    pool.install(|| {
+        out.par_chunks_mut(par::CHUNK).zip(kept.par_chunks(par::CHUNK)).for_each(|(o, k)| {
+            o.iter_mut().zip(k).for_each(|(x, &i)| {
+                x.write(v[i as usize]);
+            });
+        })
+    });
+    // SAFETY: every chunk wrote each of its elements.
+    Ok(unsafe { par::assume_init(out) })
+}
+
 fn validate(p: &Prep) -> Result<(), RfError> {
     let bad = |m: &str| Err(RfError::InvalidInput(m.to_string()));
     if p.n >= u32::MAX as usize {
@@ -299,18 +345,30 @@ fn sorted_set(v: &[usize]) -> Vec<usize> {
 
 fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Result<Session, RfError> {
     let mut t = std::time::Instant::now();
-    let codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
+    let mut codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
     crate::solve::log_phase(ctx, &mut t, "factorize");
     ctx.check()?;
-    let interact = |fs: &[usize]| -> Result<Codes, RfError> {
-        let parts: Vec<&Codes> = fs.iter().map(|&f| &codes[f]).collect();
-        factor::combine(&parts, pool)
+    let cluster_dims: &[Vec<usize>] = match &p.vce {
+        Vce::Cluster(dims) => dims,
+        _ => &[],
+    };
+    // Remaining uses of every factor: a single-factor term takes the codes on their last use.
+    let mut uses = vec![0usize; codes.len()];
+    for fs in p.absorb.iter().map(|t| &t.factors).chain(cluster_dims) {
+        fs.iter().for_each(|&f| uses[f] += 1);
+    }
+    let mut interact = |fs: &[usize]| -> Result<Codes, RfError> {
+        let c = match fs {
+            [f] if uses[*f] == 1 => std::mem::replace(&mut codes[*f], Codes { codes: Vec::new(), n: 0 }),
+            _ => factor::combine(&fs.iter().map(|&f| &codes[f]).collect::<Vec<_>>(), pool)?,
+        };
+        fs.iter().for_each(|&f| uses[f] -= 1);
+        Ok(c)
     };
     let term_codes: Vec<Codes> = p.absorb.iter().map(|t| interact(&t.factors)).collect::<Result<_, _>>()?;
-    let cluster_codes: Vec<(Vec<usize>, Codes)> = match &p.vce {
-        Vce::Cluster(dims) => dims.iter().map(|d| Ok((sorted_set(d), interact(d)?))).collect::<Result<_, RfError>>()?,
-        _ => Vec::new(),
-    };
+    let cluster_codes: Vec<(Vec<usize>, Codes)> =
+        cluster_dims.iter().map(|d| Ok((sorted_set(d), interact(d)?))).collect::<Result<_, RfError>>()?;
+    drop(codes);
     ctx.check()?;
 
     let mut alive = vec![true; p.n];
@@ -319,38 +377,43 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
     let sep = p.sep_fe.then(|| SepRule { y: p.y_for_sep.expect("validated"), family: p.family });
     let counts = sample::drop_singletons(&tc, &mut alive, fw, sep, p.drop_singletons, pool);
     crate::solve::log_phase(ctx, &mut t, "singletons");
-    let kept_index: Vec<u32> = (0..p.n as u32).filter(|&i| alive[i as usize]).collect();
+    // Every drop is counted, so nothing was dropped when both counts are zero.
+    let dropped = counts.singletons + counts.fe_separated > 0;
+    let kept_index = kept_indices(&alive, dropped, pool)?;
     if kept_index.len() < 2 {
         return Err(RfError::TooFewObs);
     }
     ctx.check()?;
 
+    // Nothing dropped: the codes are moved as they are (dense codes stay dense).
+    let restrict = |c: Codes| if dropped { factor::restrict(&c, &kept_index, pool) } else { Ok(c) };
+    let take = |v: &[f64]| if dropped { gather_kept(v, &kept_index, pool) } else { Ok(v.to_vec()) };
     let terms: Vec<Term> = p
         .absorb
         .iter()
-        .zip(&term_codes)
+        .zip(term_codes)
         .map(|(t, c)| {
-            let c = factor::compact(c, &alive);
-            Term {
+            let c = restrict(c)?;
+            Ok(Term {
                 factors: sorted_set(&t.factors),
                 codes: c.codes,
                 g: c.n as usize,
                 intercept: t.intercept,
-                slopes: t.slopes.iter().map(|&s| filter(p.slope_vars[s], &alive)).collect(),
+                slopes: t.slopes.iter().map(|&s| take(p.slope_vars[s])).collect::<Result<_, _>>()?,
                 slope_vars: t.slopes.clone(),
                 save: t.save,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, RfError>>()?;
     let clusters: Vec<ClusterDim> = cluster_codes
         .into_iter()
         .map(|(factors, c)| {
-            let c = factor::compact(&c, &alive);
-            ClusterDim { factors, codes: c.codes, g: c.n as usize }
+            let c = restrict(c)?;
+            Ok(ClusterDim { factors, codes: c.codes, g: c.n as usize })
         })
-        .collect();
-    let weights = p.weights.map(|w| filter(w, &alive));
-    let y_sep = p.y_for_sep.map(|y| filter(y, &alive));
+        .collect::<Result<_, RfError>>()?;
+    let weights = p.weights.map(take).transpose()?;
+    let y_sep = p.y_for_sep.map(take).transpose()?;
     let n = kept_index.len();
     crate::solve::log_phase(ctx, &mut t, "compact");
     let absorber = build_absorber(kind, &terms, weights.as_deref(), n, pool, ctx)?;

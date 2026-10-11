@@ -729,7 +729,7 @@ impl Absorber for FeSolver {
             return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
         }
         if r == 0 {
-            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + g1, r, data: Vec::new() }) });
+            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + g1, r, data: Vec::new() }), exact: true });
         }
         ctx.check()?;
         let mut t = Instant::now();
@@ -791,6 +791,8 @@ impl Absorber for FeSolver {
         }
         let mut iterations = 1;
         let mut escalated_now = false;
+        // Closed form without reduced blocks; else set from the PCG outcome.
+        let mut exact = true;
         if m > 0 {
             let can_escalate = !self.escalated && self.st.has_large() && self.pre.joint.is_none();
             let mut sys = System {
@@ -806,6 +808,7 @@ impl Absorber for FeSolver {
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
+            exact = out.exact || ss0.iter().all(|&s| s == 0.0);
             let joint_built = sys.joint_built;
             if joint_built {
                 joint_now = true;
@@ -845,7 +848,7 @@ impl Absorber for FeSolver {
             data.extend_from_slice(&a);
             FeCoefs { p: m + g1, r, data }
         });
-        Ok(SolveInfo { iterations, escalated: escalated_now, coefs })
+        Ok(SolveInfo { iterations, escalated: escalated_now, coefs, exact })
     }
 
     fn fit_rows(&self, c: &FeCoefs, col: usize, pool: &Pool) -> Vec<f64> {

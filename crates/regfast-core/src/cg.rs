@@ -73,6 +73,8 @@ pub trait CgSystem {
 pub struct CgOutcome {
     pub iterations: usize,
     pub escalated: bool,
+    /// The final (re)start used an exact preconditioner: x solves S x = rhs directly.
+    pub exact: bool,
 }
 
 /// Per-column dot products of two m × w row-major blocks.
@@ -112,6 +114,7 @@ pub fn pcg(
     let mut active: Vec<bool> = ss0.iter().map(|&s| s > 0.0).collect();
     let mut iterations = 0usize;
     let mut escalated = false;
+    let mut exact = false;
     let floor: Vec<f64> = ss0.iter().map(|s| 1e-26 * s).collect();
     let mut thr = vec![0.0; w];
 
@@ -141,6 +144,7 @@ pub fn pcg(
                 })
             });
             iterations += 1;
+            exact = true;
             break 'restart;
         }
         p.copy_from_slice(&z);
@@ -235,7 +239,7 @@ pub fn pcg(
             rho = rho_new;
         }
     }
-    Ok(CgOutcome { iterations, escalated })
+    Ok(CgOutcome { iterations, escalated, exact })
 }
 
 fn par_zip3(out: &mut [f64], a: &[f64], b: &[f64], pool: &Pool, f: impl Fn(&mut f64, f64, f64) + Sync) {

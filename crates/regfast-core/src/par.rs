@@ -6,6 +6,7 @@
 //!   per-chunk results are combined in chunk order, so results are bit-identical for any
 //!   number of threads.
 
+use std::mem::MaybeUninit;
 use std::ops::Range;
 
 use rayon::prelude::*;
@@ -149,6 +150,39 @@ macro_rules! dispatch_width {
     };
 }
 pub(crate) use dispatch_width;
+/// Fallible buffer of `n` uninitialized values (no zeroing pass): kernels write every element,
+/// typically in parallel (so the first touch of the pages is spread over the workers), then
+/// [`assume_init`] it.
+pub fn alloc_uninit<T>(n: usize) -> Result<Vec<MaybeUninit<T>>, RfError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| RfError::OutOfMemory)?;
+    // SAFETY: the capacity is at least n, and `MaybeUninit` values need no initialization.
+    unsafe { v.set_len(n) };
+    Ok(v)
+}
+
+/// The values of a fully written [`alloc_uninit`] buffer.
+///
+/// # Safety
+/// Every element of `v` must have been written.
+pub unsafe fn assume_init<T>(v: Vec<MaybeUninit<T>>) -> Vec<T> {
+    let mut v = std::mem::ManuallyDrop::new(v);
+    // SAFETY: same allocation, capacity and length; `MaybeUninit<T>` has the layout of `T`, and
+    // the caller guarantees that every element is initialized.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<T>(), v.len(), v.capacity()) }
+}
+
+/// [`alloc_vec`] filled in parallel chunks instead of serially on the calling thread.
+pub fn alloc_par<T: Copy + Send + Sync>(n: usize, value: T, pool: &Pool) -> Result<Vec<T>, RfError> {
+    let mut v = alloc_uninit(n)?;
+    if n <= CHUNK {
+        v.fill(MaybeUninit::new(value));
+    } else {
+        pool.install(|| v.par_chunks_mut(CHUNK).for_each(|c| c.fill(MaybeUninit::new(value))));
+    }
+    // SAFETY: every element was written above.
+    Ok(unsafe { assume_init(v) })
+}
 
 #[cfg(test)]
 mod tests {
