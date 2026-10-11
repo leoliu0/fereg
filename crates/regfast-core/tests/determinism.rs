@@ -5,7 +5,7 @@ use regfast_core::gather::gather_rows;
 use regfast_core::par::with_pool;
 use regfast_core::rng::SplitMix64;
 use regfast_core::slopes::SlopeSolver;
-use regfast_core::solve::{FeSolver, SolverConfig};
+use regfast_core::solve::{FeSolver, JointPolicy, SolverConfig};
 use regfast_core::{AbsorbTerm, Ctx, Family, FactorValues, Prep, Session, Vce, WeightKind};
 
 struct Data {
@@ -140,6 +140,22 @@ fn weighted_three_fe_with_repeated_cells() {
     let d = random(300_000, &[2_000, 8, 30], true, 3);
     check(&d, SolverConfig::default());
     check(&d, SolverConfig { small_limit: 0, acc_bytes_max: 0, ..SolverConfig::default() });
+}
+
+#[test]
+fn joint_factor_with_coupled_blocks() {
+    // Two large blocks (3000 and 800 levels) and a small one (10), weighted: the joint factor
+    // (faer AMD + supernodal LDLᵀ inside the pool) must give the same bits at any thread count.
+    let d = random(200_000, &[20_000, 3_000, 800, 10], true, 5);
+    let cfg = SolverConfig { small_limit: 100, ..SolverConfig::default() };
+    let (iterations, escalated) = check(&d, SolverConfig { joint: JointPolicy::Always, ..cfg });
+    assert!(escalated && iterations == 1, "joint factor: {iterations} iterations");
+    // Auto: whatever the cost model decides, the decision and the bits are thread invariant.
+    check(&d, cfg);
+    // Band graph: year small, firm large (2000 levels); the joint factor before the first iteration.
+    let d = band(2_000, 40_000, 5);
+    let (iterations, escalated) = check(&d, SolverConfig { joint: JointPolicy::Always, small_limit: 100, ..SolverConfig::default() });
+    assert!(escalated && iterations == 1, "band joint factor: {iterations} iterations");
 }
 
 #[test]

@@ -3,7 +3,9 @@
 //! regularization (grounding of null directions) as the dense block.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::sparse::linalg::cholesky::{CholeskySymbolicParams, LdltRef, SymbolicCholesky, SymmetricOrdering, factorize_symbolic_cholesky};
+use faer::perm::PermRef;
+use faer::sparse::linalg::amd;
+use faer::sparse::linalg::cholesky::{CholeskySymbolicParams, LdltRef, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering, factorize_symbolic_cholesky};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, Mat, Par, Side};
 
@@ -21,8 +23,14 @@ pub struct SparseChol {
     values: Vec<f64>,
 }
 
-fn par(pool: &Pool) -> Par {
-    if pool.threads() > 1 { Par::rayon(pool.threads()) } else { Par::Seq }
+/// Multiply-adds below which the numeric factorization runs sequentially: faer's parallel
+/// supernodal factorization is slower than the sequential one for small factors (measured on
+/// the AKM panels: 1e9 flops take 0.08 s on 16 threads vs 0.035 s on one). The result bits do
+/// not depend on the parallelism (tests/determinism.rs).
+const PAR_FLOPS: f64 = 1e10;
+
+fn par(pool: &Pool, flops: f64) -> Par {
+    if pool.threads() > 1 && flops >= PAR_FLOPS { Par::rayon(pool.threads()) } else { Par::Seq }
 }
 
 /// Lower triangle (CSC) of the symmetric full CSR `a`, scaled to unit diagonal.
@@ -58,22 +66,95 @@ impl SparseChol {
     /// Symbolic analysis and, when `len_val ≤ max(8·nnz, 2·10⁷)`, the numeric factorization.
     /// Returns `None` when the fill budget is exceeded or the factorization fails.
     pub fn try_factor(a: &Csr, pool: &Pool) -> Result<Option<SparseChol>, RfError> {
-        let n = a.n;
         let nnz = a.col.len();
-        let (col_ptr, row_idx, vals, scale) = lower_scaled(a);
-        let symbolic = {
-            let sym = SymbolicSparseColMatRef::<u32>::new_checked(n, n, &col_ptr, None, &row_idx);
-            pool.install(|| factorize_symbolic_cholesky(sym, Side::Lower, SymmetricOrdering::Amd, CholeskySymbolicParams::default()))
-        };
-        let symbolic = match symbolic {
-            Ok(s) => s,
-            Err(_) => return Ok(None),
-        };
-        if symbolic.len_val() > (8 * nnz).max(20_000_000) {
+        let Some((mut sc, vals)) = SparseChol::analyze(a, pool) else { return Ok(None) };
+        if sc.len_val() > (8 * nnz).max(20_000_000) {
             return Ok(None);
         }
-        let mut sc = SparseChol { col_ptr, row_idx, scale, symbolic, values: Vec::new() };
-        Ok(sc.numeric(&vals, pool)?.then_some(sc))
+        Ok(sc.factor(&vals, pool)?.then_some(sc))
+    }
+
+    /// Symbolic analysis only (AMD ordering, elimination structure): returns the unfactored
+    /// solver and the scaled lower-triangle values for [`SparseChol::factor`]; `None` when faer
+    /// rejects the pattern.
+    pub fn analyze(a: &Csr, pool: &Pool) -> Option<(SparseChol, Vec<f64>)> {
+        SparseChol::analyze_last(a, 0, pool)
+    }
+
+    /// As [`SparseChol::analyze`], with coordinates `0..last` eliminated last (in their order)
+    /// and AMD applied to the submatrix of the others only. For dense-ish leading rows (the small
+    /// blocks of the joint matrix, coupled to almost every coordinate) this is the ordering AMD
+    /// would approach, at the AMD cost of the sparse part alone.
+    pub fn analyze_last(a: &Csr, last: usize, pool: &Pool) -> Option<(SparseChol, Vec<f64>)> {
+        let n = a.n;
+        let (col_ptr, row_idx, vals, scale) = lower_scaled(a);
+        let order = if last == 0 || last >= n {
+            None
+        } else {
+            let nl = n - last;
+            // Pattern of the trailing submatrix (rows of the symmetric CSR = columns).
+            let mut cp = Vec::with_capacity(nl + 1);
+            cp.push(0u32);
+            let mut ri = Vec::new();
+            for i in last..n {
+                for k in a.ptr[i] as usize..a.ptr[i + 1] as usize {
+                    let j = a.col[k] as usize;
+                    if j >= last {
+                        ri.push((j - last) as u32);
+                    }
+                }
+                cp.push(ri.len() as u32);
+            }
+            let (mut p, mut pinv) = (vec![0u32; nl], vec![0u32; nl]);
+            let sym = SymbolicSparseColMatRef::<u32>::new_checked(nl, nl, &cp, None, &ri);
+            let mut mem = MemBuffer::new(amd::order_scratch::<u32>(nl, ri.len()));
+            amd::order(&mut p, &mut pinv, sym, amd::Control::default(), MemStack::new(&mut mem)).ok()?;
+            let mut fwd: Vec<u32> = p.iter().map(|&v| v + last as u32).collect();
+            fwd.extend(0..last as u32);
+            let mut inv = vec![0u32; n];
+            for (i, &o) in fwd.iter().enumerate() {
+                inv[o as usize] = i as u32;
+            }
+            Some((fwd, inv))
+        };
+        let symbolic = {
+            let sym = SymbolicSparseColMatRef::<u32>::new_checked(n, n, &col_ptr, None, &row_idx);
+            let ordering = match &order {
+                Some((fwd, inv)) => SymmetricOrdering::Custom(PermRef::new_checked(fwd, inv, n)),
+                None => SymmetricOrdering::Amd,
+            };
+            pool.install(|| factorize_symbolic_cholesky(sym, Side::Lower, ordering, CholeskySymbolicParams::default()))
+        };
+        let symbolic = symbolic.ok()?;
+        Some((SparseChol { col_ptr, row_idx, scale, symbolic, values: Vec::new() }, vals))
+    }
+
+    /// Numeric factorization of the analyzed pattern with the values from [`SparseChol::analyze`].
+    pub fn factor(&mut self, vals: &[f64], pool: &Pool) -> Result<bool, RfError> {
+        self.numeric(vals, pool)
+    }
+
+    /// Entries of the factor L (the solve streams them twice per right-hand side).
+    pub fn len_val(&self) -> usize {
+        self.symbolic.len_val()
+    }
+
+    /// Σ_j (entries of column j of L)²: the multiply-add count of the numeric factorization.
+    pub fn flops(&self) -> f64 {
+        let sq = |x: f64| x * (x + 1.0) * (2.0 * x + 1.0) / 6.0;
+        match self.symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(s) => s.col_ptr().windows(2).map(|w| ((w[1] - w[0]) as f64).powi(2)).sum(),
+            SymbolicCholeskyRaw::Supernodal(s) => {
+                let (b, e, rp) = (s.supernode_begin(), s.supernode_end(), s.col_ptr_for_row_idx());
+                (0..s.n_supernodes())
+                    .map(|k| {
+                        let ncols = (e[k] - b[k]) as f64;
+                        let below = (rp[k + 1] - rp[k]) as f64;
+                        sq(ncols + below) - sq(below)
+                    })
+                    .sum()
+            }
+        }
     }
 
     /// Numeric refactorization for a matrix with the same pattern (GLM weight updates).
@@ -92,7 +173,7 @@ impl SparseChol {
         let mut values = Vec::new();
         values.try_reserve_exact(self.symbolic.len_val()).map_err(|_| RfError::OutOfMemory)?;
         values.resize(self.symbolic.len_val(), 0.0);
-        let p = par(pool);
+        let p = par(pool, self.flops());
         let signs = vec![1i8; n];
         let reg = regularization(&signs);
         let ok = pool.install(|| {
