@@ -65,6 +65,8 @@ pub struct Structure {
     /// Largest reduced vector (bytes) scattered entirely through accumulators
     /// (see `operator::Ops::accumulates_all`).
     pub acc_bytes_max: usize,
+    /// Σ_seg s², s = distinct small coordinates per segment (dense assembly work).
+    pub small_work: u64,
 }
 
 impl Structure {
@@ -110,6 +112,21 @@ impl Structure {
         let per = if acc_len == 0 { 1 } else { (np * acc_len).div_ceil(1 << 22).max(1) };
         let mut t: Vec<u32> = (0..np).step_by(per).map(|k| self.parts[k]).collect();
         t.push(self.parts[np]);
+        t
+    }
+
+    /// `k` tasks of nearly equal cell counts (segment boundaries); depends only on the data and `k`.
+    pub fn even_tasks(&self, k: usize) -> Vec<u32> {
+        let k = k.clamp(1, self.g1.max(1));
+        let mut t = vec![0u32];
+        for j in 1..k {
+            let target = (self.ncells * j / k) as u32;
+            let s = self.seg_off[..self.g1].partition_point(|&c| c < target) as u32;
+            if s > *t.last().expect("nonempty") {
+                t.push(s);
+            }
+        }
+        t.push(self.g1 as u32);
         t
     }
 
@@ -300,6 +317,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
         m_small,
         parts,
         acc_bytes_max: crate::operator::ACC_BYTES_MAX,
+        small_work: 0,
     };
 
     // Dense small-block work Σ_seg s², s = distinct small coordinates in the segment.
@@ -327,6 +345,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
                 })
                 .sum()
         });
+        st.small_work = work;
         if work > 64 * st.ncells as u64 {
             st.blocks.iter_mut().for_each(|b| b.small = false);
             st.m_small = 0;

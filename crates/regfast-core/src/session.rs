@@ -85,7 +85,7 @@ impl Session {
 
     pub fn prepare_with(p: Prep, ctx: &Ctx, kind: AbsorberKind) -> Result<Session, RfError> {
         validate(&p)?;
-        par::with_pool(ctx.threads, |pool| prepare_in_pool(&p, ctx, kind, pool))?
+        par::with_pool(par::threads_for(ctx.threads, p.n), |pool| prepare_in_pool(&p, ctx, kind, pool))?
     }
 
     /// Kept observations.
@@ -126,7 +126,7 @@ impl Session {
                 return Err(RfError::InvalidInput("gather: column length differs from the kept sample".into()));
             }
         }
-        par::with_pool(ctx.threads, |pool| gather::gather_rows(self.row_order(), cols, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| gather::gather_rows(self.row_order(), cols, pool))?
     }
 
     /// Kept-order row-major block (R columns) → row-major block in [`Session::row_order`].
@@ -134,7 +134,7 @@ impl Session {
         if kept_rows.len() != self.n() * r {
             return Err(RfError::InvalidInput("permute_rows: block size differs from the kept sample".into()));
         }
-        par::with_pool(ctx.threads, |pool| gather::permute_rows(self.row_order(), &kept_rows, r, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| gather::permute_rows(self.row_order(), &kept_rows, r, pool))?
     }
 
     pub fn num_singletons(&self) -> u64 {
@@ -195,7 +195,7 @@ impl Session {
         if drop.len() != self.n() {
             return Err(RfError::InvalidInput("drop_obs: mask length differs from the kept sample".into()));
         }
-        par::with_pool(ctx.threads, |pool| self.drop_obs_in_pool(drop, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.drop_obs_in_pool(drop, ctx, pool))?
     }
 
     fn drop_obs_in_pool(&mut self, drop: &[bool], ctx: &Ctx, pool: &Pool) -> Result<DropReport, RfError> {
