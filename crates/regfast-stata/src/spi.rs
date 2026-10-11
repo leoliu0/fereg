@@ -1,10 +1,12 @@
 //! Safe wrappers over `c/glue.c`, the only code that calls the Stata plugin interface.
 //!
-//! Every function here must be called on Stata's thread, except [`read_rows`], which the gated
-//! parallel-read path (plan §4.3) calls concurrently on disjoint observation ranges.
+//! Every function here must be called on Stata's thread, except [`read_rows`] and
+//! [`read_sample`], which the parallel-read path (plan §4.3) calls concurrently on disjoint
+//! observation ranges.
 //! Indices are 1-based (Stata convention).
 
 use std::ffi::{CString, c_char, c_int, c_void};
+use std::mem::MaybeUninit;
 use std::time::{Duration, Instant};
 use std::sync::Mutex;
 
@@ -17,7 +19,18 @@ unsafe extern "C" {
     fn rf_in1() -> c_int;
     fn rf_in2() -> c_int;
     fn rf_ifobs(obs: c_int) -> c_int;
-    fn rf_read_rows(vars: *const c_int, nv: c_int, obs: *const c_int, n: c_int, out: *mut f64) -> c_int;
+    fn rf_read_rows(vars: *const c_int, nv: c_int, obs: *const c_int, n: c_int, out: *mut f64, nmiss: *mut i64) -> c_int;
+    fn rf_count_sample(tv: c_int, o1: c_int, o2: c_int) -> c_int;
+    fn rf_read_sample(
+        tv: c_int,
+        vars: *const c_int,
+        nv: c_int,
+        o1: c_int,
+        o2: c_int,
+        cap: c_int,
+        obs_out: *mut c_int,
+        cols: *const *mut f64,
+    ) -> c_int;
     fn rf_store_num(var: c_int, obs: *const c_int, n: c_int, v: *const f64, stride: c_int) -> c_int;
     fn rf_is_str(var: c_int) -> c_int;
     fn rf_is_strl(var: c_int) -> c_int;
@@ -76,17 +89,50 @@ pub fn ifobs(obs: i32) -> bool {
     unsafe { rf_ifobs(obs) != 0 }
 }
 
-/// Row-major read `out[k * vars.len() + j] = vars[j][obs[k]]` (NaN for missing).
-pub fn read_rows(vars: &[i32], obs: &[i32], out: &mut [f64]) -> Result<(), RfError> {
+/// Row-major read `out[k * vars.len() + j] = vars[j][obs[k]]` (NaN for missing) into memory
+/// that may be uninitialized; every element is written on success. Returns the number of
+/// missing values read.
+pub fn read_rows(vars: &[i32], obs: &[i32], out: &mut [MaybeUninit<f64>]) -> Result<u64, RfError> {
     assert!(obs.len() <= MAX_CALL);
     assert_eq!(out.len(), obs.len() * vars.len());
     if out.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let mut nmiss = 0i64;
     let rc = unsafe {
-        rf_read_rows(vars.as_ptr(), vars.len() as c_int, obs.as_ptr(), obs.len() as c_int, out.as_mut_ptr())
+        rf_read_rows(vars.as_ptr(), vars.len() as c_int, obs.as_ptr(), obs.len() as c_int, out.as_mut_ptr().cast(), &mut nmiss)
     };
-    if rc != 0 { Err(rc_err(rc, "reading variables")) } else { Ok(()) }
+    if rc != 0 { Err(rc_err(rc, "reading variables")) } else { Ok(nmiss as u64) }
+}
+
+/// Number of observations in `o1..=o2` whose `touse` value is not 0.
+pub fn count_sample(touse: i32, o1: i32, o2: i32) -> Result<usize, RfError> {
+    let c = unsafe { rf_count_sample(touse, o1, o2) };
+    if c < 0 { Err(rc_err(-c, "reading the estimation sample")) } else { Ok(c as usize) }
+}
+
+/// Sample scan of observations `o1..=o2`: the c-th observation whose `touse` value is not 0
+/// goes to `obs_out[c]` and its value of `vars[j]` to `cols[j][c]` (NaN for missing). Fails
+/// unless exactly `obs_out.len()` such observations are found (the count of [`count_sample`]).
+pub fn read_sample(
+    touse: i32,
+    vars: &[i32],
+    o1: i32,
+    o2: i32,
+    obs_out: &mut [MaybeUninit<i32>],
+    cols: &mut [&mut [MaybeUninit<f64>]],
+) -> Result<(), RfError> {
+    let cap = obs_out.len();
+    assert!(cap <= MAX_CALL && cols.len() == vars.len() && cols.iter().all(|c| c.len() == cap));
+    let ptrs: Vec<*mut f64> = cols.iter_mut().map(|c| c.as_mut_ptr().cast()).collect();
+    let c = unsafe {
+        rf_read_sample(touse, vars.as_ptr(), vars.len() as c_int, o1, o2, cap as c_int, obs_out.as_mut_ptr().cast(), ptrs.as_ptr())
+    };
+    match c {
+        c if c >= 0 && c as usize == cap => Ok(()),
+        c if c >= 0 || c == -9999 => Err(RfError::Internal("the estimation sample changed while it was read".into())),
+        c => Err(rc_err(-c, "reading the estimation sample")),
+    }
 }
 
 /// `var[obs[k]] = v[k * stride]` (NaN stored as missing).

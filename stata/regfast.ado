@@ -572,6 +572,7 @@ program Estimate, eclass
 				local fdf = `fss'`i'[1, 2]
 				local frmse = `fss'`i'[1, 1]
 				local fdfm = `fss'`i'[1, 3]
+				ereturn clear
 				ereturn post `fsb'`i' `fsV'`i', esample(`fsample') depname(`en') obs(`N') dof(`fdf')
 				ereturn scalar rmse = `frmse'
 				ereturn scalar df_r = `fdf'
@@ -610,6 +611,8 @@ program Estimate, eclass
 		matrix colnames `V' = `colnames'
 		matrix rownames `V' = `colnames'
 		_ms_findomitted `b' `V'
+		* clearing first is much cheaper than letting -ereturn post- replace an existing e(sample)
+		ereturn clear
 		ereturn post `b' `V', esample(`touse') buildfvinfo depname(`depvar') obs(`N') dof(`df_r')
 
 		* Scalars computed by the plugin (names = ivreghdfe e() names)
@@ -816,6 +819,9 @@ program Estimate, eclass
 
 	local N = scalar(__rf_N)
 	local df_r = scalar(__rf_df_r)
+	* clearing first is much cheaper than letting -ereturn post- replace an existing e(sample)
+	* (reghdfe's EreturnPost also clears first)
+	ereturn clear
 	if (`K_full' > 0) {
 		matrix colnames `b' = `colnames'
 		matrix colnames `V' = `colnames'

@@ -27,9 +27,11 @@ RF_HIDDEN int rf_in2(void) { return SF_in2(); }
 RF_HIDDEN int rf_ifobs(int obs) { return SF_ifobs(obs) ? 1 : 0; }
 
 /* Row-major read: out[k*nv + j] = value of vars[j] at obs[k] (observation-major access).
-   Stata missing values (. and .a-.z) are all >= SV_missval; they are returned as NaN. */
-RF_HIDDEN int rf_read_rows(const int *vars, int nv, const int *obs, int n, double *out) {
+   Stata missing values (. and .a-.z) are all >= SV_missval; they are returned as NaN and
+   counted in *nmiss. */
+RF_HIDDEN int rf_read_rows(const int *vars, int nv, const int *obs, int n, double *out, long long *nmiss) {
     ST_double mv = SV_missval;
+    long long miss = 0;
     for (int k = 0; k < n; k++) {
         double *row = out + (size_t)k * (size_t)nv;
         int o = obs[k];
@@ -37,10 +39,53 @@ RF_HIDDEN int rf_read_rows(const int *vars, int nv, const int *obs, int n, doubl
             ST_double z;
             ST_retcode rc = SF_vdata(vars[j], o, &z);
             if (rc) return rc;
-            row[j] = (z >= mv) ? NAN : z;
+            if (z >= mv) {
+                row[j] = NAN;
+                miss++;
+            } else {
+                row[j] = z;
+            }
         }
     }
+    *nmiss = miss;
     return 0;
+}
+
+/* Number of observations in o1..o2 whose touse value (variable tv) is not 0, or -rc. */
+RF_HIDDEN int rf_count_sample(int tv, int o1, int o2) {
+    int c = 0;
+    for (int o = o1; o <= o2; o++) {
+        ST_double t;
+        ST_retcode rc = SF_vdata(tv, o, &t);
+        if (rc) return -rc;
+        c += (t != 0);
+    }
+    return c;
+}
+
+/* Sample scan for cmd=prepare over o1..o2: for the c-th observation whose touse value
+   (variable tv) is not 0, writes the observation to obs_out[c] and the value of vars[j] to
+   cols[j][c] (NaN for missing); every output has room for cap values. Returns the number of
+   observations written, -rc on a Stata error, or -9999 when more than cap are found. */
+RF_HIDDEN int rf_read_sample(int tv, const int *vars, int nv, int o1, int o2, int cap, int *obs_out, double *const *cols) {
+    ST_double mv = SV_missval;
+    int c = 0;
+    for (int o = o1; o <= o2; o++) {
+        ST_double t;
+        ST_retcode rc = SF_vdata(tv, o, &t);
+        if (rc) return -rc;
+        if (t == 0) continue;
+        if (c == cap) return -9999;
+        obs_out[c] = o;
+        for (int j = 0; j < nv; j++) {
+            ST_double z;
+            rc = SF_vdata(vars[j], o, &z);
+            if (rc) return -rc;
+            cols[j][c] = (z >= mv) ? NAN : z;
+        }
+        c++;
+    }
+    return c;
 }
 
 /* NaN is stored as Stata missing. Uses the checked `safestore` even under SD_FASTMODE: the
