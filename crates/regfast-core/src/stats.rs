@@ -47,10 +47,21 @@ fn col_stats_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Opt
     let r = width::<R>(r);
     let cn = range.len() as f64;
     let rows = &rows[range.start * r..range.end * r];
-    let mut mean = vec![0.0; r];
-    let mut m2 = vec![0.0; r];
-    let mut sumsq = vec![0.0; r];
-    let (mean_s, m2_s, sumsq_s) = (&mut mean[..r], &mut m2[..r], &mut sumsq[..r]);
+    // Accumulators in a local array for const widths (kept in registers; accumulating into heap
+    // slices chains every term through store-to-load forwarding).
+    let (mut arr, mut heap) = ([0.0f64; 56], Vec::new());
+    let buf: &mut [f64] = if R > 0 && R <= 8 {
+        &mut arr[..7 * r]
+    } else {
+        heap.resize(7 * r, 0.0);
+        &mut heap
+    };
+    let (mean_s, rest) = buf.split_at_mut(r);
+    let (m2_s, rest) = rest.split_at_mut(r);
+    let (sumsq_s, rest) = rest.split_at_mut(r);
+    let (wsx_s, rest) = rest.split_at_mut(r);
+    let (wmean_s, rest) = rest.split_at_mut(r);
+    let (wm2_s, wsumsq_s) = rest.split_at_mut(r);
     if !W {
         for row in rows.chunks_exact(r) {
             for j in 0..r {
@@ -66,15 +77,11 @@ fn col_stats_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Opt
                 m2_s[j] += d * d;
             }
         }
+        let (mean, m2, sumsq) = (mean_s.to_vec(), m2_s.to_vec(), sumsq_s.to_vec());
         return Part { n: cn, w: cn, wmean: mean.clone(), wm2: m2.clone(), wsumsq: sumsq.clone(), mean, m2, sumsq };
     }
     let w = &w.expect("weighted chunk")[range];
     let mut pw = 0.0;
-    let mut wsx = vec![0.0; r];
-    let mut wmean = vec![0.0; r];
-    let mut wm2 = vec![0.0; r];
-    let mut wsumsq = vec![0.0; r];
-    let (wsx_s, wmean_s, wm2_s, wsumsq_s) = (&mut wsx[..r], &mut wmean[..r], &mut wm2[..r], &mut wsumsq[..r]);
     for (row, &wi) in rows.chunks_exact(r).zip(w) {
         pw += wi;
         for j in 0..r {
@@ -97,7 +104,16 @@ fn col_stats_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Opt
             wm2_s[j] += wi * dw * dw;
         }
     }
-    Part { n: cn, mean, m2, sumsq, w: pw, wmean, wm2, wsumsq }
+    Part {
+        n: cn,
+        mean: mean_s.to_vec(),
+        m2: m2_s.to_vec(),
+        sumsq: sumsq_s.to_vec(),
+        w: pw,
+        wmean: wmean_s.to_vec(),
+        wm2: wm2_s.to_vec(),
+        wsumsq: wsumsq_s.to_vec(),
+    }
 }
 
 /// Merges chunk statistics in chunk order (Chan's update).
@@ -157,8 +173,11 @@ pub(crate) fn gram(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) -> (V
 /// Pass B over one chunk (upper triangle of G, then Σz²).
 fn gram_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>, acc: &mut [f64]) {
     let r = width::<R>(r);
-    let (g, ss) = acc.split_at_mut(r * r);
-    let (g, ss) = (&mut g[..r * r], &mut ss[..r]);
+    // Accumulate in a local array for const widths (registers), then add to the zeroed `acc`.
+    let mut arr = [0.0f64; 72];
+    let local = R > 0 && R <= 8;
+    let buf: &mut [f64] = if local { &mut arr[..r * r + r] } else { &mut acc[..r * r + r] };
+    let (g, ss) = buf.split_at_mut(r * r);
     let w = if W { &w.expect("weighted chunk")[range.clone()] } else { &[][..] };
     for (i, row) in rows[range.start * r..range.end * r].chunks_exact(r).enumerate() {
         let wi = if W { w[i] } else { 1.0 };
@@ -170,6 +189,11 @@ fn gram_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&
             for b in a..r {
                 grow[b] += wa * row[b];
             }
+        }
+    }
+    if local {
+        for (a, v) in acc.iter_mut().zip(&arr[..r * r + r]) {
+            *a += v;
         }
     }
 }

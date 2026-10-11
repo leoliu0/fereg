@@ -501,6 +501,22 @@ fn gather_cells<const R: usize>(codes: &[u32], nb: usize, offs: &[usize], p: &[f
         u.fill(0.0);
         return;
     }
+    if R > 0 {
+        // Sums in a local array (registers): accumulating into `u` would chain every term
+        // through store-to-load forwarding.
+        for (cc, uc) in codes.chunks_exact(nb).zip(u.chunks_exact_mut(r)) {
+            let mut acc = [0.0f64; 8];
+            for (&code, &off) in cc.iter().zip(offs) {
+                let at = off + code as usize * r;
+                let pv = &p[at..at + r];
+                for j in 0..r {
+                    acc[j] += pv[j];
+                }
+            }
+            uc.copy_from_slice(&acc[..r]);
+        }
+        return;
+    }
     for (cc, uc) in codes.chunks_exact(nb).zip(u.chunks_exact_mut(r)) {
         uc.fill(0.0);
         for (&code, &off) in cc.iter().zip(offs) {
@@ -510,6 +526,19 @@ fn gather_cells<const R: usize>(codes: &[u32], nb: usize, offs: &[usize], p: &[f
                 uc[j] += pv[j];
             }
         }
+    }
+}
+
+/// Per-column accumulator of a kernel instance: a local array (kept in registers) for const
+/// widths, else `v` resized to `r`.
+#[inline(always)]
+fn regs<'a, const R: usize>(arr: &'a mut [f64; 8], v: &'a mut Vec<f64>, r: usize) -> &'a mut [f64] {
+    if R > 0 && R <= 8 {
+        &mut arr[..R]
+    } else {
+        v.clear();
+        v.resize(r, 0.0);
+        &mut v[..]
     }
 }
 
@@ -559,8 +588,8 @@ fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &
     let offs = &offs_v[..nb];
     let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let mut tbuf = vec![0.0; r];
-    let tv = &mut tbuf[..r];
+    let (mut tarr, mut tvec) = ([0.0f64; 8], Vec::new());
+    let tv = regs::<R>(&mut tarr, &mut tvec, r);
     for s in t.segs.clone() {
         let cells = st.cells_of(s);
         let k = cells.len();
@@ -612,8 +641,11 @@ fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize,
     let offs = block_offsets(st, r);
     let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let mut ex = vec![0.0; 2 * r];
-    let (esq, esum) = ex.split_at_mut(r);
+    let (mut a1, mut v1, mut a2, mut v2, mut a3, mut v3) = ([0.0f64; 8], Vec::new(), [0.0f64; 8], Vec::new(), [0.0f64; 8], Vec::new());
+    let esq = regs::<R>(&mut a1, &mut v1, r);
+    let esum = regs::<R>(&mut a2, &mut v2, r);
+    // b1 of the current segment, accumulated in registers and stored once.
+    let b1s = regs::<R>(&mut a3, &mut v3, r);
     let s0 = t.segs.start;
     let seg_out = t.seg_out.take().expect("b1 slot");
     for s in t.segs.clone() {
@@ -623,7 +655,7 @@ fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize,
             u.resize(k * r, 0.0);
         }
         let uk = &mut u[..k * r];
-        let b1s = &mut seg_out[(s - s0) * r..(s - s0 + 1) * r];
+        b1s.fill(0.0);
         if UNIT {
             let rv = &rows[cells.start * r..cells.end * r];
             for (sc, v) in uk.chunks_exact_mut(r).zip(rv.chunks_exact(r)) {
@@ -668,7 +700,7 @@ fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize,
                 }
             }
         }
-        let b1s = &seg_out[(s - s0) * r..(s - s0 + 1) * r];
+        seg_out[(s - s0) * r..(s - s0 + 1) * r].copy_from_slice(b1s);
         let inv = 1.0 / ws.n1[s];
         if UNIT {
             for sc in uk.chunks_exact_mut(r) {
@@ -687,7 +719,8 @@ fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize,
         let codes = &st.cell_codes[cells.start * nb..cells.end * nb];
         scatter_cells::<R>(&mut t, codes, nb, &offs, cells, uk, r);
     }
-    t.extra.copy_from_slice(&ex);
+    t.extra[..r].copy_from_slice(esq);
+    t.extra[r..].copy_from_slice(esum);
 }
 
 /// Task body of [`Ops::residualize_rows`] over the segments `segs` whose rows start at `row0`.
@@ -708,8 +741,8 @@ fn residualize_task<const R: usize, const UNIT: bool>(
     let offs = block_offsets(st, r);
     let cw: &[f64] = ws.cell_w.as_deref().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let mut abuf = vec![0.0; r];
-    let a = &mut abuf[..r];
+    let (mut aarr, mut avec) = ([0.0f64; 8], Vec::new());
+    let a = regs::<R>(&mut aarr, &mut avec, r);
     let s0 = segs.start;
     for s in segs {
         let cells = st.cells_of(s);
@@ -1040,12 +1073,15 @@ impl Ops<'_> {
         if gemm_small(st) {
             return self.assemble_small_gemm(pool);
         }
-        let ns = st.blocks.iter().filter(|b| b.small).count();
-        let nrb = (ms * ms).div_ceil(1 << 21).max(1);
+        let (nb, ns) = (st.nb, st.blocks.iter().filter(|b| b.small).count());
+        let offs = block_offsets(st, 1);
+        // Packed lower triangle: row k starts at tri(k).
+        let tri = |k: usize| k * (k + 1) / 2;
+        let nrb = tri(ms).div_ceil(1 << 21).max(1);
         let rows_per = ms.div_ceil(nrb);
         // Segment tasks: enough to parallelize the Σ s² outer products, few enough that zeroing
-        // and combining the per-task accumulators (rows_per × m_s each) stays ≤ 1/4 of that work.
-        let nt_want = (st.small_work / (4 * (rows_per * ms) as u64).max(1)).clamp(1, 64) as usize;
+        // and combining the per-task accumulators (≈ tri(m_s)/nrb each) stays ≤ 1/8 of that work.
+        let nt_want = (st.small_work / (8 * (tri(ms) / nrb) as u64).max(1)).clamp(1, 64) as usize;
         let tb = st.even_tasks(nt_want);
         let nt = tb.len() - 1;
         let jobs: Vec<(usize, usize)> = (0..nrb).flat_map(|rbk| (0..nt).map(move |t| (rbk, t))).collect();
@@ -1054,47 +1090,51 @@ impl Ops<'_> {
                 .map(|&(rbk, t)| {
                     let k0 = rbk * rows_per;
                     let k1 = ((rbk + 1) * rows_per).min(ms);
-                    let mut acc = vec![0.0; (k1 - k0) * ms];
-                    let mut agg: Vec<(u32, f64)> = Vec::new();
+                    let base = tri(k0);
+                    let mut acc = vec![0.0; tri(k1) - base];
+                    // Per-segment level sums through a stamped dense scratch.
+                    let mut stamp = vec![u32::MAX; ms];
+                    let mut cv = vec![0.0; ms];
+                    let mut touched: Vec<u32> = Vec::new();
+                    let mut tvals: Vec<f64> = Vec::new();
                     for s in tb[t] as usize..tb[t + 1] as usize {
-                        agg.clear();
+                        touched.clear();
                         for c in st.cells_of(s) {
                             let w = ws.cw(c);
-                            let codes = st.codes(c);
-                            for b in 0..ns {
-                                let kb = st.blocks[b].off + codes[b] as usize;
-                                agg.push((kb as u32, w));
+                            let cc = &st.cell_codes[c * nb..c * nb + ns];
+                            for (&code, &off) in cc.iter().zip(&offs) {
+                                let kb = off + code as usize;
+                                if stamp[kb] != s as u32 {
+                                    stamp[kb] = s as u32;
+                                    cv[kb] = 0.0;
+                                    touched.push(kb as u32);
+                                }
+                                cv[kb] += w;
                                 if kb >= k0 && kb < k1 {
-                                    for b2 in 0..ns {
-                                        let l = st.blocks[b2].off + codes[b2] as usize;
+                                    let row = tri(kb) - base;
+                                    for (&code2, &off2) in cc.iter().zip(&offs) {
+                                        let l = off2 + code2 as usize;
                                         if l <= kb {
-                                            acc[(kb - k0) * ms + l] += w;
+                                            acc[row + l] += w;
                                         }
                                     }
                                 }
                             }
                         }
-                        agg.sort_unstable_by_key(|e| e.0);
-                        let mut out = 0;
-                        for i in 0..agg.len() {
-                            if out > 0 && agg[out - 1].0 == agg[i].0 {
-                                agg[out - 1].1 += agg[i].1;
-                            } else {
-                                agg[out] = agg[i];
-                                out += 1;
-                            }
-                        }
-                        agg.truncate(out);
                         let inv = 1.0 / ws.n1[s];
-                        // Lower triangle only (l ≤ k): agg is sorted by coordinate.
-                        for (i, &(k, ck)) in agg.iter().enumerate() {
+                        // Sorted, the coordinates l ≤ k of row k are a prefix; their values
+                        // are gathered once.
+                        touched.sort_unstable();
+                        tvals.clear();
+                        tvals.extend(touched.iter().map(|&l| cv[l as usize]));
+                        for (i, &k) in touched.iter().enumerate() {
                             let k = k as usize;
                             if k < k0 || k >= k1 {
                                 continue;
                             }
-                            let row = &mut acc[(k - k0) * ms..(k - k0 + 1) * ms];
-                            let f = ck * inv;
-                            for &(l, cl) in &agg[..=i] {
+                            let row = &mut acc[tri(k) - base..tri(k) - base + k + 1];
+                            let f = tvals[i] * inv;
+                            for (&l, &cl) in touched[..=i].iter().zip(&tvals[..=i]) {
                                 row[l as usize] -= f * cl;
                             }
                         }
@@ -1108,10 +1148,10 @@ impl Ops<'_> {
         pool.install(|| {
             full.par_chunks_mut(ms).enumerate().for_each(|(k, row)| {
                 let rbk = k / rows_per;
-                let local = k - rbk * rows_per;
+                let at = tri(k) - tri(rbk * rows_per);
                 for t in 0..nt {
                     let acc = &accs[rbk * nt + t];
-                    for (a, v) in row[..=k].iter_mut().zip(&acc[local * ms..local * ms + k + 1]) {
+                    for (a, v) in row[..=k].iter_mut().zip(&acc[at..at + k + 1]) {
                         *a += v;
                     }
                 }
