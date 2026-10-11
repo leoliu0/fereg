@@ -7,10 +7,29 @@ pub mod dense;
 pub mod jacobi;
 pub mod sparse_chol;
 
+use std::ops::Range;
+
 use faer::Mat;
+use rayon::prelude::*;
 
 use crate::par::Pool;
 use crate::structure::Structure;
+
+/// Right-hand-side columns per sparse-Cholesky solve task. Fixed (not derived from the thread
+/// count) so that every column is solved with the same grouping at any thread count (D3).
+pub const SOLVE_COLS: usize = 4;
+
+/// (block, column range) solve tasks for the factored blocks among `large`: sparse-Cholesky
+/// blocks in groups of [`SOLVE_COLS`] columns, approximate-Cholesky blocks one column each.
+pub fn solve_tasks<T>(large: &[T], w: usize, kind: impl Fn(&T) -> Option<usize>) -> Vec<(usize, Range<usize>)> {
+    let mut tasks = Vec::new();
+    for (b, bp) in large.iter().enumerate() {
+        if let Some(cols) = kind(bp) {
+            tasks.extend((0..w.div_ceil(cols)).map(|c| (b, c * cols..((c + 1) * cols).min(w))));
+        }
+    }
+    tasks
+}
 
 /// Preconditioner of one large block.
 pub enum BlockPrecond {
@@ -45,32 +64,57 @@ impl Precond {
             d.apply(r, z, st.m_small, w, pool);
         }
         let ns = st.blocks.iter().filter(|b| b.small).count();
+        // The factored blocks are independent: every (block, column group) is solved
+        // sequentially in its own task, and the tasks run concurrently.
+        let tasks = solve_tasks(&self.large, w, |bp| match bp {
+            BlockPrecond::Jacobi => None,
+            BlockPrecond::SparseChol { .. } => Some(SOLVE_COLS),
+            BlockPrecond::ApproxChol { .. } => Some(1),
+        });
+        if tasks.is_empty() {
+            return;
+        }
+        let sols: Vec<Vec<f64>> = pool.install(|| {
+            tasks
+                .par_iter()
+                .map(|(b, cols)| {
+                    let off = st.blocks[ns + b].off;
+                    match &self.large[*b] {
+                        BlockPrecond::SparseChol { keep, f } => {
+                            let mut rhs =
+                                Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
+                            f.solve(&mut rhs);
+                            let mut sol = Vec::with_capacity(keep.len() * cols.len());
+                            for j in 0..cols.len() {
+                                sol.extend((0..keep.len()).map(|i| rhs[(i, j)]));
+                            }
+                            sol
+                        }
+                        BlockPrecond::ApproxChol { keep, f } => {
+                            let mut col: Vec<f64> = keep.iter().map(|&k| r[(off + k as usize) * w + cols.start]).collect();
+                            f.solve_col(&mut col);
+                            col
+                        }
+                        BlockPrecond::Jacobi => unreachable!("Jacobi blocks have no solve task"),
+                    }
+                })
+                .collect()
+        });
         for (b, bp) in self.large.iter().enumerate() {
+            if !matches!(bp, BlockPrecond::Jacobi) {
+                let blk = &st.blocks[ns + b];
+                z[blk.off * w..(blk.off + blk.g) * w].iter_mut().for_each(|v| *v = 0.0);
+            }
+        }
+        for ((b, cols), sol) in tasks.iter().zip(&sols) {
+            let keep = match &self.large[*b] {
+                BlockPrecond::SparseChol { keep, .. } | BlockPrecond::ApproxChol { keep, .. } => keep,
+                BlockPrecond::Jacobi => unreachable!("Jacobi blocks have no solve task"),
+            };
             let off = st.blocks[ns + b].off;
-            match bp {
-                BlockPrecond::Jacobi => {}
-                BlockPrecond::SparseChol { keep, f } => {
-                    let mut rhs = Mat::<f64>::from_fn(keep.len(), w, |i, j| r[(off + keep[i] as usize) * w + j]);
-                    f.solve(&mut rhs, pool);
-                    let g = st.blocks[ns + b].g;
-                    z[off * w..(off + g) * w].iter_mut().for_each(|v| *v = 0.0);
-                    for (i, &k) in keep.iter().enumerate() {
-                        for j in 0..w {
-                            z[(off + k as usize) * w + j] = rhs[(i, j)];
-                        }
-                    }
-                }
-                BlockPrecond::ApproxChol { keep, f } => {
-                    let mut cols: Vec<Vec<f64>> =
-                        (0..w).map(|j| keep.iter().map(|&k| r[(off + k as usize) * w + j]).collect()).collect();
-                    f.solve(&mut cols, pool);
-                    let g = st.blocks[ns + b].g;
-                    z[off * w..(off + g) * w].iter_mut().for_each(|v| *v = 0.0);
-                    for (j, col) in cols.iter().enumerate() {
-                        for (i, &k) in keep.iter().enumerate() {
-                            z[(off + k as usize) * w + j] = col[i];
-                        }
-                    }
+            for (j, c) in cols.clone().enumerate() {
+                for (i, &k) in keep.iter().enumerate() {
+                    z[(off + k as usize) * w + c] = sol[j * keep.len() + i];
                 }
             }
         }

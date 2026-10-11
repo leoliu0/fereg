@@ -108,18 +108,18 @@ impl SparseChol {
     }
 
     /// Solves in place for the k × w column-major block `rhs` (kept coordinates of the block).
-    pub fn solve(&self, rhs: &mut Mat<f64>, pool: &Pool) {
+    /// Sequential: faer's parallel triangular solve is several times slower than a sequential
+    /// one for the few right-hand sides of a PCG iteration, so callers parallelize across
+    /// blocks and column groups instead.
+    pub fn solve(&self, rhs: &mut Mat<f64>) {
         let w = rhs.ncols();
         for j in 0..w {
             for i in 0..rhs.nrows() {
                 rhs[(i, j)] *= self.scale[i];
             }
         }
-        let p = par(pool);
-        pool.install(|| {
-            let mut buf = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(w, p));
-            LdltRef::new(&self.symbolic, &self.values).solve_in_place_with_conj(Conj::No, rhs.as_mut(), p, MemStack::new(&mut buf));
-        });
+        let mut buf = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(w, Par::Seq));
+        LdltRef::new(&self.symbolic, &self.values).solve_in_place_with_conj(Conj::No, rhs.as_mut(), Par::Seq, MemStack::new(&mut buf));
         for j in 0..w {
             for i in 0..rhs.nrows() {
                 rhs[(i, j)] *= self.scale[i];
@@ -162,7 +162,7 @@ mod tests {
                 let f = SparseChol::try_factor(&a, pool).unwrap().expect("factor");
                 let r = [1.0, -3.0, 2.0, 0.0, 0.7, -0.2, -0.5];
                 let mut m = Mat::<f64>::from_fn(n, 1, |i, _| r[i]);
-                f.solve(&mut m, pool);
+                f.solve(&mut m);
                 for i in 0..n {
                     let s: f64 = (0..n).map(|j| dense[i * n + j] * m[(j, 0)]).sum();
                     assert!((s - r[i]).abs() < 1e-12, "row {i}: {s} vs {}", r[i]);

@@ -37,6 +37,7 @@ use crate::operator::{Csr, REDUNDANT};
 use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::dense::Dense;
 use crate::precond::sparse_chol::SparseChol;
+use crate::precond::{SOLVE_COLS, solve_tasks};
 use crate::session::Term;
 use crate::solve::{SolverConfig, log_phase};
 use crate::structure::{obs_groups, scatter_by_code, split_bounds};
@@ -1384,41 +1385,69 @@ impl SPre {
             d.apply(r, z, st.m_small, w, pool);
         }
         for (k, lp) in self.large.iter().enumerate() {
+            let LargePre::Jacobi = lp else { continue };
             let q = st.nsmall + k;
             let blk = &st.blocks[q];
             let (off, b) = (blk.off, blk.b);
             let zs = &mut z[off * w..(off + blk.g * b) * w];
             let rs = &r[off * w..(off + blk.g * b) * w];
-            match lp {
-                LargePre::Jacobi => {
-                    let jv = &ops.ws.jinv[q];
-                    pool.install(|| {
-                        zs.par_chunks_mut(b * w).zip(rs.par_chunks(b * w)).enumerate().with_min_len(256).for_each(|(g, (zo, ri))| {
-                            let jl = &jv[g * b * b..(g + 1) * b * b];
-                            for a in 0..b {
-                                let out = &mut zo[a * w..(a + 1) * w];
-                                out.iter_mut().for_each(|v| *v = 0.0);
-                                for c in 0..b {
-                                    let f = jl[a * b + c];
-                                    if f != 0.0 {
-                                        for (o, x) in out.iter_mut().zip(&ri[c * w..(c + 1) * w]) {
-                                            *o += f * x;
-                                        }
-                                    }
+            let jv = &ops.ws.jinv[q];
+            pool.install(|| {
+                zs.par_chunks_mut(b * w).zip(rs.par_chunks(b * w)).enumerate().with_min_len(256).for_each(|(g, (zo, ri))| {
+                    let jl = &jv[g * b * b..(g + 1) * b * b];
+                    for a in 0..b {
+                        let out = &mut zo[a * w..(a + 1) * w];
+                        out.iter_mut().for_each(|v| *v = 0.0);
+                        for c in 0..b {
+                            let f = jl[a * b + c];
+                            if f != 0.0 {
+                                for (o, x) in out.iter_mut().zip(&ri[c * w..(c + 1) * w]) {
+                                    *o += f * x;
                                 }
                             }
-                        })
-                    });
-                }
-                LargePre::Chol { keep, f } => {
-                    let mut rhs = Mat::<f64>::from_fn(keep.len(), w, |i, j| rs[keep[i] as usize * w + j]);
-                    f.solve(&mut rhs, pool);
-                    zs.iter_mut().for_each(|v| *v = 0.0);
-                    for (i, &c) in keep.iter().enumerate() {
-                        for j in 0..w {
-                            zs[c as usize * w + j] = rhs[(i, j)];
                         }
                     }
+                })
+            });
+        }
+        // Factored blocks are independent: each (block, column group) is a sequential solve
+        // task, and the tasks run concurrently.
+        let tasks = solve_tasks(&self.large, w, |lp| matches!(lp, LargePre::Chol { .. }).then_some(SOLVE_COLS));
+        if tasks.is_empty() {
+            return;
+        }
+        let chol = |k: usize| match &self.large[k] {
+            LargePre::Chol { keep, f } => (keep, f),
+            LargePre::Jacobi => unreachable!("Jacobi blocks have no solve task"),
+        };
+        let sols: Vec<Vec<f64>> = pool.install(|| {
+            tasks
+                .par_iter()
+                .map(|(k, cols)| {
+                    let (keep, f) = chol(*k);
+                    let off = st.blocks[st.nsmall + k].off;
+                    let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
+                    f.solve(&mut rhs);
+                    let mut sol = Vec::with_capacity(keep.len() * cols.len());
+                    for j in 0..cols.len() {
+                        sol.extend((0..keep.len()).map(|i| rhs[(i, j)]));
+                    }
+                    sol
+                })
+                .collect()
+        });
+        for (k, lp) in self.large.iter().enumerate() {
+            if let LargePre::Chol { .. } = lp {
+                let blk = &st.blocks[st.nsmall + k];
+                z[blk.off * w..(blk.off + blk.g * blk.b) * w].iter_mut().for_each(|v| *v = 0.0);
+            }
+        }
+        for ((k, cols), sol) in tasks.iter().zip(&sols) {
+            let (keep, _) = chol(*k);
+            let off = st.blocks[st.nsmall + k].off;
+            for (j, c) in cols.clone().enumerate() {
+                for (i, &kk) in keep.iter().enumerate() {
+                    z[(off + kk as usize) * w + c] = sol[j * keep.len() + i];
                 }
             }
         }
