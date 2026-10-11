@@ -2229,7 +2229,7 @@ impl Absorber for SlopeSolver {
             return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
         }
         if r == 0 {
-            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + pe, r, data: Vec::new() }) });
+            return Ok(SolveInfo { iterations: 1, escalated: false, coefs: o.want_coefs.then(|| FeCoefs { p: m + pe, r, data: Vec::new() }), exact: false });
         }
         ctx.check()?;
         let mut t = Instant::now();
@@ -2305,7 +2305,7 @@ impl Absorber for SlopeSolver {
             data.extend_from_slice(&a);
             FeCoefs { p: m + pe, r, data }
         });
-        Ok(SolveInfo { iterations, escalated: escalated_now, coefs })
+        Ok(SolveInfo { iterations, escalated: escalated_now, coefs, exact: false })
     }
 
     fn fit_rows(&self, c: &FeCoefs, col: usize, pool: &Pool) -> Vec<f64> {

@@ -266,6 +266,9 @@ program Estimate, eclass
 // --------------------------------------------------------------------------
 	* if + in + weight + regression variables + cluster variables, then absorbed and slope variables
 	local varlist `depvar' `indepvars' `endogvars' `instvars' `base_clustervars'
+	* Drop the previous e(sample) before touse exists: Stata rewrites every observation when it
+	* drops a variable that is not the last one. Kept when -if- may reference e().
+	if (!strpos(`"`if'"', "e(")) ereturn clear
 	marksample touse, strok
 
 	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables
@@ -613,7 +616,9 @@ program Estimate, eclass
 		_ms_findomitted `b' `V'
 		* clearing first is much cheaper than letting -ereturn post- replace an existing e(sample)
 		ereturn clear
-		ereturn post `b' `V', esample(`touse') buildfvinfo depname(`depvar') obs(`N') dof(`df_r')
+		* no buildfvinfo: ivreghdfe builds it only without partialling out, and absorb always
+		* partials out (ivreghdfe l.1929-1932)
+		ereturn post `b' `V', esample(`touse') depname(`depvar') obs(`N') dof(`df_r')
 
 		* Scalars computed by the plugin (names = ivreghdfe e() names)
 		foreach s in N df_r df_m sdofminus dofminus center partial_ct partialcons cons nocollin ///

@@ -95,35 +95,56 @@ pub fn read_col(var: i32, obs: &[i32], threads: usize, parallel: bool) -> Result
     read_rows(&[var], obs, threads, parallel)
 }
 
+/// Largest `in` range read in a single pass by one thread: the outputs are sized for the whole
+/// range (only the pages actually written are touched), which skips the count pass.
+const SINGLE_PASS_MAX: usize = 1 << 24;
+
 /// Sample of a `prepare` call: the observations of the `in` range whose `touse` is not 0
 /// (ascending), and the numeric `vars` at those observations as columns (NaN for missing).
 /// `if` is not evaluated: callers fold it into touse (protocol).
 ///
-/// Two parallel passes over contiguous observation ranges: the first counts each range's
-/// sample, the second writes every range straight into its slice of the output columns.
+/// One reader thread scans the range once into outputs sized for the whole range. Several
+/// make two parallel passes over contiguous observation ranges: the first counts each
+/// range's sample, the second writes every range straight into its slice of the outputs.
 pub fn read_sample(touse: i32, vars: &[i32], threads: usize, parallel: bool) -> Result<(Vec<i32>, Vec<Vec<f64>>), RfError> {
     let (in1, in2) = spi::in_range();
     let o1 = in1.max(1);
     let total = usize::try_from(i64::from(in2) - i64::from(o1) + 1).unwrap_or(0);
     let t = reader_threads(total, threads, parallel);
+    if t == 1 && total <= SINGLE_PASS_MAX {
+        let mut obs = uninit_vec::<i32>(total)?;
+        let mut cols: Vec<Vec<f64>> = (0..vars.len()).map(|_| uninit_vec::<f64>(total)).collect::<Result<_, _>>()?;
+        let n = {
+            let mut dst: Vec<_> = cols.iter_mut().map(|c| &mut c.spare_capacity_mut()[..total]).collect();
+            spi::read_sample(touse, vars, o1, in2, &mut obs.spare_capacity_mut()[..total], &mut dst)?
+        };
+        // SAFETY: the scan wrote the first `n` positions of every output.
+        unsafe {
+            obs.set_len(n);
+            for c in &mut cols {
+                c.set_len(n);
+            }
+        }
+        if n < total / 2 {
+            obs.shrink_to_fit();
+            cols.iter_mut().for_each(Vec::shrink_to_fit);
+        }
+        return Ok((obs, cols));
+    }
+
     let per = total.div_ceil(t);
     // Inclusive observation range of part i (empty when first > last).
     let range = |i: usize| (o1 + (i * per).min(total) as i32, o1 + (((i + 1) * per).min(total)) as i32 - 1);
 
-    let counts: Vec<usize> = if t == 1 {
-        let (a, b) = range(0);
-        vec![spi::count_sample(touse, a, b)?]
-    } else {
-        std::thread::scope(|s| {
-            let handles: Vec<_> = (0..t)
-                .map(|i| {
-                    let (a, b) = range(i);
-                    s.spawn(move || spi::count_sample(touse, a, b))
-                })
-                .collect();
-            handles.into_iter().map(join).collect::<Result<Vec<_>, RfError>>()
-        })?
-    };
+    let counts: Vec<usize> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..t)
+            .map(|i| {
+                let (a, b) = range(i);
+                s.spawn(move || spi::count_sample(touse, a, b))
+            })
+            .collect();
+        handles.into_iter().map(join).collect::<Result<Vec<_>, RfError>>()
+    })?;
 
     let n: usize = counts.iter().sum();
     let mut obs = uninit_vec::<i32>(n)?;
@@ -132,22 +153,24 @@ pub fn read_sample(touse: i32, vars: &[i32], threads: usize, parallel: bool) -> 
         let mut obs_dst = split_sizes(&mut obs.spare_capacity_mut()[..n], &counts).into_iter();
         let mut col_dst: Vec<_> =
             cols.iter_mut().map(|c| split_sizes(&mut c.spare_capacity_mut()[..n], &counts).into_iter()).collect();
-        let mut parts = (0..t).map(|i| {
+        let parts = (0..t).map(|i| {
             let dst_obs = obs_dst.next().expect("one slice per part");
             let dst_cols: Vec<_> = col_dst.iter_mut().map(|c| c.next().expect("one slice per part")).collect();
             (range(i), dst_obs, dst_cols)
         });
-        if t == 1 {
-            let ((a, b), dst_obs, mut dst_cols) = parts.next().expect("one part");
-            spi::read_sample(touse, vars, a, b, dst_obs, &mut dst_cols)?;
-        } else {
-            std::thread::scope(|s| {
-                let handles: Vec<_> = parts
-                    .map(|((a, b), dst_obs, mut dst_cols)| s.spawn(move || spi::read_sample(touse, vars, a, b, dst_obs, &mut dst_cols)))
-                    .collect();
-                handles.into_iter().map(join).collect::<Result<(), RfError>>()
-            })?;
-        }
+        // Every part must find exactly the sample it counted.
+        let read_part = |(a, b): (i32, i32), dst_obs: &mut [MaybeUninit<i32>], mut dst_cols: Vec<&mut [MaybeUninit<f64>]>| {
+            let want = dst_obs.len();
+            match spi::read_sample(touse, vars, a, b, dst_obs, &mut dst_cols)? {
+                c if c == want => Ok(()),
+                _ => Err(RfError::Internal("the estimation sample changed while it was read".into())),
+            }
+        };
+        std::thread::scope(|s| {
+            let read_part = &read_part;
+            let handles: Vec<_> = parts.map(|(r, dst_obs, dst_cols)| s.spawn(move || read_part(r, dst_obs, dst_cols))).collect();
+            handles.into_iter().map(join).collect::<Result<(), RfError>>()
+        })?;
     }
     // SAFETY: every part filled its whole slice, and the slices cover all `n` positions.
     unsafe {

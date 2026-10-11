@@ -6,6 +6,7 @@
 //!   per-chunk results are combined in chunk order, so results are bit-identical for any
 //!   number of threads.
 
+use std::mem::MaybeUninit;
 use std::ops::Range;
 
 use rayon::prelude::*;
@@ -113,6 +114,74 @@ pub fn alloc_vec<T: Clone>(n: usize, value: T) -> Result<Vec<T>, RfError> {
     v.try_reserve_exact(n).map_err(|_| RfError::OutOfMemory)?;
     v.resize(n, value);
     Ok(v)
+}
+
+/// Width of a kernel instance: the const `R`, or the runtime `r` when `R = 0`.
+#[inline(always)]
+pub(crate) fn width<const R: usize>(r: usize) -> usize {
+    if R == 0 { r } else { R }
+}
+
+/// Calls `f::<R, B>(args)` with `R` = `$r` as a constant (1..=8; 0 = runtime width, see
+/// [`width`]) and the const bool `B` = `$b`, so per-row loops over the columns are unrolled and
+/// a flag-dependent branch (e.g. unit weights, where w·v = v exactly) disappears.
+macro_rules! dispatch_width {
+    ($r:expr, $b:expr, $f:ident($($a:expr),* $(,)?)) => {
+        match ($r, $b) {
+            (1, true) => $f::<1, true>($($a),*),
+            (1, false) => $f::<1, false>($($a),*),
+            (2, true) => $f::<2, true>($($a),*),
+            (2, false) => $f::<2, false>($($a),*),
+            (3, true) => $f::<3, true>($($a),*),
+            (3, false) => $f::<3, false>($($a),*),
+            (4, true) => $f::<4, true>($($a),*),
+            (4, false) => $f::<4, false>($($a),*),
+            (5, true) => $f::<5, true>($($a),*),
+            (5, false) => $f::<5, false>($($a),*),
+            (6, true) => $f::<6, true>($($a),*),
+            (6, false) => $f::<6, false>($($a),*),
+            (7, true) => $f::<7, true>($($a),*),
+            (7, false) => $f::<7, false>($($a),*),
+            (8, true) => $f::<8, true>($($a),*),
+            (8, false) => $f::<8, false>($($a),*),
+            (_, true) => $f::<0, true>($($a),*),
+            (_, false) => $f::<0, false>($($a),*),
+        }
+    };
+}
+pub(crate) use dispatch_width;
+/// Fallible buffer of `n` uninitialized values (no zeroing pass): kernels write every element,
+/// typically in parallel (so the first touch of the pages is spread over the workers), then
+/// [`assume_init`] it.
+pub fn alloc_uninit<T>(n: usize) -> Result<Vec<MaybeUninit<T>>, RfError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| RfError::OutOfMemory)?;
+    // SAFETY: the capacity is at least n, and `MaybeUninit` values need no initialization.
+    unsafe { v.set_len(n) };
+    Ok(v)
+}
+
+/// The values of a fully written [`alloc_uninit`] buffer.
+///
+/// # Safety
+/// Every element of `v` must have been written.
+pub unsafe fn assume_init<T>(v: Vec<MaybeUninit<T>>) -> Vec<T> {
+    let mut v = std::mem::ManuallyDrop::new(v);
+    // SAFETY: same allocation, capacity and length; `MaybeUninit<T>` has the layout of `T`, and
+    // the caller guarantees that every element is initialized.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<T>(), v.len(), v.capacity()) }
+}
+
+/// [`alloc_vec`] filled in parallel chunks instead of serially on the calling thread.
+pub fn alloc_par<T: Copy + Send + Sync>(n: usize, value: T, pool: &Pool) -> Result<Vec<T>, RfError> {
+    let mut v = alloc_uninit(n)?;
+    if n <= CHUNK {
+        v.fill(MaybeUninit::new(value));
+    } else {
+        pool.install(|| v.par_chunks_mut(CHUNK).for_each(|c| c.fill(MaybeUninit::new(value))));
+    }
+    // SAFETY: every element was written above.
+    Ok(unsafe { assume_init(v) })
 }
 
 #[cfg(test)]

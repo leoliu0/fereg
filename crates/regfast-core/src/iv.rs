@@ -56,23 +56,30 @@ pub(crate) struct Passes<'a> {
     row_order: &'a [u32],
 }
 
+/// Scratch length for the per-row linear combinations of [`Passes::meat`] kept on the stack.
+const STACK_COMB: usize = 128;
+
+/// Σ_j a_j·b_j in index order, accumulated in a register.
+#[inline]
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let mut s = 0.0;
+    for (x, y) in a.iter().zip(b) {
+        s += x * y;
+    }
+    s
+}
+
 impl Passes<'_> {
     fn n(&self) -> usize {
         self.rows.len() / self.r
     }
 
-    /// Linear combinations of row i: out[c] = Σ_j row_j·coef[j, c].
+    /// Linear combinations of row i: out[c] = Σ_j row_j·coef[j, c], with `coef_t` the c×R
+    /// transpose of coef (each combination is one register dot product).
     #[inline]
-    fn combine(row: &[f64], coef: &M, out: &mut [f64]) {
-        out.iter_mut().for_each(|v| *v = 0.0);
-        for (j, &x) in row.iter().enumerate() {
-            if x == 0.0 {
-                continue;
-            }
-            let cr = &coef.d[j * coef.c..(j + 1) * coef.c];
-            for (o, c) in out.iter_mut().zip(cr) {
-                *o += x * c;
-            }
+    fn combine(row: &[f64], coef_t: &[f64], out: &mut [f64]) {
+        for (o, col) in out.iter_mut().zip(coef_t.chunks_exact(row.len())) {
+            *o = dot(row, col);
         }
     }
 
@@ -80,10 +87,11 @@ impl Passes<'_> {
     pub(crate) fn cross(&self, coef: &M) -> M {
         let m = coef.c;
         let (rows, r, w) = (self.rows, self.r, self.w);
+        let coef_t = coef.t().d;
         let mut acc = par::sum_chunks(self.pool, self.n(), CHUNK, m * m, |range, acc| {
             let mut e = vec![0.0; m];
             for i in range {
-                Self::combine(&rows[i * r..(i + 1) * r], coef, &mut e);
+                Self::combine(&rows[i * r..(i + 1) * r], &coef_t, &mut e);
                 let wi = w.wv(i);
                 for a in 0..m {
                     let wa = wi * e[a];
@@ -105,10 +113,11 @@ impl Passes<'_> {
     fn wsum(&self, coef: &M) -> Vec<f64> {
         let m = coef.c;
         let (rows, r, w) = (self.rows, self.r, self.w);
+        let coef_t = coef.t().d;
         par::sum_chunks(self.pool, self.n(), CHUNK, m, |range, acc| {
             let mut e = vec![0.0; m];
             for i in range {
-                Self::combine(&rows[i * r..(i + 1) * r], coef, &mut e);
+                Self::combine(&rows[i * r..(i + 1) * r], &coef_t, &mut e);
                 let wi = w.wv(i);
                 for (a, v) in acc.iter_mut().zip(&e) {
                     *a += wi * v;
@@ -123,19 +132,25 @@ impl Passes<'_> {
         let (m, l) = (ce.c, cz.c);
         let dim = m * l;
         let (rows, r, w) = (self.rows, self.r, self.w);
+        // [ce cz] transposed: the m residual combinations, then the l instrument combinations.
+        let mut ez_t = ce.t().d;
+        ez_t.extend_from_slice(&cz.t().d);
+        let ez_t = &ez_t;
         let fill = |i: usize, a: &mut [f64]| {
             let row = &rows[i * r..(i + 1) * r];
-            let mut stack = [0.0f64; 128];
-            let mut heap;
-            let buf: &mut [f64] = if m + l <= stack.len() {
-                &mut stack[..m + l]
+            let mut stack = [std::mem::MaybeUninit::<f64>::uninit(); STACK_COMB];
+            let heap;
+            let ez: &[f64] = if m + l <= STACK_COMB {
+                for (s, col) in stack.iter_mut().zip(ez_t.chunks_exact(r)) {
+                    s.write(dot(row, col));
+                }
+                // SAFETY: the loop above initialized the first m + l entries.
+                unsafe { std::slice::from_raw_parts(stack.as_ptr().cast::<f64>(), m + l) }
             } else {
-                heap = vec![0.0; m + l];
-                &mut heap
+                heap = ez_t.chunks_exact(r).map(|col| dot(row, col)).collect::<Vec<f64>>();
+                &heap
             };
-            let (e, z) = buf.split_at_mut(m);
-            Self::combine(row, ce, e);
-            Self::combine(row, cz, z);
+            let (e, z) = ez.split_at(m);
             for c in 0..m {
                 for k in 0..l {
                     a[c * l + k] = e[c] * z[k];

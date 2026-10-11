@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::api::FactorValues;
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool, alloc_vec, map_chunks};
+use crate::par::{CHUNK, Pool, alloc_uninit, alloc_vec, assume_init, chunk_range, map_chunks};
 
 /// Dense level codes of one factor (or interaction) over some set of observations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,19 +54,10 @@ fn factorize_num(x: &[f64], pool: &Pool) -> Result<Codes, RfError> {
     if n == 0 {
         return Ok(Codes { codes: Vec::new(), n: 0 });
     }
-    let parts = map_chunks(pool, n, CHUNK, |_, r| {
-        let mut s = Scan { min: f64::INFINITY, max: f64::NEG_INFINITY, nan: false, int: true };
-        for &v in &x[r] {
-            if v.is_nan() {
-                s.nan = true;
-                continue;
-            }
-            s.min = s.min.min(v);
-            s.max = s.max.max(v);
-            s.int &= v == v.trunc() && v.abs() < 9.0e15;
-        }
-        s
-    });
+    if let Some(c) = ascending_runs(x, pool)? {
+        return Ok(c);
+    }
+    let parts = map_chunks(pool, n, CHUNK, |_, r| scan(&x[r]));
     let s = parts.iter().fold(Scan { min: f64::INFINITY, max: f64::NEG_INFINITY, nan: false, int: true }, |a, b| Scan {
         min: a.min.min(b.min),
         max: a.max.max(b.max),
@@ -77,36 +68,161 @@ fn factorize_num(x: &[f64], pool: &Pool) -> Result<Codes, RfError> {
         return Err(RfError::InvalidInput("missing values in factor".into()));
     }
     if s.int && s.max - s.min < table_limit(n) as f64 {
-        let lo = s.min;
-        let range = (s.max - s.min) as usize + 1;
-        return direct_table(n, range, |i| (x[i] - lo) as usize, pool);
+        return direct_table_num(x, s.min, (s.max - s.min) as usize + 1, pool);
     }
     let keys: Vec<u64> = pool.install(|| x.par_iter().map(|&v| f64_key(v)).collect());
     sort_encode(&keys, pool)
 }
 
-/// Codes via a presence table over `0..range` (`slot(i)` is observation i's table index).
-fn direct_table(n: usize, range: usize, slot: impl Fn(usize) -> usize + Sync, pool: &Pool) -> Result<Codes, RfError> {
+/// Range, NaN and integrality of `x`. Four independent branch-free lanes, so the loop
+/// vectorizes; NaN fails every comparison (it is not an integer), so it is only searched for
+/// when some value is not an integer.
+fn scan(x: &[f64]) -> Scan {
+    let (mut min, mut max, mut bad) = ([f64::INFINITY; 4], [f64::NEG_INFINITY; 4], [0u64; 4]);
+    let quads = x.chunks_exact(4);
+    let rest = quads.remainder();
+    for q in quads {
+        for k in 0..4 {
+            let v = q[k];
+            min[k] = if v < min[k] { v } else { min[k] };
+            max[k] = if v > max[k] { v } else { max[k] };
+            bad[k] |= u64::from(!((v == v.trunc()) & (v.abs() < 9.0e15)));
+        }
+    }
+    for &v in rest {
+        min[0] = if v < min[0] { v } else { min[0] };
+        max[0] = if v > max[0] { v } else { max[0] };
+        bad[0] |= u64::from(!((v == v.trunc()) & (v.abs() < 9.0e15)));
+    }
+    let int = bad.iter().all(|b| *b == 0);
+    Scan {
+        min: min.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+        max: max.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+        nan: !int && x.iter().any(|v| v.is_nan()),
+        int,
+    }
+}
+
+/// Sets a presence flag. One worker: a plain store. Several: only when unset, so the shared
+/// flags' cache lines are not written over and over by every worker.
+#[inline]
+fn mark(p: &AtomicBool, single: bool) {
+    if single || !p.load(Ordering::Relaxed) {
+        p.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Rank of every slot among the present ones (slot order), and their number.
+fn ranks(present: &[AtomicBool]) -> Result<(Vec<u32>, u32), RfError> {
+    let mut map = alloc_vec(present.len(), 0u32)?;
+    let mut next = 0u32;
+    for (m, p) in map.iter_mut().zip(present) {
+        *m = next;
+        next += u32::from(p.load(Ordering::Relaxed));
+    }
+    Ok((map, next))
+}
+
+/// [`direct_table`] for integer values `lo..lo + range` (slice loops; x − lo is an exact
+/// nonnegative integer, so the cheap i64 conversion applies).
+fn direct_table_num(x: &[f64], lo: f64, range: usize, pool: &Pool) -> Result<Codes, RfError> {
+    let single = pool.threads() == 1;
     let present: Vec<AtomicBool> = (0..range).map(|_| AtomicBool::new(false)).collect();
     pool.install(|| {
-        (0..n).into_par_iter().with_min_len(4096).for_each(|i| {
-            let p = &present[slot(i)];
-            if !p.load(Ordering::Relaxed) {
-                p.store(true, Ordering::Relaxed);
+        x.par_chunks(CHUNK).for_each(|xs| xs.iter().for_each(|&v| mark(&present[(v - lo) as i64 as usize], single)))
+    });
+    let (map, n) = ranks(&present)?;
+    drop(present);
+    let mut codes = alloc_uninit::<u32>(x.len())?;
+    pool.install(|| {
+        codes.par_chunks_mut(CHUNK).zip(x.par_chunks(CHUNK)).for_each(|(cs, xs)| {
+            for (c, &v) in cs.iter_mut().zip(xs) {
+                c.write(map[(v - lo) as i64 as usize]);
             }
         })
     });
-    let mut map = alloc_vec(range, 0u32)?;
-    let mut next = 0u32;
-    for (m, p) in map.iter_mut().zip(&present) {
-        if p.load(Ordering::Relaxed) {
-            *m = next;
-            next += 1;
-        }
+    // SAFETY: every chunk wrote each of its elements.
+    Ok(Codes { codes: unsafe { assume_init(codes) }, n })
+}
+
+/// Codes of ascending values (data sorted by this factor): the runs of equal values numbered in
+/// one pass. `None` as soon as a value descends or is NaN. Each part numbers its runs from 0 and
+/// is shifted afterwards, so the codes do not depend on the number of parts.
+fn ascending_runs(x: &[f64], pool: &Pool) -> Result<Option<Codes>, RfError> {
+    // Unsorted data almost always shows within its first values.
+    if !x[..x.len().min(256)].is_sorted_by(|a, b| a <= b) {
+        return Ok(None);
     }
+    let n = x.len();
+    let size = n.div_ceil(pool.threads().min(n.div_ceil(CHUNK)).max(1));
+    let mut codes = alloc_uninit::<u32>(n)?;
+    let last: Vec<Option<u32>> = pool.install(|| {
+        codes
+            .par_chunks_mut(size)
+            .enumerate()
+            .map(|(j, cs)| {
+                let xs = &x[j * size..j * size + cs.len()];
+                let mut prev = xs[0];
+                let mut k = 0u32;
+                // Blocks of 256, branch free inside, so unsorted data stops after one block.
+                for (cb, xb) in cs.chunks_mut(256).zip(xs.chunks(256)) {
+                    let mut bad = prev.is_nan();
+                    for (c, &v) in cb.iter_mut().zip(xb) {
+                        let step = v != prev;
+                        bad |= step & !(v > prev);
+                        k += u32::from(step);
+                        prev = v;
+                        c.write(k);
+                    }
+                    if bad {
+                        return None;
+                    }
+                }
+                Some(k)
+            })
+            .collect()
+    });
+    let mut base = Vec::with_capacity(last.len());
+    let mut next = 0u32;
+    for (j, l) in last.iter().enumerate() {
+        let Some(l) = *l else { return Ok(None) };
+        if j > 0 {
+            let (a, b) = (x[j * size - 1], x[j * size]);
+            if b < a {
+                return Ok(None);
+            }
+            next += u32::from(b != a);
+        }
+        base.push(next);
+        next += l;
+    }
+    // SAFETY: every part ran to completion, writing each of its elements.
+    let mut codes = unsafe { assume_init(codes) };
+    if base.iter().any(|&b| b > 0) {
+        pool.install(|| {
+            codes.par_chunks_mut(size).zip(&base).for_each(|(cs, &b)| cs.iter_mut().for_each(|c| *c += b));
+        });
+    }
+    Ok(Some(Codes { codes, n: next + 1 }))
+}
+
+/// Codes via a presence table over `0..range` (`slot(i)` is observation i's table index).
+fn direct_table(n: usize, range: usize, slot: impl Fn(usize) -> usize + Sync, pool: &Pool) -> Result<Codes, RfError> {
+    let single = pool.threads() == 1;
+    let present: Vec<AtomicBool> = (0..range).map(|_| AtomicBool::new(false)).collect();
+    pool.install(|| (0..n.div_ceil(CHUNK)).into_par_iter().for_each(|c| chunk_range(c, n, CHUNK).for_each(|i| mark(&present[slot(i)], single))));
+    let (map, next) = ranks(&present)?;
     drop(present);
-    let codes = pool.install(|| (0..n).into_par_iter().with_min_len(4096).map(|i| map[slot(i)]).collect());
-    Ok(Codes { codes, n: next })
+    let mut codes = alloc_uninit::<u32>(n)?;
+    pool.install(|| {
+        codes.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, cs)| {
+            for (k, c) in cs.iter_mut().enumerate() {
+                c.write(map[slot(ci * CHUNK + k)]);
+            }
+        })
+    });
+    // SAFETY: every chunk wrote each of its elements.
+    Ok(Codes { codes: unsafe { assume_init(codes) }, n: next })
 }
 
 fn sort_encode(keys: &[u64], pool: &Pool) -> Result<Codes, RfError> {
@@ -157,6 +273,30 @@ pub fn combine(parts: &[&Codes], pool: &Pool) -> Result<Codes, RfError> {
             }
         }
     }
+}
+
+/// [`compact`] given the ascending indices of the kept observations (parallel): the kept codes
+/// are gathered, then renumbered only if some level vanished.
+pub fn restrict(codes: &Codes, kept: &[u32], pool: &Pool) -> Result<Codes, RfError> {
+    let single = pool.threads() == 1;
+    let present: Vec<AtomicBool> = (0..codes.n).map(|_| AtomicBool::new(false)).collect();
+    let mut out = alloc_uninit::<u32>(kept.len())?;
+    pool.install(|| {
+        out.par_chunks_mut(CHUNK).zip(kept.par_chunks(CHUNK)).for_each(|(o, ks)| {
+            for (x, &i) in o.iter_mut().zip(ks) {
+                let c = codes.codes[i as usize];
+                x.write(c);
+                mark(&present[c as usize], single);
+            }
+        })
+    });
+    // SAFETY: every chunk wrote each of its elements.
+    let mut out = unsafe { assume_init(out) };
+    let (new_id, next) = ranks(&present)?;
+    if next < codes.n {
+        pool.install(|| out.par_chunks_mut(CHUNK).for_each(|o| o.iter_mut().for_each(|c| *c = new_id[*c as usize])));
+    }
+    Ok(Codes { codes: out, n: next })
 }
 
 /// Restricts `codes` to the observations with `keep[i]` and renumbers the surviving levels
@@ -220,5 +360,45 @@ mod tests {
             assert_eq!(s, Codes { codes: vec![1, 1, 0, 0, 1], n: 2 });
         })
         .unwrap();
+    }
+
+    #[test]
+    fn fast_paths_agree_with_sorting_for_any_threads() {
+        let mut s = crate::rng::SplitMix64::new(5);
+        let n = 100_000;
+        let mut sorted: Vec<f64> = (0..n).map(|_| (s.next_u64() % 5000) as f64).collect();
+        sorted.sort_by(f64::total_cmp);
+        let mut late_descent = sorted.clone();
+        late_descent[n - 1] = -1.0;
+        let mut sorted_frac: Vec<f64> = (0..n).map(|_| (s.next_u64() % 700) as f64 * 0.3 - 9.0).collect();
+        sorted_frac.sort_by(f64::total_cmp);
+        let zeros = vec![-1.0, -0.0, 0.0, -0.0, 0.0, 2.5, 2.5, 7.0];
+        // Table edges: x[0] at the top / bottom of a range just below the table limit.
+        let lim = table_limit(n) as f64;
+        let mut top: Vec<f64> = (0..n).map(|_| 5e6 - (s.next_u64() % lim as u64) as f64).collect();
+        top[0] = 5e6;
+        top[1] = 5e6 - lim + 1.0;
+        let bottom: Vec<f64> = top.iter().map(|v| -v).collect();
+        let mut over = top.clone();
+        over[2] = 5e6 - lim;
+        for x in [&sorted, &late_descent, &sorted_frac, &zeros, &top, &bottom, &over] {
+            let want = simple(&x.iter().map(|&v| f64_key(v)).collect::<Vec<_>>());
+            for threads in [1, 3, 8] {
+                let got = with_pool(threads, |pool| factorize(&FactorValues::Num(x), pool).unwrap()).unwrap();
+                assert_eq!(got, want);
+            }
+        }
+        let mut nan_end = sorted.clone();
+        nan_end[n - 1] = f64::NAN;
+        for threads in [1, 3] {
+            assert!(with_pool(threads, |pool| factorize(&FactorValues::Num(&nan_end), pool).is_err()).unwrap());
+        }
+        // restrict ≡ compact.
+        let c = Codes { codes: (0..n).map(|_| (s.next_u64() % 3000) as u32).collect(), n: 3000 };
+        let keep: Vec<bool> = (0..n).map(|_| s.next_u64() % 7 != 0).collect();
+        let kept: Vec<u32> = (0..n as u32).filter(|&i| keep[i as usize]).collect();
+        for threads in [1, 4] {
+            assert_eq!(with_pool(threads, |pool| restrict(&c, &kept, pool).unwrap()).unwrap(), compact(&c, &keep));
+        }
     }
 }

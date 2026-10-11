@@ -199,13 +199,20 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 /// (the order in which reghdfe's zigzag search discovers them).
 pub(crate) fn mobility_groups(a: &[u32], ga: usize, b: &[u32], gb: usize, save: bool) -> (u64, Option<Vec<u32>>) {
     let mut parent: Vec<u32> = (0..(ga + gb) as u32).collect();
+    // The root of the previous observation's first-term level is cached (panels sorted by the
+    // first term repeat it); it stays a root until a union attaches it, which updates it.
+    let (mut last, mut rx) = (u32::MAX, 0u32);
     for (&x, &y) in a.iter().zip(b) {
-        let rx = find(&mut parent, x);
+        if x != last {
+            last = x;
+            rx = find(&mut parent, x);
+        }
         let ry = find(&mut parent, ga as u32 + y);
         if rx != ry {
             // Deterministic: attach the larger root under the smaller.
             let (lo, hi) = if rx < ry { (rx, ry) } else { (ry, rx) };
             parent[hi as usize] = lo;
+            rx = lo;
         }
     }
     let mut id = vec![0u32; ga + gb];
