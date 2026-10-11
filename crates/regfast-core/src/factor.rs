@@ -162,6 +162,10 @@ pub fn combine(parts: &[&Codes], pool: &Pool) -> Result<Codes, RfError> {
 /// Restricts `codes` to the observations with `keep[i]` and renumbers the surviving levels
 /// densely, preserving their order.
 pub fn compact(codes: &Codes, keep: &[bool]) -> Codes {
+    // Nothing dropped: dense codes stay dense (every level occurs), so the codes are unchanged.
+    if keep.len() == codes.codes.len() && keep.iter().all(|k| *k) {
+        return codes.clone();
+    }
     let mut new_id = vec![u32::MAX; codes.n as usize];
     for (&c, &k) in codes.codes.iter().zip(keep) {
         if k {

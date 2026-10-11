@@ -78,13 +78,52 @@ fn separated(family: Family, ysum: f64, count: f64) -> bool {
     }
 }
 
-fn pass_parallel(t: TermCodes, alive: &mut [bool], sep: Option<SepRule>, singletons: bool, pool: &Pool) -> (u64, u64) {
+/// Levels with at most this many entries are counted in per-worker local histograms (exact
+/// integer counts, so the merge order cannot change the result); larger ones use atomics.
+const LOCAL_HIST_MAX: usize = 1 << 14;
+
+/// Per-level counts of alive observations and of those with a nonzero outcome.
+fn level_counts(t: TermCodes, alive: &[bool], sep: Option<SepRule>, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
+    let with_y = sep.is_some();
+    let width = if with_y { 2 * t.g } else { t.g };
+    if t.g <= LOCAL_HIST_MAX {
+        let h = pool.install(|| {
+            t.codes
+                .par_chunks(CHUNK)
+                .zip(alive.par_chunks(CHUNK))
+                .enumerate()
+                .fold(
+                    || vec![0u32; width],
+                    |mut h, (ci, (codes, al))| {
+                        let base = ci * CHUNK;
+                        for (k, (&c, &a)) in codes.iter().zip(al).enumerate() {
+                            if a {
+                                h[c as usize] += 1;
+                                if let Some(rule) = sep {
+                                    h[t.g + c as usize] += u32::from(rule.y[base + k] != 0.0);
+                                }
+                            }
+                        }
+                        h
+                    },
+                )
+                .reduce(
+                    || vec![0u32; width],
+                    |mut a, b| {
+                        a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                        a
+                    },
+                )
+        });
+        let pos = if with_y { h[t.g..].to_vec() } else { Vec::new() };
+        let mut count = h;
+        count.truncate(t.g);
+        return (count, pos);
+    }
     let count: Vec<AtomicU32> = (0..t.g).map(|_| AtomicU32::new(0)).collect();
-    // Observations with a nonzero (Poisson: positive) outcome per level.
-    let pos: Vec<AtomicU32> = if sep.is_some() { (0..t.g).map(|_| AtomicU32::new(0)).collect() } else { Vec::new() };
-    let alive_ro: &[bool] = alive;
+    let pos: Vec<AtomicU32> = if with_y { (0..t.g).map(|_| AtomicU32::new(0)).collect() } else { Vec::new() };
     pool.install(|| {
-        t.codes.par_chunks(CHUNK).zip(alive_ro.par_chunks(CHUNK)).enumerate().for_each(|(ci, (codes, al))| {
+        t.codes.par_chunks(CHUNK).zip(alive.par_chunks(CHUNK)).enumerate().for_each(|(ci, (codes, al))| {
             let base = ci * CHUNK;
             for (k, (&c, &a)) in codes.iter().zip(al).enumerate() {
                 if a {
@@ -98,6 +137,29 @@ fn pass_parallel(t: TermCodes, alive: &mut [bool], sep: Option<SepRule>, singlet
             }
         })
     });
+    (count.into_iter().map(AtomicU32::into_inner).collect(), pos.into_iter().map(AtomicU32::into_inner).collect())
+}
+
+fn pass_parallel(t: TermCodes, alive: &mut [bool], sep: Option<SepRule>, singletons: bool, pool: &Pool) -> (u64, u64) {
+    let (count, pos) = level_counts(t, alive, sep, pool);
+    // Verdict per level: 0 keep, 1 singleton, 2 separated.
+    let verdict: Vec<u8> = (0..t.g)
+        .map(|g| {
+            let k = count[g];
+            if k == 0 {
+                0
+            } else if singletons && k == 1 {
+                1
+            } else if sep.is_some_and(|rule| separated(rule.family, f64::from(pos[g]), f64::from(k))) {
+                2
+            } else {
+                0
+            }
+        })
+        .collect();
+    if verdict.iter().all(|v| *v == 0) {
+        return (0, 0);
+    }
     let parts: Vec<(u64, u64)> = pool.install(|| {
         alive
             .par_chunks_mut(CHUNK)
@@ -105,18 +167,17 @@ fn pass_parallel(t: TermCodes, alive: &mut [bool], sep: Option<SepRule>, singlet
             .map(|(al, codes)| {
                 let (mut s, mut f) = (0u64, 0u64);
                 for (a, &c) in al.iter_mut().zip(codes) {
-                    if !*a {
-                        continue;
-                    }
-                    let k = count[c as usize].load(Ordering::Relaxed);
-                    if singletons && k == 1 {
-                        *a = false;
-                        s += 1;
-                    } else if let Some(rule) = sep {
-                        let p = pos[c as usize].load(Ordering::Relaxed);
-                        if separated(rule.family, f64::from(p), f64::from(k)) {
-                            *a = false;
-                            f += 1;
+                    if *a {
+                        match verdict[c as usize] {
+                            1 => {
+                                *a = false;
+                                s += 1;
+                            }
+                            2 => {
+                                *a = false;
+                                f += 1;
+                            }
+                            _ => {}
                         }
                     }
                 }
