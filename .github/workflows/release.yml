@@ -361,9 +361,16 @@ jobs:
         run: |
           mkdir -p buildlib
           R CMD INSTALL --build -l buildlib fereg_${VERSION}.tar.gz
-          rver=$(Rscript -e 'cat(R.version$major, sub("[.].*", "", R.version$minor), sep = ".")')
-          out="fereg_${VERSION}_R${rver}_${{ matrix.platform }}.${{ matrix.ext }}"
-          mv "fereg_${VERSION}.${{ matrix.ext }}" "$out"
+          # macOS binaries carry the R minor version and architecture in the name (both are
+          # .tgz). Windows keeps R's name fereg_<version>.zip: install.packages() derives the
+          # package name of a Windows binary from the file name.
+          if [ "${{ matrix.ext }}" = tgz ]; then
+            rver=$(Rscript -e 'cat(R.version$major, sub("[.].*", "", R.version$minor), sep = ".")')
+            out="fereg_${VERSION}_R${rver}_${{ matrix.platform }}.tgz"
+            mv "fereg_${VERSION}.tgz" "$out"
+          else
+            out="fereg_${VERSION}.zip"
+          fi
           ls -l "$out"
           echo "R_BINARY=$out" >> "$GITHUB_ENV"
 
@@ -401,7 +408,8 @@ jobs:
           count "wheels" "^fereg-${VERSION}-cp31[0-4]-cp31[0-4]-.*\.whl$" 25 || ok=1
           count "sdist" "^fereg-${VERSION}\.tar\.gz$" 1 || ok=1
           count "R source" "^fereg_${VERSION}\.tar\.gz$" 1 || ok=1
-          count "R binaries" "^fereg_${VERSION}_R[0-9.]+_(macos-arm64|macos-x86_64|windows-x64)\.(tgz|zip)$" 3 || ok=1
+          count "R macOS binaries" "^fereg_${VERSION}_R[0-9.]+_macos-(arm64|x86_64)\.tgz$" 2 || ok=1
+          count "R Windows binary" "^fereg_${VERSION}\.zip$" 1 || ok=1
           unzip -l release/fereg-v${VERSION}-stata.zip | grep -c -E 'fereg\.(linux64|macos-universal|win64)\.plugin$' | grep -qx 3 || { echo "Stata zip lacks a plugin"; ok=1; }
           test "$(ls release | wc -l)" -eq 31 || { echo "unexpected extra files"; ok=1; }
           exit $ok

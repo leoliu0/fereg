@@ -82,7 +82,8 @@ def test_dist_functions_match_scipy():
     np.testing.assert_allclose(_binding.qnorm(p), stats.norm.ppf(p), rtol=1e-13)
     for df in (1.0, 3.5, 30.0, 1e6):
         np.testing.assert_allclose(_binding.pt(x, df), stats.t.cdf(x, df), rtol=1e-12)
-        np.testing.assert_allclose(_binding.qt(p, df), stats.t.ppf(p, df), rtol=1e-11)
+        # atol: the median quantile is exactly 0; older scipy (Python 3.10 wheels) returns ~1e-16.
+        np.testing.assert_allclose(_binding.qt(p, df), stats.t.ppf(p, df), rtol=1e-11, atol=1e-14)
     f = np.array([0.1, 1.0, 4.0, 50.0])
     np.testing.assert_allclose(_binding.pf_upper(f, 3, 47), stats.f.sf(f, 3, 47), rtol=1e-11)
     np.testing.assert_allclose(_binding.pchisq_upper(f, 4), stats.chi2.sf(f, 4), rtol=1e-11)
