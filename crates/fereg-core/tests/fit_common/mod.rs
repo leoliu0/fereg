@@ -2,7 +2,8 @@
 //! translation of a fixture case into a `FitInput` / `FitSpec`.
 #![allow(dead_code)]
 
-use fereg_core::fit::{FactorCol, FeTerm, FitInput, FitSpec, Flavor, GDf, KFixef, Ssc, TDf, VcovKind, WeightsType};
+use fereg_core::Ctx;
+use fereg_core::fit::{self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FitSpec, Flavor, GDf, KFixef, Ssc, TDf, VcovKind, VcovOutput, WeightsType};
 
 #[derive(Clone, Debug)]
 pub enum J {
@@ -228,29 +229,51 @@ pub struct Case {
     pub factor_names: Vec<String>,
     pub factors: Vec<FactorData>,
     pub fe: Vec<FeTerm>,
+    pub slope_names: Vec<String>,
     pub cluster: Vec<Vec<usize>>,
+}
+
+/// Position of `name` in `names`, appended when new.
+pub fn index_of(name: &str, names: &mut Vec<String>) -> usize {
+    names.iter().position(|n| n == name).unwrap_or_else(|| {
+        names.push(name.to_string());
+        names.len() - 1
+    })
 }
 
 impl Case {
     pub fn new(json: &J, kind: FactorKind) -> Case {
         let csv = Csv::read(json.at("data").str());
         let mut factor_names: Vec<String> = Vec::new();
-        let index = |name: &str, names: &mut Vec<String>| -> usize {
-            names.iter().position(|n| n == name).unwrap_or_else(|| {
-                names.push(name.to_string());
-                names.len() - 1
-            })
-        };
+        let mut slope_names: Vec<String> = Vec::new();
+        // A term is a list of factor names (intercept only) or {factors, slopes, intercept}.
         let fe: Vec<FeTerm> = json
             .at("fe")
             .list()
             .iter()
-            .map(|t| FeTerm { factors: t.strs().iter().map(|f| index(f, &mut factor_names)).collect(), intercept: true, slopes: Vec::new() })
+            .map(|t| match t.get("factors") {
+                Some(f) => FeTerm {
+                    factors: f.strs().iter().map(|f| index_of(f, &mut factor_names)).collect(),
+                    intercept: t.at("intercept").bool(),
+                    slopes: t.at("slopes").strs().iter().map(|s| index_of(s, &mut slope_names)).collect(),
+                },
+                None => FeTerm { factors: t.strs().iter().map(|f| index_of(f, &mut factor_names)).collect(), intercept: true, slopes: Vec::new() },
+            })
             .collect();
         let cluster: Vec<Vec<usize>> =
-            json.at("cluster").list().iter().map(|d| d.strs().iter().map(|f| index(f, &mut factor_names)).collect()).collect();
+            json.at("cluster").list().iter().map(|d| d.strs().iter().map(|f| index_of(f, &mut factor_names)).collect()).collect();
+        // Post-hoc cluster variables are input factors too (unused by the fit itself).
+        for p in json.get("posthoc").map_or(Vec::new(), J::list) {
+            p.at("cluster").list().iter().flat_map(|d| d.strs()).for_each(|f| {
+                index_of(&f, &mut factor_names);
+            });
+        }
         let factors = factor_names.iter().map(|f| FactorData::new(csv.col(f), kind)).collect();
-        Case { json: json.clone(), csv, factor_names, factors, fe, cluster }
+        Case { json: json.clone(), csv, factor_names, factors, fe, slope_names, cluster }
+    }
+
+    fn cols(&self, key: &str) -> Vec<&[f64]> {
+        self.json.get(key).map_or(Vec::new(), |v| v.strs().iter().map(|x| self.csv.col(x)).collect())
     }
 
     pub fn input(&self) -> FitInput<'_> {
@@ -258,10 +281,13 @@ impl Case {
         FitInput {
             n: self.csv.n(),
             y: self.csv.col(j.at("y").str()),
-            x: j.at("x").strs().iter().map(|x| self.csv.col(x)).collect(),
+            x: self.cols("x"),
+            endog: self.cols("endog"),
+            inst: self.cols("inst"),
             factors: self.factors.iter().map(FactorData::col).collect(),
             factor_names: self.factor_names.clone(),
             fe: self.fe.clone(),
+            slopes: self.slope_names.iter().map(|s| self.csv.col(s)).collect(),
             weights: match j.get("weights") {
                 Some(J::Str(w)) => Some(self.csv.col(w)),
                 _ => None,
@@ -273,32 +299,11 @@ impl Case {
 
     pub fn spec(&self, flavor: Flavor) -> FitSpec {
         let j = &self.json;
-        let s = j.at("ssc");
-        let ssc = Ssc {
-            k_adj: s.at("K.adj").bool(),
-            k_fixef: match s.at("K.fixef").str() {
-                "none" => KFixef::None,
-                "full" => KFixef::Full,
-                _ => KFixef::Nonnested,
-            },
-            k_exact: s.at("K.exact").bool(),
-            g_adj: s.at("G.adj").bool(),
-            g_df: if s.at("G.df").str() == "min" { GDf::Min } else { GDf::Conventional },
-            t_df: match s.at("t.df") {
-                J::Str(t) if t == "min" => TDf::Min,
-                J::Str(_) => TDf::Conventional,
-                x => TDf::Fixed(x.num()),
-            },
-        };
         FitSpec {
             flavor,
             intercept: j.at("intercept").bool(),
-            vcov: match j.at("vcov").str() {
-                "iid" => VcovKind::Iid,
-                "hetero" => VcovKind::Hetero,
-                _ => VcovKind::Cluster,
-            },
-            ssc,
+            vcov: parse_vcov(j.at("vcov")),
+            ssc: parse_ssc(j.at("ssc")),
             weights_type: match j.get("weights_type") {
                 Some(J::Str(t)) if t == "fweights" => WeightsType::Fweights,
                 _ => WeightsType::Aweights,
@@ -307,6 +312,161 @@ impl Case {
             ..Default::default()
         }
     }
+
+    /// Name of a coefficient as the fixture reports it (fixest names the second-stage
+    /// endogenous regressors `fit_<name>`, pyfixest by the variable).
+    pub fn source_name(&self, s: &CoefSource, flavor: Flavor) -> String {
+        let j = &self.json;
+        match s {
+            CoefSource::Intercept => "(Intercept)".to_string(),
+            CoefSource::X(i) => j.at("x").strs()[*i].clone(),
+            CoefSource::Inst(i) => j.at("inst").strs()[*i].clone(),
+            CoefSource::Endog(i) => {
+                let e = j.at("endog").strs()[*i].clone();
+                if flavor == Flavor::Fixest { format!("fit_{e}") } else { e }
+            }
+        }
+    }
+
+    /// The post-hoc variance requests: (kind, ssc, cluster dimensions as factor indices).
+    pub fn posthoc(&self) -> Vec<(VcovKind, Ssc, Vec<Vec<usize>>)> {
+        let mut names = self.factor_names.clone();
+        self.json
+            .get("posthoc")
+            .map_or(Vec::new(), J::list)
+            .iter()
+            .map(|p| {
+                let cl = p.at("cluster").list().iter().map(|d| d.strs().iter().map(|f| index_of(f, &mut names)).collect()).collect();
+                (parse_vcov(p.at("vcov")), parse_ssc(p.at("ssc")), cl)
+            })
+            .collect()
+    }
+}
+
+pub fn parse_vcov(v: &J) -> VcovKind {
+    match v.str() {
+        "iid" => VcovKind::Iid,
+        "hetero" => VcovKind::Hetero,
+        _ => VcovKind::Cluster,
+    }
+}
+
+pub fn parse_ssc(s: &J) -> Ssc {
+    Ssc {
+        k_adj: s.at("K.adj").bool(),
+        k_fixef: match s.at("K.fixef").str() {
+            "none" => KFixef::None,
+            "full" => KFixef::Full,
+            _ => KFixef::Nonnested,
+        },
+        k_exact: s.at("K.exact").bool(),
+        g_adj: s.at("G.adj").bool(),
+        g_df: if s.at("G.df").str() == "min" { GDf::Min } else { GDf::Conventional },
+        t_df: match s.at("t.df") {
+            J::Str(t) if t == "min" => TDf::Min,
+            J::Str(_) => TDf::Conventional,
+            x => TDf::Fixed(x.num()),
+        },
+    }
+}
+
+/// Compares a variance matrix over the coefficients `names` (our order) with a fixture entry
+/// holding `vcov`, `se`, `df_k`, `df_t` and optionally `G`, over `want_names`.
+pub fn check_vcov(what: &str, v: &VcovOutput, names: &[String], e: &J, want_names: &[String], rtol: f64) {
+    let k = names.len();
+    assert_eq!(k, want_names.len(), "{what}: coefficient count");
+    let p: Vec<usize> = want_names.iter().map(|w| names.iter().position(|n| n == w).unwrap_or_else(|| panic!("{what}: no coefficient {w}"))).collect();
+    let se: Vec<f64> = p.iter().map(|&a| v.vcov[a * k + a].sqrt()).collect();
+    assert_vec(&format!("{what} se"), &se, &e.at("se").nums(), rtol, 1e-12);
+    let want = e.at("vcov").nums();
+    let scale = want.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let got: Vec<f64> = p.iter().flat_map(|&a| p.iter().map(move |&b| v.vcov[a * k + b])).collect();
+    assert_vec(&format!("{what} vcov"), &got, &want, rtol, scale);
+    assert_eq!(v.df_k, e.at("df_k").num(), "{what}: df_k");
+    assert_eq!(v.df_t, Some(e.at("df_t").num()), "{what}: df_t");
+    if let Some(g) = e.get("G") {
+        let ours: Vec<f64> = v.n_clusters.iter().map(|&g| g as f64).collect();
+        assert_eq!(ours, g.nums(), "{what}: clusters");
+    }
+}
+
+/// Compares coefficients by name (the fixture's order may differ from ours).
+pub fn check_coef(what: &str, coef: &[f64], names: &[String], want: &[f64], want_names: &[String], rtol: f64) {
+    assert_eq!(names.len(), want_names.len(), "{what}: coefficients {names:?} vs {want_names:?}");
+    let got: Vec<f64> = want_names.iter().map(|w| coef[names.iter().position(|n| n == w).unwrap_or_else(|| panic!("{what}: no coefficient {w}"))]).collect();
+    assert_vec(&format!("{what} coef"), &got, want, rtol, 1e-12);
+}
+
+/// Runs a fixture case and checks every reported field against the fixture.
+pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol: f64) -> (Case, FitOutput) {
+    let name = j.at("name").str().to_string();
+    let case = Case::new(j, kind);
+    let e = j.at("expect");
+    let out = fit::fit(&case.input(), &case.spec(flavor), &Ctx::quiet(threads)).unwrap_or_else(|err| panic!("{name}: {err}"));
+    let what = |s: &str| format!("{name} {s}");
+    let names: Vec<String> = out.coef_source.iter().map(|s| case.source_name(s, flavor)).collect();
+    let want_names = e.at("coef_names").strs();
+    check_coef(&name, &out.coef, &names, &e.at("coef").nums(), &want_names, rtol);
+    check_vcov(&name, &out.vcov, &names, e, &want_names, rtol);
+    assert_eq!(out.nobs as f64, e.at("nobs").num(), "{name}: nobs");
+    if let Some(np) = e.get("nparams") {
+        assert_eq!(out.nparams as f64, np.num(), "{name}: nparams");
+    }
+    let collin: Vec<String> = out.collinear.iter().map(|s| case.source_name(s, flavor)).collect();
+    assert_eq!(collin, e.at("collin").strs(), "{name}: collinear");
+    if let Some(obs) = e.get("obs") {
+        let ours: Vec<f64> = out.obs.iter().map(|&i| f64::from(i) + 1.0).collect();
+        assert_eq!(ours, obs.nums(), "{name}: obs");
+    }
+    let s = &out.stats;
+    for (k, v) in [
+        ("r2", s.r2),
+        ("ar2", s.ar2),
+        ("wr2", s.wr2),
+        ("war2", s.war2),
+        ("pr2", s.pseudo_r2),
+        ("apr2", s.apr2),
+        ("sq_cor", s.sq_cor),
+        ("rmse", s.rmse),
+        ("ll", s.loglik),
+        ("ll_null", s.ll_null),
+        ("ssr", s.ssr),
+        ("ssr_null", s.ssr_null),
+        ("ssr_fe_only", s.ssr_fe_only),
+        ("sigma2", s.sigma2),
+        ("f_stat", s.f_test.stat),
+        ("f_df1", s.f_test.df1),
+        ("f_df2", s.f_test.df2),
+    ] {
+        if let Some(x) = e.get(k) {
+            assert_close(&what(k), v, x.num(), rtol);
+        }
+    }
+    if let Some(p) = e.get("f_p") {
+        assert_close(&what("f_p"), s.f_test.p, p.num(), 1e-6);
+    }
+    let resid = e.get("resid").map_or(Vec::new(), J::nums);
+    if !resid.is_empty() {
+        let scale = resid.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert_vec(&what("resid"), out.resid.as_ref().unwrap(), &resid, rtol, scale);
+        if let Some(f) = e.get("fitted") {
+            let fitted = f.nums();
+            let scale = fitted.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            assert_vec(&what("fitted"), out.fitted.as_ref().unwrap(), &fitted, rtol, scale);
+        }
+    }
+    let posthoc = case.posthoc();
+    for (p, (kind, ssc, cl)) in e.get("posthoc").map_or(Vec::new(), J::list).iter().zip(posthoc) {
+        let input = case.input();
+        let v = out
+            .state
+            .as_ref()
+            .expect("state")
+            .vcov(kind, &ssc, &input.factors, &case.factor_names, &cl, &Ctx::quiet(threads))
+            .unwrap_or_else(|err| panic!("{name} post-hoc: {err}"));
+        check_vcov(&what("post-hoc"), &v, &names, p, &want_names, rtol);
+    }
+    (case, out)
 }
 
 /// |a − b| ≤ rtol·max(|b|, floor). An expected NaN (JSON null: jsonlite writes NA, NaN and ±Inf

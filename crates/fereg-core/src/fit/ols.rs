@@ -1,75 +1,23 @@
-//! OLS in the fit layer (fixest `feols` / pyfixest `feols`): one gather of the input columns
-//! into solver row order, one residualization, one Gram pass, fixest's collinearity rule,
-//! coefficients, residuals and fitted values, the variance matrix and the fit statistics.
+//! Linear models in the fit layer: OLS and IV/2SLS (fixest `feols`, pyfixest `feols` / `Feiv`).
+//! One gather of the input columns into solver row order, one residualization and one Gram
+//! pass; every regression afterwards (the IV first stages, the second stage, the auxiliary
+//! regressions of the F, Wu-Hausman and Sargan statistics) works on that Gram, and one more pass
+//! over the rows evaluates all residual sums of squares and the residuals.
 
 use rayon::prelude::*;
 
+use super::design::{self, Reg, regress, residual_pass, unit};
 use super::input::Sample;
-use super::vcov::{self, Base, ClusterInfo, FeInfo, Scores};
-use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, TestStat, WeightsType, dist, fixef};
+use super::state::{State, StateFe, term_refs};
+use super::vcov::{self, ClusterInfo, FeInfo, Model};
+use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, IvFirstStage, IvStats, TestStat, WeightsType, dist, fixef};
 use crate::absorber::SolveOpts;
 use crate::api::Ctx;
 use crate::error::RfError;
-use crate::fe_recovery::to_kept_order;
 use crate::gather::Col;
 use crate::par::{self, CHUNK, Pool};
 use crate::session::Session;
 use crate::stats;
-
-/// fixest `cpp_cholesky(XtX, tol)` (lm_related.cpp): Cholesky in column order where column j is
-/// excluded when its pivot X_jj − Σ_{kept i<j} R_ij² is below `tol` (absolute, unscaled).
-/// Returns the exclusion flags and the inverse of the kept block (kept order, row-major).
-pub(crate) fn chol_collin(a: &[f64], k: usize, tol: f64) -> (Vec<bool>, Vec<f64>) {
-    let mut r = vec![0.0; k * k];
-    let mut excluded = vec![false; k];
-    for j in 0..k {
-        let mut rjj = a[j * k + j];
-        for i in (0..j).filter(|&i| !excluded[i]) {
-            rjj -= r[i * k + j] * r[i * k + j];
-        }
-        if !(rjj >= tol) {
-            excluded[j] = true;
-            continue;
-        }
-        let d = rjj.sqrt();
-        r[j * k + j] = d;
-        for c in j + 1..k {
-            let mut v = a[c * k + j];
-            for i in (0..j).filter(|&i| !excluded[i]) {
-                v -= r[i * k + c] * r[i * k + j];
-            }
-            r[j * k + c] = v / d;
-        }
-    }
-    let kept: Vec<usize> = (0..k).filter(|&j| !excluded[j]).collect();
-    (excluded, inverse_from_chol(&r, k, &kept))
-}
-
-/// (RᵀR)⁻¹ = R⁻¹R⁻ᵀ over the `kept` rows/columns of the upper-triangular `r` (k×k).
-fn inverse_from_chol(r: &[f64], k: usize, kept: &[usize]) -> Vec<f64> {
-    let m = kept.len();
-    // R⁻¹ (upper triangular, m×m) by back substitution, column by column.
-    let mut ri = vec![0.0; m * m];
-    for c in 0..m {
-        ri[c * m + c] = 1.0 / r[kept[c] * k + kept[c]];
-        for row in (0..c).rev() {
-            let mut s = 0.0;
-            for l in row + 1..=c {
-                s += r[kept[row] * k + kept[l]] * ri[l * m + c];
-            }
-            ri[row * m + c] = -s / r[kept[row] * k + kept[row]];
-        }
-    }
-    let mut inv = vec![0.0; m * m];
-    for i in 0..m {
-        for j in i..m {
-            let s: f64 = (j..m).map(|l| ri[i * m + l] * ri[j * m + l]).sum();
-            inv[i * m + j] = s;
-            inv[j * m + i] = s;
-        }
-    }
-    inv
-}
 
 /// fixest `nparams`: kept coefficients plus FE parameters (fixest_env.R): every intercept term
 /// counts G·(1 + #slopes), a slope-only term G·#slopes, minus one per intercept term beyond the first.
@@ -100,21 +48,34 @@ fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -> (f64, f64
     (sw, mean, m2)
 }
 
-/// Squared correlation of y and the fitted values (fixest `sq.cor`; NaN when the fitted values
-/// are constant), chunked with Chan's merge.
-fn sq_cor(y: &[f64], kept: &[u32], fitted: &[f64], pool: &Pool) -> f64 {
-    let parts = par::map_chunks(pool, kept.len(), CHUNK, |_, range| {
-        let c = range.len() as f64;
-        let my = range.clone().map(|i| y[kept[i] as usize]).sum::<f64>() / c;
-        let mf = range.clone().map(|i| fitted[i]).sum::<f64>() / c;
-        let (mut syy, mut sff, mut syf) = (0.0, 0.0, 0.0);
-        for i in range {
-            let (dy, df) = (y[kept[i] as usize] - my, fitted[i] - mf);
-            syy += dy * dy;
-            sff += df * df;
-            syf += dy * df;
-        }
-        [c, my, mf, syy, sff, syf]
+/// Fitted values y − e (kept order) and their squared correlation with y (fixest `sq.cor`; NaN
+/// when the fitted values are constant), in one chunked pass with Chan's merge.
+fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec<f64>, f64), RfError> {
+    let mut fitted = par::alloc_vec(kept.len(), 0.0)?;
+    let parts: Vec<[f64; 6]> = pool.install(|| {
+        fitted
+            .par_chunks_mut(CHUNK)
+            .zip(kept.par_chunks(CHUNK).zip(e.par_chunks(CHUNK)))
+            .map(|(f, (kc, ec))| {
+                let c = f.len() as f64;
+                let (mut sy, mut sf) = (0.0, 0.0);
+                for ((f, &i), &ei) in f.iter_mut().zip(kc).zip(ec) {
+                    let yi = y[i as usize];
+                    *f = yi - ei;
+                    sy += yi;
+                    sf += *f;
+                }
+                let (my, mf) = (sy / c, sf / c);
+                let (mut syy, mut sff, mut syf) = (0.0, 0.0, 0.0);
+                for (f, &i) in f.iter().zip(kc) {
+                    let (dy, df) = (y[i as usize] - my, f - mf);
+                    syy += dy * dy;
+                    sff += df * df;
+                    syf += dy * df;
+                }
+                [c, my, mf, syy, sff, syf]
+            })
+            .collect()
     });
     let mut it = parts.into_iter();
     let mut a = it.next().unwrap_or([0.0; 6]);
@@ -124,157 +85,362 @@ fn sq_cor(y: &[f64], kept: &[u32], fitted: &[f64], pool: &Pool) -> f64 {
         let f = a[0] * b[0] / n;
         a = [n, a[1] + dy * b[0] / n, a[2] + df * b[0] / n, a[3] + b[3] + dy * dy * f, a[4] + b[4] + df * df * f, a[5] + b[5] + dy * df * f];
     }
-    if a[4] == 0.0 { f64::NAN } else { a[5] * a[5] / (a[3] * a[4]) }
+    Ok((fitted, if a[4] == 0.0 { f64::NAN } else { a[5] * a[5] / (a[3] * a[4]) }))
 }
 
-pub(crate) fn ols(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
+/// Columns of the row block: [y, endog…, (1), inst…, x…].
+struct Layout {
+    r: usize,
+    m: usize,
+    icpt: bool,
+    l: usize,
+}
+
+impl Layout {
+    fn endog(&self, j: usize) -> usize {
+        1 + j
+    }
+    fn one(&self) -> usize {
+        1 + self.m
+    }
+    fn inst(&self, j: usize) -> usize {
+        1 + self.m + usize::from(self.icpt) + j
+    }
+    fn x(&self, j: usize) -> usize {
+        1 + self.m + usize::from(self.icpt) + self.l + j
+    }
+}
+
+/// `a·b` for a k-vector and a k×k row-major inverse: c'·A·c.
+fn quad_form(c: &[f64], a: &[f64]) -> f64 {
+    let k = c.len();
+    (0..k).map(|i| c[i] * (0..k).map(|j| a[i * k + j] * c[j]).sum::<f64>()).sum()
+}
+
+/// fixest `.wald` on the coefficients `idx` of a model with variance `v` (k×k): stat = c'V⁻¹c / q
+/// with V⁻¹ by `cpp_cholesky` (tolerance 1e-10; dropped coefficients are left out), p from
+/// F(df1, df2). Pyfixest: c'·pinv(V)·c / q with p from χ²(q) on c'·pinv(V)·c.
+fn first_stage_wald(flavor: Flavor, coef: &[f64], v: &[f64], idx: &[usize], df1: f64, df2: f64) -> TestStat {
+    let k = coef.len();
+    if idx.is_empty() {
+        return TestStat::NA;
+    }
+    let sub: Vec<f64> = idx.iter().flat_map(|&a| idx.iter().map(move |&b| v[a * k + b])).collect();
+    let q = idx.len();
+    match flavor {
+        Flavor::Fixest => {
+            let (excl, inv) = design::chol_collin(&sub, q, 1e-10);
+            let c: Vec<f64> = idx.iter().zip(&excl).filter(|(_, e)| !**e).map(|(&a, _)| coef[a]).collect();
+            if c.is_empty() {
+                return TestStat { stat: 1e6, p: dist::pf_upper(1e6, df1, df2), df1, df2 };
+            }
+            let stat = quad_form(&c, &inv) / c.len() as f64;
+            TestStat { stat, p: dist::pf_upper(stat, df1, df2), df1, df2 }
+        }
+        Flavor::Pyfixest => {
+            let c: Vec<f64> = idx.iter().map(|&a| coef[a]).collect();
+            let w = quad_form(&c, &design::pinv_sym(&sub, q));
+            TestStat { stat: w / q as f64, p: dist::pchisq_upper(w, q as f64), df1: q as f64, df2: f64::NAN }
+        }
+    }
+}
+
+/// One regressor of the reported model: its source, the combo regressed on (IV: the fitted
+/// endogenous variable) and the combo of the original variable (IV: the endogenous variable).
+struct Regressor {
+    source: CoefSource,
+    design: Vec<f64>,
+    actual: Vec<f64>,
+}
+
+pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
     let Sample { mut session, dropped } = sample;
     let mut t = std::time::Instant::now();
     let n = session.n();
     let has_fe = !input.fe.is_empty();
     let intercept = spec.intercept && !input.fe.iter().any(|t| t.intercept);
+    let iv = !input.endog.is_empty();
+    let lay = Layout { r: 1 + input.endog.len() + usize::from(intercept) + input.inst.len() + input.x.len(), m: input.endog.len(), icpt: intercept, l: input.inst.len() };
+    let r = lay.r;
 
-    // Row block [y, (1), x…] in solver row order, residualized on the fixed effects.
+    // Row block in solver row order, residualized on the fixed effects.
     let mut cols = vec![Col::Values(input.y)];
-    let mut sources = Vec::new();
+    cols.extend(input.endog.iter().map(|v| Col::Values(v)));
     if intercept {
         cols.push(Col::One);
-        sources.push(CoefSource::Intercept);
     }
-    cols.extend(input.x.iter().map(|x| Col::Values(x)));
-    sources.extend((0..input.x.len()).map(CoefSource::X));
-    let r = cols.len();
-    let kx = r - 1;
+    cols.extend(input.inst.iter().chain(&input.x).map(|v| Col::Values(v)));
     let mut rows = session.gather_input(&cols, pool)?;
     crate::solve::log_phase(ctx, &mut t, "fit: gather");
     let (sumw, _, ssr_null) = y_stats(input.y, session.kept_index(), session.weights(), pool);
     ctx.check()?;
-    let fe_iterations = if has_fe {
-        let opts = SolveOpts { tol: spec.fixef_tol, maxiter: spec.fixef_maxiter, want_coefs: false };
-        session.absorber_mut().residualize(&mut rows, r, &opts, None, pool, ctx)?.iterations
+    let want_coefs = spec.keep_fixef && has_fe;
+    let (fe_iterations, coefs) = if has_fe {
+        let opts = SolveOpts { tol: spec.fixef_tol, maxiter: spec.fixef_maxiter, want_coefs };
+        let info = session.absorber_mut().residualize(&mut rows, r, &opts, None, pool, ctx)?;
+        (info.iterations, info.coefs)
     } else {
-        0
+        (0, None)
     };
     let mut t = std::time::Instant::now();
     let w_rows = session.absorber().weights();
     let (g, _) = stats::gram(&rows, r, w_rows, pool);
+    // pyfixest drops collinear columns before applying the weights: unweighted Gram.
+    let g_u = (spec.flavor == Flavor::Pyfixest && w_rows.is_some()).then(|| stats::gram(&rows, r, None, pool).0);
+    let gc = g_u.as_deref();
     crate::solve::log_phase(ctx, &mut t, "fit: gram");
+    let tol = spec.collin_tol;
+    let y = unit(r, 0);
 
-    // Collinearity: fixest on the weighted Gram, pyfixest on the unweighted one (it drops
-    // columns before applying the weights); the bread is the inverse of the weighted kept block.
-    let block = |g: &[f64], cols: &[usize]| -> Vec<f64> { cols.iter().flat_map(|&a| cols.iter().map(move |&b| g[(1 + a) * r + 1 + b])).collect() };
-    let all: Vec<usize> = (0..kx).collect();
-    let (excluded, bread) = if spec.flavor == Flavor::Pyfixest && w_rows.is_some() {
-        let (gu, _) = stats::gram(&rows, r, None, pool);
-        let (excluded, _) = chol_collin(&block(&gu, &all), kx, spec.collin_tol);
-        let kept: Vec<usize> = all.iter().copied().filter(|&j| !excluded[j]).collect();
-        let (singular, inv) = chol_collin(&block(&g, &kept), kept.len(), f64::MIN_POSITIVE);
-        if singular.contains(&true) {
-            return Err(RfError::InvalidInput("the weighted cross-product of the regressors is singular".into()));
+    // Exogenous regressors in fixest order (intercept first).
+    let mut exog: Vec<Regressor> = Vec::new();
+    if intercept {
+        exog.push(Regressor { source: CoefSource::Intercept, design: unit(r, lay.one()), actual: unit(r, lay.one()) });
+    }
+    exog.extend((0..input.x.len()).map(|j| Regressor { source: CoefSource::X(j), design: unit(r, lay.x(j)), actual: unit(r, lay.x(j)) }));
+    let exog_design: Vec<Vec<f64>> = exog.iter().map(|x| x.design.clone()).collect();
+
+    // IV first stages: each endogenous variable on Z = [(1), inst…, x…].
+    struct First {
+        reg: Reg,
+        no_inst: Reg,
+    }
+    let mut z_sources: Vec<CoefSource> = Vec::new();
+    let mut z_design: Vec<Vec<f64>> = Vec::new();
+    let mut firsts: Vec<First> = Vec::new();
+    // The second-stage regressors in fixest order: [(1), fit_endog…, x…].
+    let mut second: Vec<Regressor> = Vec::new();
+    if iv {
+        if intercept {
+            z_sources.push(CoefSource::Intercept);
+            z_design.push(unit(r, lay.one()));
         }
-        (excluded, inv)
+        z_sources.extend((0..lay.l).map(CoefSource::Inst));
+        z_design.extend((0..lay.l).map(|j| unit(r, lay.inst(j))));
+        z_sources.extend((0..input.x.len()).map(CoefSource::X));
+        z_design.extend((0..input.x.len()).map(|j| unit(r, lay.x(j))));
+        for j in 0..lay.m {
+            let target = unit(r, lay.endog(j));
+            let reg = regress(&g, gc, r, &target, &z_design, tol)?;
+            let no_inst = regress(&g, gc, r, &target, &exog_design, tol)?;
+            firsts.push(First { reg, no_inst });
+        }
+        if intercept {
+            second.push(exog.remove(0));
+        }
+        for (j, f) in firsts.iter().enumerate() {
+            let target = unit(r, lay.endog(j));
+            let fitted: Vec<f64> = target.iter().zip(&f.reg.resid).map(|(a, b)| a - b).collect();
+            second.push(Regressor { source: CoefSource::Endog(j), design: fitted, actual: target });
+        }
+        second.append(&mut exog);
     } else {
-        chol_collin(&block(&g, &all), kx, spec.collin_tol)
-    };
-    let kept: Vec<usize> = all.iter().copied().filter(|&j| !excluded[j]).collect();
-    if kx > 0 && kept.is_empty() {
+        second = exog;
+    }
+    let design2: Vec<Vec<f64>> = second.iter().map(|x| x.design.clone()).collect();
+    let reg2 = regress(&g, gc, r, &y, &design2, tol)?;
+    if !design2.is_empty() && reg2.kept.is_empty() {
         return Err(RfError::InvalidInput("all the regressors are collinear (with the fixed effects)".into()));
     }
-    let collinear: Vec<CoefSource> = all.iter().filter(|&&j| excluded[j]).map(|&j| sources[j]).collect();
-    let k = kept.len();
-    let coef: Vec<f64> = (0..k).map(|a| (0..k).map(|b| bread[a * k + b] * g[(1 + kept[b]) * r]).sum()).collect();
-    let coef_source: Vec<CoefSource> = kept.iter().map(|&j| sources[j]).collect();
+    // Corrected residual (IV: with the original endogenous variables) and uncorrected one.
+    let mut e = y.clone();
+    for (&j, &b) in reg2.kept.iter().zip(&reg2.coef) {
+        e.iter_mut().zip(&second[j].actual).for_each(|(v, a)| *v -= b * a);
+    }
+    let e2 = reg2.resid.clone();
 
-    // Residuals (row order) with Σw·e² and Σe².
-    let mut e = par::alloc_vec(n, 0.0)?;
-    let sums: Vec<[f64; 2]> = pool.install(|| {
-        e.par_chunks_mut(CHUNK)
-            .enumerate()
-            .map(|(c, es)| {
-                let mut s = [0.0; 2];
-                for (o, ev) in es.iter_mut().enumerate() {
-                    let i = c * CHUNK + o;
-                    let row = &rows[i * r..(i + 1) * r];
-                    let mut v = row[0];
-                    for (a, &j) in kept.iter().enumerate() {
-                        v -= coef[a] * row[1 + j];
-                    }
-                    *ev = v;
-                    s[0] += w_rows.map_or(1.0, |w| w[i]) * v * v;
-                    s[1] += v * v;
-                }
-                s
-            })
-            .collect()
-    });
-    let (ssr, sse) = sums.iter().fold((0.0, 0.0), |a, s| (a.0 + s[0], a.1 + s[1]));
+    // Auxiliary IV regressions: y on the exogenous regressors (F of the endogenous block),
+    // Wu-Hausman (y on [endog…, (1), fit…, x…]) and Sargan (corrected residual on Z).
+    let mut aux: Vec<Vec<f64>> = vec![e.clone()];
+    let (mut wh_reg, mut sargan_reg) = (None, None);
+    if iv {
+        aux.push(e2.clone());
+        aux.extend(firsts.iter().map(|f| f.reg.resid.clone()));
+        aux.extend(firsts.iter().map(|f| f.no_inst.resid.clone()));
+        let wh_design: Vec<Vec<f64>> = (0..lay.m).map(|j| unit(r, lay.endog(j))).chain(design2.iter().cloned()).collect();
+        let wh = regress(&g, gc, r, &y, &wh_design, tol)?;
+        aux.push(wh.resid.clone());
+        wh_reg = Some(wh);
+        if lay.l > lay.m {
+            let s = regress(&g, gc, r, &e, &z_design, tol)?;
+            aux.push(s.resid.clone());
+            sargan_reg = Some(s);
+        }
+    }
+    // The uncorrected residual gives the fitted values (and sq.cor); IV residuals are corrected.
+    let keep_resid = spec.keep_resid;
+    // Kept-order residuals: e2 (uncorrected; combo 1 for IV, equal to e = combo 0 otherwise)
+    // always, the corrected IV residual e when kept.
+    let mut e2_kept = par::alloc_vec(n, 0.0)?;
+    let mut e_kept = if keep_resid && iv { par::alloc_vec(n, 0.0)? } else { Vec::new() };
+    let mut store = vec![(usize::from(iv), e2_kept.as_mut_slice())];
+    if keep_resid && iv {
+        store.push((0, e_kept.as_mut_slice()));
+    }
+    let sums = residual_pass(&rows, r, w_rows, &aux, sargan_reg.is_some().then_some(0), store, session.row_order(), pool);
     crate::solve::log_phase(ctx, &mut t, "fit: residuals");
     ctx.check()?;
+    let ssr = sums.wss[0];
+    let sse = sums.uss[0];
+    let m = lay.m;
+    let (ssr_iv, ssr_first, ssr_no_inst) = if iv { (sums.wss[1], &sums.wss[2..2 + m], &sums.wss[2 + m..2 + 2 * m]) } else { (ssr, &[][..], &[][..]) };
+    for j in 0..m {
+        if ssr_first[j] < 1e-10 {
+            return Err(RfError::InvalidInput(format!(
+                "endogenous regressor {} is fully explained by the exogenous variables and the instruments",
+                j + 1
+            )));
+        }
+        if (ssr_first[j] - ssr_no_inst[j]).abs() < 1e-10 {
+            return Err(RfError::InvalidInput(format!("the instruments have no explanatory power for endogenous regressor {}", j + 1)));
+        }
+    }
 
-    // Variance matrix.
+    // Reported coefficients: intercept, x…, endog… (the contract's order).
+    let rank = |s: &CoefSource| match s {
+        CoefSource::Intercept => (0, 0),
+        CoefSource::X(j) => (1, *j),
+        CoefSource::Endog(j) => (2, *j),
+        CoefSource::Inst(j) => (3, *j),
+    };
+    let mut order: Vec<usize> = (0..reg2.kept.len()).collect();
+    order.sort_by_key(|&a| rank(&second[reg2.kept[a]].source));
+    let k = order.len();
+    let kk = reg2.kept.len();
+    let coef: Vec<f64> = order.iter().map(|&a| reg2.coef[a]).collect();
+    let coef_source: Vec<CoefSource> = order.iter().map(|&a| second[reg2.kept[a]].source).collect();
+    let inv2 = &reg2.inv;
+    let bread: Vec<f64> = order.iter().flat_map(|&a| order.iter().map(move |&b| inv2[a * kk + b])).collect();
+    let design_out: Vec<Vec<f64>> = order.iter().map(|&a| second[reg2.kept[a]].design.clone()).collect();
+    let mut collinear: Vec<CoefSource> = second.iter().zip(&reg2.excluded).filter(|(_, x)| **x).map(|(s, _)| s.source).collect();
+    if let Some(f) = firsts.first() {
+        for (s, _) in z_sources.iter().zip(&f.reg.excluded).filter(|(_, x)| **x) {
+            if !collinear.contains(s) {
+                collinear.push(*s);
+            }
+        }
+    }
+
+    // Variance matrix (through the same state as post-hoc requests).
     let fweights = spec.flavor == Flavor::Pyfixest && spec.weights_type == WeightsType::Fweights && w_rows.is_some();
     let n_eff = if fweights { sumw } else { n as f64 };
     let np = nparams(k, &session);
-    let base = Base { flavor: spec.flavor, n: n_eff, k, nparams: np, bread, iid_scale: ssr / (n_eff - 1.0), normal: false };
     let terms = session.terms();
-    let fe_info: Vec<FeInfo> = terms
-        .iter()
-        .zip(&input.fe)
-        .map(|(t, ft)| FeInfo { codes: &t.codes, g: t.g, intercept: t.intercept, names: ft.factors.iter().map(|&f| input.factor_names[f].as_str()).collect() })
-        .collect();
+    let fe_names = |ft: &super::FeTerm| -> Vec<&str> { ft.factors.iter().map(|&f| input.factor_names[f].as_str()).collect() };
+    let fe_info: Vec<FeInfo> =
+        terms.iter().zip(&input.fe).map(|(t, ft)| FeInfo { codes: &t.codes, g: t.g, intercept: t.intercept, names: fe_names(ft) }).collect();
     let cl_info: Vec<ClusterInfo> = session
         .clusters()
         .iter()
         .zip(&input.cluster)
         .map(|(c, dim)| ClusterInfo { codes: &c.codes, g: c.g, names: dim.iter().map(|&f| input.factor_names[f].as_str()).collect() })
         .collect();
-    let refs = || {
-        let icpt: Vec<&crate::session::Term> = terms.iter().filter(|t| t.intercept).collect();
-        let codes: Vec<&[u32]> = icpt.iter().map(|t| t.codes.as_slice()).collect();
-        let sizes: Vec<usize> = icpt.iter().map(|t| t.g).collect();
-        fixef::references(&codes, &sizes)
-    };
-    let scores = Scores {
-        n_rows: n,
+    let refs = || term_refs(&fe_info);
+    let model = Model {
+        flavor: spec.flavor,
+        n: n_eff,
+        nparams: np,
+        bread: &bread,
+        iid_scale: ssr / (n_eff - 1.0),
+        normal: false,
+        rows: &rows,
+        r,
+        design: &design_out,
+        resid: &e,
+        w: w_rows,
+        fweights,
         row_order: session.row_order(),
-        hetero_div: if fweights { w_rows } else { None },
-        row: |i: usize, a: &mut [f64]| {
-            let row = &rows[i * r..(i + 1) * r];
-            for (p, &j) in kept.iter().enumerate() {
-                a[p] = row[1 + j];
-            }
-            e[i] * w_rows.map_or(1.0, |w| w[i])
-        },
     };
-    let (vcov, notes) = vcov::compute(&base, spec.vcov, &spec.ssc, &fe_info, &cl_info, &refs, &scores, pool)?;
+    let (vcov, notes) = vcov::compute(&model, spec.vcov, &spec.ssc, &fe_info, &cl_info, &refs, pool)?;
     crate::solve::log_phase(ctx, &mut t, "fit: vcov");
+
+    // IV statistics.
+    let nf = n as f64;
+    let iv_stats = if iv {
+        let f0 = &firsts[0].reg;
+        let inst_kept: Vec<usize> = f0.kept.iter().enumerate().filter(|(_, j)| matches!(z_sources[**j], CoefSource::Inst(_))).map(|(a, _)| a).collect();
+        let np1 = nparams(f0.kept.len(), &session);
+        // pyfixest's first stage clusters by the first cluster variable only.
+        let cl_first = if spec.flavor == Flavor::Pyfixest { &cl_info[..cl_info.len().min(1)] } else { &cl_info[..] };
+        let mut first_stage = Vec::with_capacity(m);
+        let mut df2_first = f64::NAN;
+        for (j, f) in firsts.iter().enumerate() {
+            let design1: Vec<Vec<f64>> = f.reg.kept.iter().map(|&a| z_design[a].clone()).collect();
+            let model1 = Model { nparams: np1, bread: &f.reg.inv, iid_scale: ssr_first[j] / (n_eff - 1.0), design: &design1, resid: &f.reg.resid, ..model };
+            let (v1, _) = vcov::compute(&model1, spec.vcov, &spec.ssc, &fe_info, cl_first, &refs, pool)?;
+            if j == 0 {
+                df2_first = (nf - v1.df_k).max(1.0);
+            }
+            let df1 = inst_kept.len() as f64;
+            let stat = ((ssr_no_inst[j] - ssr_first[j]) / df1) / (ssr_first[j] / df2_first);
+            let f_test = TestStat { stat, p: dist::pf_upper(stat, df1, df2_first), df1, df2: df2_first };
+            let wald = first_stage_wald(spec.flavor, &f.reg.coef, &v1.vcov, &inst_kept, df1, df2_first);
+            first_stage.push(IvFirstStage {
+                endog: j,
+                coef_source: f.reg.kept.iter().map(|&a| z_sources[a]).collect(),
+                coef: f.reg.coef.clone(),
+                vcov: v1,
+                collinear: z_sources.iter().zip(&f.reg.excluded).filter(|(_, x)| **x).map(|(s, _)| *s).collect(),
+                f_test,
+                wald,
+            });
+        }
+        let base = 2 + 2 * m;
+        let wh = wh_reg.as_ref().expect("IV");
+        let wu_hausman = if wh.excluded.contains(&true) {
+            TestStat::NA
+        } else {
+            let df1 = m as f64;
+            let df2 = nf - (np + m) as f64;
+            let kw = wh.kept.len();
+            let qui: Vec<usize> = (m + usize::from(intercept)..2 * m + usize::from(intercept)).collect();
+            let s2 = sums.wss[base] / df2;
+            let sub: Vec<f64> = qui.iter().flat_map(|&a| qui.iter().map(move |&b| wh.inv[a * kw + b] * s2)).collect();
+            let (_, sub_inv) = design::chol_collin(&sub, m, f64::MIN_POSITIVE);
+            let c: Vec<f64> = qui.iter().map(|&a| wh.coef[a]).collect();
+            let stat = quad_form(&c, &sub_inv) / df1;
+            TestStat { stat, p: dist::pf_upper(stat, df1, df2), df1, df2 }
+        };
+        let sargan = if sargan_reg.is_some() {
+            let df = (lay.l - m) as f64;
+            let stat = nf * (1.0 - sums.wss[base + 1] / sums.centered);
+            TestStat { stat, p: dist::pchisq_upper(stat, df), df1: df, df2: f64::NAN }
+        } else {
+            TestStat::NA
+        };
+        Some(IvStats { first_stage, wu_hausman, sargan, ssr_iv })
+    } else {
+        None
+    };
 
     // Per-observation outputs (estimation order) and fit statistics.
     let kept_index = session.kept_index();
-    let resid = to_kept_order(&e, session.row_order(), pool)?;
-    drop(e);
-    let mut fitted = par::alloc_vec(n, 0.0)?;
-    pool.install(|| {
-        fitted.par_iter_mut().zip(resid.par_iter()).zip(kept_index.par_iter()).for_each(|((f, &res), &i)| *f = input.y[i as usize] - res)
-    });
-    let cor2 = sq_cor(input.y, kept_index, &fitted, pool);
-    let nf = n as f64;
+    let (fitted, cor2) = fitted_sq_cor(input.y, kept_index, &e2_kept, pool)?;
+    let resid = match (keep_resid, iv) {
+        (false, _) => None,
+        (true, false) => Some(e2_kept),
+        (true, true) => Some(e_kept),
+    };
+    let fitted = keep_resid.then_some(fitted);
     let weighted = w_rows.is_some();
     let ssr_fe_only = if has_fe { g[0] } else { f64::NAN };
     let only_intercept = np == 1 && intercept && k == 1;
     let n_stat = if spec.flavor == Flavor::Pyfixest { n_eff } else { nf };
     let di = if has_fe || intercept { 1.0 } else { 0.0 };
-    let (r2, ar2) = match spec.flavor {
+    // fixest's R² family uses the uncorrected second-stage residuals for IV, unweighted
+    // (fitstats.R `r2`: `cpp_ssq(x$iv_residuals)`); its F test the weighted ones.
+    let ssr_r2 = if iv { sums.uss[1] } else { ssr };
+    let (mut r2, mut ar2) = match spec.flavor {
         _ if only_intercept && spec.flavor == Flavor::Fixest => (f64::NAN, f64::NAN),
-        Flavor::Fixest => (1.0 - ssr / ssr_null * (nf - di) / (nf - 1.0), 1.0 - ssr / ssr_null * (nf - di) / (nf - np as f64)),
+        Flavor::Fixest => (1.0 - ssr_r2 / ssr_null * (nf - di) / (nf - 1.0), 1.0 - ssr_r2 / ssr_null * (nf - di) / (nf - np as f64)),
         Flavor::Pyfixest => {
             let hi = if spec.intercept { 1.0 } else { 0.0 };
             (1.0 - ssr / ssr_null, 1.0 - ssr / ssr_null * (n_eff - hi) / (n_eff - np as f64))
         }
     };
     let nb_fe = (np - k) as f64;
-    let (wr2, war2) = if has_fe && k > 0 {
-        (1.0 - ssr / ssr_fe_only, 1.0 - ssr / ssr_fe_only * (n_stat - nb_fe) / (n_stat - np as f64))
+    let (mut wr2, mut war2) = if has_fe && k > 0 {
+        (1.0 - ssr_r2 / ssr_fe_only, 1.0 - ssr_r2 / ssr_fe_only * (n_stat - nb_fe) / (n_stat - np as f64))
     } else {
         (f64::NAN, f64::NAN)
     };
@@ -284,14 +450,18 @@ pub(crate) fn ols(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
     let ll_null = -0.5 * wn * (1.0 + ln2pi + (ssr_null / wn).ln());
     let (pseudo_r2, apr2) =
         if only_intercept { (f64::NAN, f64::NAN) } else { (1.0 - loglik / ll_null, 1.0 - (loglik - np as f64 + 1.0) / ll_null) };
-    let rmse = match spec.flavor {
+    let mut rmse = match spec.flavor {
         Flavor::Fixest => (ssr / wn).sqrt(),
         Flavor::Pyfixest => (ssr / n_eff).sqrt(),
     };
+    if iv && spec.flavor == Flavor::Pyfixest {
+        // pyfixest reports no R² or RMSE for IV.
+        (r2, ar2, wr2, war2, rmse) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    }
     let f_test = match vcov.df_t {
         Some(df2) => {
             let df1 = vcov.df_k - 1.0;
-            let stat = ((ssr_null - ssr) / df1) / (ssr / df2);
+            let stat = ((ssr_null - ssr_iv) / df1) / (ssr_iv / df2);
             TestStat { stat, p: dist::pf_upper(stat, df1, df2), df1, df2 }
         }
         None => TestStat::NA,
@@ -318,27 +488,85 @@ pub(crate) fn ols(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
         irls_iterations: 0,
         converged: true,
     };
+
+    // Fixed effects (fixest `sumFE`): the FE part of y − Xβ with the original endogenous
+    // variables, i.e. of the corrected residual's combo. For IV this equals fixest's
+    // y − Ûβ − e₂ with Û the first-stage fitted values including the first-stage FE.
+    let fixef = match &coefs {
+        Some(c) => {
+            let slots = session.absorber().term_values(&c.combine(&e), 0);
+            fixef::fixef_values(input, terms, slots, kept_index, spec.fixef_norm)
+        }
+        None => Vec::new(),
+    };
     crate::solve::log_phase(ctx, &mut t, "fit: outputs");
+    let obs = kept_index.to_vec();
+    let fe_sizes = terms.iter().map(|t| t.g).collect();
+    let state = if spec.keep_state {
+        let row_order = session.row_order().to_vec();
+        let weights = session.weights.take();
+        let fe = std::mem::take(&mut session.terms)
+            .into_iter()
+            .zip(&input.fe)
+            .map(|(t, ft)| StateFe { codes: t.codes, g: t.g, intercept: t.intercept, names: fe_names(ft).into_iter().map(String::from).collect() })
+            .collect();
+        drop(session);
+        Some(super::FitState {
+            inner: State {
+                flavor: spec.flavor,
+                n: n_eff,
+                nparams: np,
+                bread,
+                iid_scale: ssr / (n_eff - 1.0),
+                normal: false,
+                rows,
+                r,
+                design: design_out,
+                resid: e,
+                weights,
+                fweights,
+                row_order,
+                obs: obs.clone(),
+                fe,
+            },
+        })
+    } else {
+        None
+    };
     Ok(FitOutput {
         nobs: n,
         nobs_origin: input.n,
         sumw,
-        obs: kept_index.to_vec(),
+        obs,
         dropped,
         coef_source,
         coef,
         collinear,
         vcov,
         nparams: np,
-        fe_sizes: session.terms().iter().map(|t| t.g).collect(),
+        fe_sizes,
         stats,
-        iv: None,
-        resid: spec.keep_resid.then_some(resid),
-        fitted: spec.keep_resid.then_some(fitted),
+        iv: iv_stats,
+        resid,
+        fitted,
         eta: None,
         irls_weights: None,
-        fixef: Vec::new(),
+        fixef,
         notes,
-        state: None,
+        state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::design::cross;
+
+    #[test]
+    fn cross_matches_dense_product() {
+        let g = [2.0, 1.0, 0.5, 1.0, 3.0, 0.2, 0.5, 0.2, 4.0];
+        let a = [1.0, 0.0, -2.0];
+        let b = [0.5, 1.0, 0.0];
+        let dense: f64 = (0..3).map(|i| (0..3).map(|j| a[i] * g[i * 3 + j] * b[j]).sum::<f64>()).sum();
+        assert!((cross(&g, 3, &a, &b) - dense).abs() < 1e-15);
+    }
 }

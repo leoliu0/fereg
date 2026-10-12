@@ -2,8 +2,10 @@
 #
 #   Rscript crates/fereg-core/tests/data/gen_fit_fixtures.R   (from the repository root)
 #
-# Writes tests/data/fit_d1.csv (the data) and tests/data/fit_fixest.json (one case per model and
-# variance matrix). fixef.tol is fixest's minimum (> 2.2e-12); the Rust tests use 1e-12.
+# Writes tests/data/fit_d1.csv (the data) and, one case per model and variance matrix,
+# tests/data/fit_fixest.json (OLS), fit_fixest_iv.json (IV) and fit_fixest_fe.json (varying
+# slopes, fixed-effect values, post-hoc variance matrices). fixef.tol is fixest's minimum
+# (> 2.2e-12); the Rust tests use 1e-12.
 suppressPackageStartupMessages({
   library(fixest)
   library(jsonlite)
@@ -34,7 +36,16 @@ x1[c(23, 401)] <- NA
 h[c(77, 78)] <- NA
 cna[c(5, 90, 91, 92, 250)] <- NA       # NA in a cluster variable
 wi <- sample(1:3, n, TRUE)            # frequency weights (pyfixest fixtures)
-d <- data.frame(y, x1, x2, x3, xg, g, h, k, c1, c3, cna, w, wi)
+# IV: instruments z1..z3, endogenous xe, xe2 (u enters y and both), outcome yiv.
+z1 <- rnorm(n); z2 <- rnorm(n); z3 <- rnorm(n); u <- rnorm(n)
+xe <- 0.6 * z1 + 0.4 * z2 + 0.5 * u + gm[g] + rnorm(n)
+xe2 <- 0.3 * z1 - 0.5 * z3 + 0.4 * u + rnorm(n)
+yiv <- 1 + xe - 0.5 * xe2 + 0.5 * x1 + gm[g] + rnorm(12)[h] + u + rnorm(n)
+# Varying slopes: s1 with a slope per g level; hb splits the g-h graph into two components.
+s1 <- runif(n, 0, 3)
+ys <- 1 + 0.5 * x1 + gm[g] + rnorm(45)[g] * s1 + rnorm(12)[h] + rnorm(n)
+hb <- ifelse(g <= 20, h, h + 12)
+d <- data.frame(y, x1, x2, x3, xg, g, h, k, c1, c3, cna, w, wi, z1, z2, z3, xe, xe2, yiv, s1, ys, hb)
 write.csv(d, file.path(dir, "fit_d1.csv"), row.names = FALSE, na = "NA")
 toy <- data.frame(g = rep(c(1, 2, 3), each = 2), x = c(1, 2, 1, 3, 2, 4), y = c(2, 3, 2, 5, 3, 7), t = c(1, 1, 1, 2, 2, 2))
 write.csv(toy, file.path(dir, "fit_toy.csv"), row.names = FALSE)
@@ -42,7 +53,26 @@ write.csv(toy, file.path(dir, "fit_toy.csv"), row.names = FALSE)
 num <- function(v) { v <- unname(as.numeric(v)); v }
 ssc_list <- function(s) list(K.adj = s$K.adj, K.fixef = s$K.fixef, K.exact = s$K.exact, G.adj = s$G.adj, G.df = s$G.df, t.df = s$t.df)
 
-case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), ssc = fixest::ssc(), weights = NULL) {
+# A fixed-effect term: factors (`^` interaction when several), varying slopes, intercept.
+term <- function(factors, slopes = character(), intercept = TRUE) list(factors = as.list(factors), slopes = as.list(slopes), intercept = intercept)
+fe_terms <- function(fe) lapply(fe, function(t) if (is.list(t) && !is.null(t$factors)) t else term(unlist(t)))
+
+vcov_attrs <- function(V, dat, m, cluster) list(
+  vcov = num(V), se = num(sqrt(diag(V))), df_k = attr(V, "df.K"), df_t = attr(V, "df.t"),
+  G = lapply(cluster, function(dim) length(unique(do.call(paste, dat[obs(m), unlist(dim), drop = FALSE]))))
+)
+
+# fixef(m) per slot: level labels (sorted), values and references.
+fixef_list <- function(m) {
+  # With varying slopes fixef() re-solves iteratively (default fixef.tol = 1e-5).
+  fe <- fixef(m, notes = FALSE, fixef.tol = 1e-14, fixef.iter = 100000)
+  refs <- attr(fe, "references")
+  lapply(names(fe), function(nm) list(name = nm, levels = names(fe[[nm]]), values = num(fe[[nm]]), references = num(refs[nm])))
+}
+
+# `posthoc`: list of list(vcov, cluster, ssc) evaluated with summary(m, vcov =, ssc =).
+case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), ssc = fixest::ssc(), weights = NULL,
+                 endog = character(), inst = character(), fixef = FALSE, posthoc = list()) {
   dat <- read.csv(file.path(dir, data))
   args <- list(fml = fml, data = dat, fixef.tol = TOL, fixef.iter = 100000, vcov = vcov, ssc = ssc, notes = FALSE)
   if (!is.null(weights)) args$weights <- as.formula(paste0("~", weights))
@@ -50,23 +80,50 @@ case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), s
   V <- vcov(m, attr = TRUE)
   f <- fitstat(m, "f", simplify = FALSE)$f
   r2s <- r2(m, c("r2", "ar2", "wr2", "war2", "pr2", "apr2", "cor2"))
-  list(
-    name = name, data = data, y = y, x = x, fe = fe, intercept = intercept, weights = weights,
-    vcov = if (is.character(vcov)) vcov else "cluster", cluster = cluster, ssc = ssc_list(ssc),
-    expect = list(
-      coef_names = names(coef(m)), coef = num(coef(m)), se = num(se(m)), vcov = num(V),
-      nobs = nobs(m), nparams = m$nparams, df_k = attr(V, "df.K"), df_t = attr(V, "df.t"),
-      G = lapply(cluster, function(dim) length(unique(do.call(paste, dat[obs(m), unlist(dim), drop = FALSE])))),
-      collin = if (is.null(m$collin.var)) list() else m$collin.var,
-      r2 = num(r2s["r2"]), ar2 = num(r2s["ar2"]), wr2 = num(r2s["wr2"]), war2 = num(r2s["war2"]),
-      pr2 = num(r2s["pr2"]), apr2 = num(r2s["apr2"]), sq_cor = num(r2s["cor2"]),
-      rmse = num(fitstat(m, "rmse")[[1]]), ll = num(logLik(m)), ll_null = m$ll_null, ssr = m$ssr,
-      ssr_null = m$ssr_null, ssr_fe_only = if (is.null(m$ssr_fe_only)) NA else m$ssr_fe_only,
-      sigma2 = m$sigma2, f_stat = num(f$stat), f_p = num(f$p), f_df1 = num(f$df1), f_df2 = num(f$df2),
-      # Residuals and fitted values do not depend on the variance matrix: stored once per model.
-      resid = if (identical(vcov, "iid")) num(resid(m)) else list(),
-      fitted = if (identical(vcov, "iid")) num(fitted(m)) else list(), obs = num(obs(m))
+  expect <- c(vcov_attrs(V, dat, m, cluster), list(
+    coef_names = names(coef(m)), coef = num(coef(m)),
+    nobs = nobs(m), nparams = m$nparams,
+    collin = if (is.null(m$collin.var)) list() else m$collin.var,
+    r2 = num(r2s["r2"]), ar2 = num(r2s["ar2"]), wr2 = num(r2s["wr2"]), war2 = num(r2s["war2"]),
+    pr2 = num(r2s["pr2"]), apr2 = num(r2s["apr2"]), sq_cor = num(r2s["cor2"]),
+    rmse = num(fitstat(m, "rmse")[[1]]), ll = num(logLik(m)), ll_null = m$ll_null, ssr = m$ssr,
+    ssr_null = m$ssr_null, ssr_fe_only = if (is.null(m$ssr_fe_only)) NA else m$ssr_fe_only,
+    sigma2 = m$sigma2, f_stat = num(f$stat), f_p = num(f$p), f_df1 = num(f$df1), f_df2 = num(f$df2),
+    # Residuals and fitted values do not depend on the variance matrix: stored once per model.
+    resid = if (identical(vcov, "iid")) num(resid(m)) else list(),
+    fitted = if (identical(vcov, "iid")) num(fitted(m)) else list(), obs = num(obs(m))
+  ))
+  if (length(endog) > 0) {
+    w <- if (is.null(weights)) 1 else dat[obs(m), weights]
+    fs <- fitstat(m, c("ivf1", "ivwald1", "wh", "sargan"), simplify = FALSE)
+    test <- function(t) if (is.null(t) || identical(t, NA)) list(stat = NA, p = NA, df1 = NA, df2 = NA)
+      else list(stat = num(t$stat), p = num(t$p), df1 = num(if (is.null(t$df1)) t$df else t$df1), df2 = if (is.null(t$df2)) NA else num(t$df2))
+    expect$iv <- list(
+      ssr_iv = sum(w * m$iv_residuals^2),
+      wh = test(fs$wh), sargan = test(fs$sargan),
+      first = lapply(endog, function(e) {
+        f1 <- m$iv_first_stage[[e]]
+        V1 <- vcov(f1, attr = TRUE)
+        c(vcov_attrs(V1, dat, f1, cluster), list(
+          coef_names = names(coef(f1)), coef = num(coef(f1)), nparams = f1$nparams,
+          collin = if (is.null(f1$collin.var)) list() else f1$collin.var,
+          f = test(fs[[paste0("ivf1::", e)]]), wald = test(fs[[paste0("ivwald1::", e)]])
+        ))
+      })
     )
+  }
+  if (fixef) expect$fixef <- fixef_list(m)
+  expect$posthoc <- lapply(posthoc, function(p) {
+    s <- summary(m, vcov = p$vcov, ssc = if (is.null(p$ssc)) fixest::ssc() else p$ssc)
+    vcov_attrs(vcov(s, attr = TRUE), dat, m, if (is.null(p$cluster)) list() else p$cluster)
+  })
+  list(
+    name = name, data = data, y = y, x = x, endog = endog, inst = inst, fe = fe_terms(fe), intercept = intercept,
+    weights = weights, vcov = if (is.character(vcov)) vcov else "cluster", cluster = cluster, ssc = ssc_list(ssc),
+    posthoc = lapply(posthoc, function(p) list(vcov = if (is.character(p$vcov)) p$vcov else "cluster",
+                                               cluster = if (is.null(p$cluster)) list() else p$cluster,
+                                               ssc = ssc_list(if (is.null(p$ssc)) fixest::ssc() else p$ssc))),
+    expect = expect
   )
 }
 
@@ -115,5 +172,58 @@ add("toy_cl_g_full", "fit_toy.csv", y ~ x | g, "y", "x", toyfe, TRUE, ~g, cluste
 add("toy_cl_g_none", "fit_toy.csv", y ~ x | g, "y", "x", toyfe, TRUE, ~g, cluster = list(list("g")), ssc = ssc(K.fixef = "none"))
 add("toy_tw", "fit_toy.csv", y ~ x | g, "y", "x", toyfe, TRUE, ~g + t, cluster = list(list("g"), list("t")))
 
-writeLines(toJSON(cases, auto_unbox = TRUE, digits = NA, na = "null", null = "null"), file.path(dir, "fit_fixest.json"))
-cat(length(cases), "cases\n")
+write_cases <- function(file) {
+  writeLines(toJSON(cases, auto_unbox = TRUE, digits = NA, na = "null", null = "null"), file.path(dir, file))
+  cat(file, length(cases), "cases\n")
+  cases <<- list()
+}
+write_cases("fit_fixest.json")
+
+# IV: over- and just-identified, two endogenous variables, no exogenous regressor, no FE,
+# weights, every variance matrix.
+FIV <- yiv ~ x1 | g + h | xe ~ z1 + z2
+ivargs <- list(data = "fit_d1.csv", y = "yiv", x = "x1", fe = fe2, intercept = TRUE, endog = "xe", inst = c("z1", "z2"))
+addiv <- function(name, fml, vcov, ...) {
+  a <- ivargs
+  extra <- list(...)
+  a[names(extra)] <- extra  # not modifyList: it merges nested lists such as `fe`
+  do.call(add, c(list(name = name, fml = fml, vcov = vcov), a))
+}
+for (v in list("iid", "hetero")) addiv(paste0("iv_fe2_", v), FIV, v)
+addiv("iv_fe2_cl_c3", FIV, ~c3, cluster = cl$c3)
+addiv("iv_fe2_cl_c3_h", FIV, ~c3 + h, cluster = cl$c3_h)
+addiv("iv_fe2_cl_g", FIV, ~g, cluster = cl$g)
+addiv("iv_fe2_w_hetero", FIV, "hetero", weights = "w")
+addiv("iv_fe2_w_iid", FIV, "iid", weights = "w")
+addiv("iv_fe1_just", yiv ~ x1 | g | xe ~ z1, "iid", fe = list(list("g")), inst = "z1")
+addiv("iv_fe1_two_endog", yiv ~ x1 | g | xe + xe2 ~ z1 + z2 + z3, "iid", fe = list(list("g")), endog = c("xe", "xe2"), inst = c("z1", "z2", "z3"))
+addiv("iv_fe1_two_endog_cl", yiv ~ x1 | g | xe + xe2 ~ z1 + z2 + z3, ~c3, fe = list(list("g")), endog = c("xe", "xe2"), inst = c("z1", "z2", "z3"), cluster = cl$c3)
+addiv("iv_fe1_noexog", yiv ~ 1 | g | xe ~ z1 + z2, "iid", fe = list(list("g")), x = character())
+addiv("iv_nofe_iid", yiv ~ x1 | xe ~ z1 + z2, "iid", fe = list())
+addiv("iv_nofe_hetero_w", yiv ~ x1 | xe ~ z1 + z2, "hetero", fe = list(), weights = "w")
+addiv("iv_nofe_noexog", yiv ~ 1 | xe ~ z1 + z2, "iid", fe = list(), x = character())
+addiv("iv_fe2_fixef", FIV, "iid", fixef = TRUE, posthoc = list(list(vcov = "hetero"), list(vcov = ~c3, cluster = cl$c3)))
+write_cases("fit_fixest_iv.json")
+
+# Varying slopes (intercept + slope, slope only, slope only without any intercept term).
+tg_s <- term("g", "s1")
+add("sl_g_s_h_iid", "fit_d1.csv", ys ~ x1 | g[s1] + h, "ys", "x1", list(tg_s, list("h")), TRUE, "iid", fixef = TRUE)
+add("sl_g_s_h_cl", "fit_d1.csv", ys ~ x1 | g[s1] + h, "ys", "x1", list(tg_s, list("h")), TRUE, ~c3, cluster = cl$c3)
+add("sl_g_s_h_cl_g", "fit_d1.csv", ys ~ x1 | g[s1] + h, "ys", "x1", list(tg_s, list("h")), TRUE, ~g, cluster = cl$g)
+add("sl_g_h_ss_w", "fit_d1.csv", ys ~ x1 | g + h[[s1]], "ys", "x1", list(list("g"), term("h", "s1", FALSE)), TRUE, "hetero", weights = "w")
+add("sl_only", "fit_d1.csv", ys ~ x1 | g[[s1]], "ys", "x1", list(term("g", "s1", FALSE)), TRUE, "iid", fixef = TRUE)
+add("sl_only_cl", "fit_d1.csv", ys ~ x1 | g[[s1]], "ys", "x1", list(term("g", "s1", FALSE)), TRUE, ~c3, cluster = cl$c3)
+add("sl_two", "fit_d1.csv", ys ~ x1 | g[s1, x2] + h, "ys", "x1", list(term("g", c("s1", "x2")), list("h")), TRUE, "hetero")
+# Fixed-effect values: one term, two connected terms, two components, three terms, interaction.
+add("fx_fe1", "fit_d1.csv", y ~ x1 + x2 | g, "y", c("x1", "x2"), list(list("g")), TRUE, "iid", fixef = TRUE)
+add("fx_fe2", "fit_d1.csv", F2, "y", c("x1", "x2"), fe2, TRUE, "iid", fixef = TRUE,
+    posthoc = list(list(vcov = "hetero"), list(vcov = ~c1 + c3, cluster = cl$c1_c3), list(vcov = ~g, cluster = cl$g, ssc = ssc(K.fixef = "full")),
+                   list(vcov = "iid", ssc = ssc(K.adj = FALSE)), list(vcov = ~h^k, cluster = list(list("h", "k")))))
+add("fx_fe2_comp", "fit_d1.csv", y ~ x1 + x2 | g + hb, "y", c("x1", "x2"), list(list("g"), list("hb")), TRUE, "iid", fixef = TRUE)
+add("fx_fe2_comp_w", "fit_d1.csv", y ~ x1 + x2 | hb + g, "y", c("x1", "x2"), list(list("hb"), list("g")), TRUE, "iid", weights = "w", fixef = TRUE)
+add("fx_fe3", "fit_d1.csv", y ~ x1 + x2 | g + h + k, "y", c("x1", "x2"), fe3, TRUE, "iid", fixef = TRUE)
+add("fx_fe3_comp", "fit_d1.csv", y ~ x1 + x2 | g + hb + k, "y", c("x1", "x2"), list(list("g"), list("hb"), list("k")), TRUE, "iid", fixef = TRUE)
+add("fx_inter", "fit_d1.csv", y ~ x1 + x2 | g + h^k, "y", c("x1", "x2"), list(list("g"), list("h", "k")), TRUE, "iid", fixef = TRUE)
+add("fx_nofe_posthoc", "fit_d1.csv", y ~ x1 + x2, "y", c("x1", "x2"), list(), TRUE, "iid",
+    posthoc = list(list(vcov = "hetero"), list(vcov = ~c3 + k, cluster = list(list("c3"), list("k")))))
+write_cases("fit_fixest_fe.json")

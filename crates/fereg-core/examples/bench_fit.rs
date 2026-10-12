@@ -4,7 +4,8 @@
 //! n obs; nb_year = 10; indiv = n/10 (obs i: indiv i/10, year i%10); y, x1..x10 = N(0,1) + FE
 //! effects. Model `y ~ x1..xk | indiv + year`, iid; residuals requested on both paths.
 //!
-//! `cargo run --release -p fereg-core --example bench_fit [--n 1e7] [--reps 5] [--threads 16]`
+//! `cargo run --release -p fereg-core --example bench_fit [--n 1e7] [--reps 5] [--threads 16] [--verbose]`
+//! (`--verbose`: one extra run of each path per k with per-phase timings on stderr first).
 
 use std::time::Instant;
 
@@ -89,6 +90,16 @@ fn main() {
     let threads: usize = get("--threads").and_then(|v| v.parse().ok()).unwrap_or(16);
     let d = generate(n);
     let ctx = Ctx::quiet(threads);
+    if args.iter().any(|a| a == "--verbose") {
+        let log = |s: &str| eprintln!("{s}");
+        let vctx = Ctx { verbose: 2, log: &log, ..Ctx::quiet(threads) };
+        for k in [1usize, 10] {
+            eprintln!("--- Session, k = {k}");
+            session_path(&d, k, &vctx);
+            eprintln!("--- fit, k = {k}");
+            fit_path(&d, k, &vctx);
+        }
+    }
     println!("n = {n}, threads = {threads}, median of {reps} runs (seconds)");
     println!("{:>3} {:>12} {:>12} {:>7}", "k", "Session", "fit", "ratio");
     for k in [1usize, 10] {

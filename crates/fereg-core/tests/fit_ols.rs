@@ -4,78 +4,13 @@
 mod fit_common;
 
 use fereg_core::Ctx;
-use fereg_core::fit::{self, CoefSource, FitOutput, Flavor};
+use fereg_core::fit::{self, FitOutput, Flavor};
 use fit_common::*;
 
 const RTOL: f64 = 1e-8;
 
-fn coef_names(case: &Case, out: &FitOutput) -> Vec<String> {
-    let x = case.json.at("x").strs();
-    out.coef_source
-        .iter()
-        .map(|s| match s {
-            CoefSource::Intercept => "(Intercept)".to_string(),
-            CoefSource::X(j) => x[*j].clone(),
-            other => panic!("unexpected source {other:?}"),
-        })
-        .collect()
-}
-
 fn check_fixest(j: &J, kind: FactorKind, threads: usize) -> FitOutput {
-    let name = j.at("name").str();
-    let case = Case::new(j, kind);
-    let e = j.at("expect");
-    let out = fit::fit(&case.input(), &case.spec(Flavor::Fixest), &Ctx::quiet(threads)).unwrap_or_else(|err| panic!("{name}: {err}"));
-    let what = |s: &str| format!("{name} {s}");
-    assert_eq!(coef_names(&case, &out), e.at("coef_names").strs(), "{name}: coefficient names");
-    assert_vec(&what("coef"), &out.coef, &e.at("coef").nums(), RTOL, 1e-12);
-    let se: Vec<f64> = (0..out.coef.len()).map(|a| out.vcov.vcov[a * out.coef.len() + a].sqrt()).collect();
-    assert_vec(&what("se"), &se, &e.at("se").nums(), RTOL, 1e-12);
-    let scale = e.at("vcov").nums().iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    assert_vec(&what("vcov"), &out.vcov.vcov, &e.at("vcov").nums(), RTOL, scale);
-    assert_eq!(out.nobs as f64, e.at("nobs").num(), "{name}: nobs");
-    assert_eq!(out.nparams as f64, e.at("nparams").num(), "{name}: nparams");
-    assert_eq!(out.vcov.df_k, e.at("df_k").num(), "{name}: df_k");
-    assert_eq!(out.vcov.df_t, Some(e.at("df_t").num()), "{name}: df_t");
-    let g: Vec<f64> = out.vcov.n_clusters.iter().map(|&g| g as f64).collect();
-    assert_eq!(g, e.at("G").nums(), "{name}: clusters");
-    let x = j.at("x").strs();
-    let collin: Vec<String> = out.collinear.iter().map(|s| if let CoefSource::X(i) = s { x[*i].clone() } else { panic!() }).collect();
-    assert_eq!(collin, e.at("collin").strs(), "{name}: collinear");
-    let obs: Vec<f64> = out.obs.iter().map(|&i| f64::from(i) + 1.0).collect();
-    assert_eq!(obs, e.at("obs").nums(), "{name}: obs");
-    let s = &out.stats;
-    for (k, v) in [
-        ("r2", s.r2),
-        ("ar2", s.ar2),
-        ("wr2", s.wr2),
-        ("war2", s.war2),
-        ("pr2", s.pseudo_r2),
-        ("apr2", s.apr2),
-        ("sq_cor", s.sq_cor),
-        ("rmse", s.rmse),
-        ("ll", s.loglik),
-        ("ll_null", s.ll_null),
-        ("ssr", s.ssr),
-        ("ssr_null", s.ssr_null),
-        ("ssr_fe_only", s.ssr_fe_only),
-        ("sigma2", s.sigma2),
-        ("f_stat", s.f_test.stat),
-        ("f_df1", s.f_test.df1),
-        ("f_df2", s.f_test.df2),
-    ] {
-        assert_close(&what(k), v, e.at(k).num(), RTOL);
-    }
-    assert_close(&what("f_p"), s.f_test.p, e.at("f_p").num(), 1e-6);
-    let resid = e.at("resid").nums();
-    if !resid.is_empty() {
-        let scale = resid.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        assert_vec(&what("resid"), out.resid.as_ref().unwrap(), &resid, RTOL, scale);
-        let fitted = e.at("fitted").nums();
-        let scale = fitted.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        assert_vec(&what("fitted"), out.fitted.as_ref().unwrap(), &fitted, RTOL, scale);
-    }
-    out
+    check_case(j, Flavor::Fixest, kind, threads, RTOL).1
 }
 
 #[test]
@@ -137,39 +72,26 @@ fn pyfixest_cases() {
     assert!(cases.len() >= 20);
     for j in &cases {
         let name = j.at("name").str();
-        let case = Case::new(j, FactorKind::F64);
-        let res = fit::fit(&case.input(), &case.spec(Flavor::Pyfixest), &Ctx::quiet(4));
         if let Some(err) = j.get("error") {
             assert_eq!(err.str(), "NanInClusterVarError");
+            let case = Case::new(j, FactorKind::F64);
+            let res = fit::fit(&case.input(), &case.spec(Flavor::Pyfixest), &Ctx::quiet(4));
             let msg = res.err().unwrap_or_else(|| panic!("{name}: expected an error")).to_string();
             assert!(msg.contains("cluster variable cna"), "{name}: {msg}");
             continue;
         }
-        let out = res.unwrap_or_else(|err| panic!("{name}: {err}"));
-        let e = j.at("expect");
-        let what = |s: &str| format!("{name} {s}");
-        assert_eq!(coef_names(&case, &out), e.at("coef_names").strs(), "{name}: coefficient names");
-        assert_vec(&what("coef"), &out.coef, &e.at("coef").nums(), RTOL, 1e-12);
-        let k = out.coef.len();
-        let se: Vec<f64> = (0..k).map(|a| out.vcov.vcov[a * k + a].sqrt()).collect();
-        assert_vec(&what("se"), &se, &e.at("se").nums(), RTOL, 1e-12);
-        let scale = e.at("vcov").nums().iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        assert_vec(&what("vcov"), &out.vcov.vcov, &e.at("vcov").nums(), RTOL, scale);
-        assert_eq!(out.nobs as f64, e.at("nobs").num(), "{name}: nobs");
-        assert_eq!(out.vcov.df_k, e.at("df_k").num(), "{name}: df_k");
-        assert_eq!(out.vcov.df_t, Some(e.at("df_t").num()), "{name}: df_t");
-        let x = j.at("x").strs();
-        let collin: Vec<String> = out.collinear.iter().map(|s| if let CoefSource::X(i) = s { x[*i].clone() } else { panic!() }).collect();
-        assert_eq!(collin, e.at("collin").strs(), "{name}: collinear");
-        let s = &out.stats;
-        for (key, v) in [("r2", s.r2), ("ar2", s.ar2), ("wr2", s.wr2), ("war2", s.war2), ("rmse", s.rmse)] {
-            assert_close(&what(key), v, e.at(key).num(), RTOL);
+        // pyfixest reports weighted residuals scaled by √w: those are not compared.
+        let mut j = j.clone();
+        if !matches!(j.get("weights"), Some(J::Null) | None)
+            && let J::Obj(fields) = &mut j
+        {
+            fields.iter_mut().filter(|(k, _)| k == "expect").for_each(|(_, e)| {
+                if let J::Obj(ef) = e {
+                    ef.retain(|(k, _)| k != "resid");
+                }
+            });
         }
-        let resid = e.at("resid").nums();
-        if !resid.is_empty() && j.get("weights").is_some_and(|w| matches!(w, J::Null)) {
-            let scale = resid.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-            assert_vec(&what("resid"), out.resid.as_ref().unwrap(), &resid, RTOL, scale);
-        }
+        check_case(&j, Flavor::Pyfixest, FactorKind::F64, 4, RTOL);
     }
 }
 
