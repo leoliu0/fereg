@@ -1,4 +1,4 @@
-*! version 0.2.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
+*! version 0.2.1  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror reghdfe 6.13.1 (Sergio Correia).
 program define fereg, eclass
 	version 16
@@ -52,6 +52,19 @@ program Replay, rclass
 	if ("`table'" == "") _coef_table, `options'
 	return add // adds r(level), r(table), etc.
 	if ("`footnote'" == "") _rf_footnote
+	ExactFitNote
+end
+
+
+* A note (display only; reghdfe prints nothing) when the residual sum of squares is zero up to
+* rounding: the standard errors are then rounding noise. The bound 1e-20 * tss is far below the
+* residual SS of any non-degenerate model (residual sd below 1e-10 of the dependent variable's)
+* and above the rounding level of an exact fit computed in double precision.
+program ExactFitNote
+	if (missing(e(rss)) | missing(e(tss))) exit
+	if (!(e(tss) > 0) | e(rss) > 1e-20 * e(tss)) exit
+	local ratio = strtrim(string(e(rss) / e(tss), "%9.1e"))
+	di as text "note: exact fit (rss/tss = `ratio'); standard errors are not meaningful"
 end
 
 
@@ -69,7 +82,7 @@ end
 
 
 program Estimate, eclass
-	local rf_version 0.2.0
+	local rf_version 0.2.1
 	local cmdline `"fereg `0'"'
 
 // --------------------------------------------------------------------------
@@ -881,6 +894,7 @@ program Estimate, eclass
 	ereturn local cmdline `"`cmdline'"'
 	ereturn local model `model'
 	ereturn local predict fereg_p
+	ereturn local estat_cmd fereg_estat
 	ereturn local footnote _rf_footnote
 	ereturn local marginsnotok "Residuals SCore"
 	ereturn local depvar `depvar'

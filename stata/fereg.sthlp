@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0}{...}
+{* *! version 0.2.1}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -87,6 +87,7 @@ Each {it:absvar} is {cmd:[}{it:target}{cmd:=]}{it:term}, where {it:term} is one 
 {p2colset 9 32 34 2}{...}
 {p2col:{it:x} or {cmd:i.}{it:x}}one fixed effect per category of {it:x}{p_end}
 {p2col:{it:x}{cmd:#}{it:y}[{cmd:#}{it:z}...]}one fixed effect per combination of {it:x} and {it:y} ({cmd:i.} prefixes are optional){p_end}
+{p2col:{it:x}{cmd:##}{it:y}[{cmd:##}{it:z}...]}same as {it:x}{cmd:#}{it:y}[{cmd:#}{it:z}...]: the main effects are nested in the interaction (as in {cmd:reghdfe}; {cmd:e(absvars)} keeps the term as typed){p_end}
 {p2col:{it:x}{cmd:#c.}{it:z}}a slope on {it:z} per category of {it:x} (no intercept){p_end}
 {p2col:{it:x}{cmd:##c.}{it:z}}an intercept and a slope on {it:z} per category of {it:x}{p_end}
 {p2col:{it:x}{cmd:##c.(}{it:z w}{cmd:)}}an intercept and slopes on {it:z} and {it:w} per category of {it:x}{p_end}
@@ -211,7 +212,13 @@ depends on the algorithm and differs from {cmd:reghdfe}'s split.{p_end}
 {phang2}o {cmd:e(ic)} reports the iterations of {cmd:fereg}'s solver, which differ from {cmd:reghdfe}'s.
 Estimation messages read "(fereg converged in # iterations)".{p_end}
 {phang2}o String variables are allowed inside fixed-effect and cluster interactions ({cmd:reghdfe} rejects them).{p_end}
-{phang2}o {cmd:e(estat_cmd)} is not set; {cmd:estat} uses Stata's default {help estat} subcommands.{p_end}
+{phang2}o {cmd:e(estat_cmd)} is {cmd:fereg_estat} (OLS), which provides the subcommands of {cmd:reghdfe_estat}
+({cmd:estat summarize}, {cmd:estat vce}, {cmd:estat ic}); unlike {cmd:reghdfe_estat}, {cmd:estat summarize}
+passes its variable list and options on to {help estat summarize}. After IV estimation it is not set, as after
+{cmd:ivreghdfe}.{p_end}
+{phang2}o When the model fits the data exactly (residual sum of squares at most 1e-20 times the total sum of
+squares), {cmd:fereg} prints a note after the table that the standard errors are not meaningful
+({cmd:reghdfe} prints nothing). The stored results are not affected.{p_end}
 {phang2}o The mobility-group identifiers saved by {opt groupvar()} describe the same groups as {cmd:reghdfe}'s but
 may be numbered differently.{p_end}
 {phang2}o Notes that the plugin prints (e.g. the multi-way clustering adjustment) may appear before the
@@ -238,7 +245,8 @@ collinearity notes rather than after them.{p_end}
 {pstd}
 {help test}, {help lincom}, {help nlcom}, {help estimates} and {help margins} work as after {cmd:regress}
 ({cmd:margins} uses the xb component; {cmd:residuals} and {cmd:score} are not allowed in {cmd:margins}).
-Typing {cmd:fereg} without arguments replays the results.
+{cmd:estat summarize}, {cmd:estat vce} and {cmd:estat ic} work as after {cmd:reghdfe} ({cmd:estat ic} counts
+e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the results.
 
 
 {marker examples}{...}
@@ -314,6 +322,7 @@ Typing {cmd:fereg} without arguments replays the results.
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
 {synopt:{cmd:e(resid)}}name of the residuals variable{p_end}
 {synopt:{cmd:e(predict)}}{cmd:fereg_p}{p_end}
+{synopt:{cmd:e(estat_cmd)}}{cmd:fereg_estat} (OLS){p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(properties)}}{cmd:b V}{p_end}

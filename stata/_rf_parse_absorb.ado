@@ -1,9 +1,15 @@
-*! version 0.2.0  fereg: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
+*! version 0.2.1  fereg: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
 *
 * Syntax:  _rf_parse_absorb [absvars] [, SAVEfe Generate REPLACE]
 *
 * absvar  := [target=] term
-* term    := x | i.x | x#y[#z...] | x#c.z | x##c.z | x##c.(z w ...) | x#y##c.z ...
+* term    := x | i.x | x#y[#z...] | x##y[##z...] | x#c.z | x##c.z | x##c.(z w ...) | x#y##c.z ...
+* Terms are read as ms_parse_absvars reads them: the term is expanded as a factor-variable list
+* (Stata's operators are left-associative: a##b#c = (a##b)#c = a#c b#c a#b#c), and the indicator
+* variables of the expanded products form the term, which has an intercept when a product has no
+* c. part, and one slope per c. variable (a c. variable appearing in two products is an error).
+* Hence a full factorial of factors only (x##y, i.x##i.y, x##y##z) is the interaction of all its
+* factors (x#y): the main effects are nested in it, as in reghdfe's dof table.
 * Factors (x, y, ...) may be numeric or string variables (strings are not allowed by reghdfe inside
 * interactions; fereg allows them). Slope variables (c.z) must be numeric. Time-series operators
 * (L.x, c.L.z) are accepted and returned unexpanded; the caller resolves them with -tsrevar-.
@@ -123,43 +129,85 @@ program _rf_parse_absorb, sclass
 		* Absvar text as typed, with variable abbreviations expanded (this is what reghdfe stores in e(absvars))
 		UnabTerm `term' // returns `typed'
 
-		* Split into factor parts and slope parts. After normalization the only spaces left in a term
-		* are inside c.( ): protect them with "@" (never part of a name) while splitting on "#".
+		* Expand the term into products, as Stata's factor-variable expansion does. After normalization
+		* the only spaces left in a term are inside c.( ): protect them with "@" (never part of a name).
 		local term : subinstr local term " " "@", all
-		local p = strpos("`term'", "##")
-		if (`p') {
-			local left = substr("`term'", 1, `p' - 1)
-			local right = substr("`term'", `p' + 2, .)
-			if strpos("`right'", "##") | "`left'" == "" | "`right'" == "" {
+		local toks : subinstr local term "##" "!!", all
+		local toks : subinstr local toks "#" " # ", all
+		local toks : subinstr local toks "!!" " ## ", all
+		local nprod 0
+		local expect_operand 1
+		local op
+		foreach tok of local toks {
+			if (!`expect_operand') {
+				if (!inlist("`tok'", "#", "##")) {
+					di as err "invalid absvar: `typed'"
+					exit 198
+				}
+				local op `tok'
+				local expect_operand 1
+				continue
+			}
+			if (inlist("`tok'", "#", "##")) {
 				di as err "invalid absvar: `typed'"
 				exit 198
 			}
-			local fparts : subinstr local left "#" " ", all
-			local cparts : subinstr local right "#" " ", all
-			foreach part of local fparts {
-				if (substr("`part'", 1, 2) == "c.") {
-					di as err "invalid absvar `typed': c. variables must follow ##"
-					exit 198
+			* Elementary parts of the operand: c.(z w) -> c.z c.w
+			local oparts `tok'
+			if (substr("`tok'", 1, 3) == "c.(" & substr("`tok'", -1, 1) == ")") {
+				local inner = substr("`tok'", 4, strlen("`tok'") - 4)
+				local inner : subinstr local inner "@" " ", all
+				local oparts
+				foreach v of local inner {
+					local oparts `oparts' c.`v'
 				}
 			}
-			foreach part of local cparts {
-				if (substr("`part'", 1, 2) != "c.") {
-					di as err "invalid absvar `typed': expected c.variable after ##"
-					exit 198
+			local n_old `nprod'
+			forval j = 1/`n_old' {
+				local old`j' `prod`j''
+			}
+			local nprod 0
+			if (`n_old' == 0 | "`op'" == "##") {
+				forval j = 1/`n_old' {
+					local prod`++nprod' `old`j''
+				}
+				foreach v of local oparts {
+					local prod`++nprod' `v'
 				}
 			}
-			local has_intercept 1
+			if (`n_old') {
+				forval j = 1/`n_old' {
+					foreach v of local oparts {
+						local prod`++nprod' `old`j''#`v'
+					}
+				}
+			}
+			local expect_operand 0
 		}
-		else {
-			local parts : subinstr local term "#" " ", all
-			local fparts
-			local cparts
+		if (`expect_operand') {
+			di as err "invalid absvar: `typed'"
+			exit 198
+		}
+
+		* Factor parts, slope parts and intercept (ParseAbsvar of ms_parse_absvars): a product that is a
+		* lone c. variable is not part of the absvar
+		local fparts
+		local cparts
+		local has_intercept 0
+		forval j = 1/`nprod' {
+			local parts : subinstr local prod`j' "#" " ", all
+			local pf
+			local pc
 			foreach part of local parts {
-				if (substr("`part'", 1, 2) == "c.") local cparts `cparts' `part'
-				else local fparts `fparts' `part'
+				if (substr("`part'", 1, 2) == "c.") local pc `pc' `part'
+				else local pf `pf' `part'
 			}
-			local has_intercept = ("`cparts'" == "")
+			if ("`pf'" == "" & `: word count `pc'' == 1) continue
+			if ("`pc'" == "") local has_intercept 1
+			local fparts `fparts' `pf'
+			local cparts `cparts' `pc'
 		}
+		local fparts : list uniq fparts
 
 		* Factor variables
 		local ivars

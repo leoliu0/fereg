@@ -11,6 +11,7 @@ d License: MIT
 d Distribution-Date: 20261012
 f fereg.ado
 f fereg_p.ado
+f fereg_estat.ado
 f fereg.sthlp
 f feppml.ado
 f feppml_p.ado

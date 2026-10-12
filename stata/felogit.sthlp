@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0}{...}
+{* *! version 0.2.1}{...}
 {vieweralsosee "[R] logit" "help logit"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
@@ -172,6 +172,11 @@ and {cmd:e(ll_0)} is the log likelihood of the constant-only model on the estima
 {phang2}o {cmd:e(ic)} counts IRLS iterations, not Newton-Raphson iterations.{p_end}
 {phang2}o Saved fixed effects are normalized: every intercept fixed effect other than the first (the one with the
 most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_end}
+{phang2}o {cmd:e(estat_cmd)} is {cmd:fereg_estat}, which provides {cmd:estat summarize}, {cmd:estat vce} and
+{cmd:estat ic} as after {cmd:ppmlhdfe}; {cmd:estat ic} counts e(df_m) + 1 parameters (the regressors and
+{cmd:_cons}, not the fixed effects), so its AIC and BIC differ from those after {cmd:logit} with dummies.
+{cmd:logit}'s {cmd:estat} subcommands {cmd:classification}, {cmd:gof}, {cmd:lroc} and {cmd:lsens} are not
+available.{p_end}
 
 
 {marker postestimation}{...}
@@ -193,6 +198,7 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {pstd}
 {opt pr}, {opt xbd}, {opt d} and {opt score} require {opt d()} when fixed effects are absorbed.
 {help test}, {help lincom}, {help nlcom}, {help estimates} and {help margins} work as after {cmd:logit}.
+{cmd:estat summarize}, {cmd:estat vce} and {cmd:estat ic} are available (see {help felogit##differences:differences}).
 
 
 {marker examples}{...}
@@ -217,6 +223,8 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {synopt:{cmd:e(N_full)}}number of observations, including dropped singleton and separated observations{p_end}
 {synopt:{cmd:e(num_singletons)}}number of dropped singleton observations{p_end}
 {synopt:{cmd:e(num_separated)}}number of observations dropped by the separation rules{p_end}
+{synopt:{cmd:e(separation_complete)}}1 if every requested separation check finished; 0 if a check stopped before
+certifying its result (a note is printed){p_end}
 {synopt:{cmd:e(drop_singletons)}}1 if singletons were dropped{p_end}
 {synopt:{cmd:e(rank)}}rank of e(V){p_end}
 {synopt:{cmd:e(df_m)}}model degrees of freedom{p_end}
@@ -262,6 +270,7 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {synopt:{cmd:e(wtype)}}weight type{p_end}
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
 {synopt:{cmd:e(predict)}}{cmd:felogit_p}{p_end}
+{synopt:{cmd:e(estat_cmd)}}{cmd:fereg_estat}{p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsok)}}predictions allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
