@@ -4,13 +4,14 @@
 //!   (`glm_p_*.json`): N, sample, separated/singleton counts, b (rtol 1e-7), V (rtol 1e-6),
 //!   ll, ll_0, deviance, r2_p, chi2, dof, and d / saved-FE sums where requested.
 //! - Logit: Stata `logit y x i.fe1 i.fe2` (`glm_l_*.json`): N, sample, β and V_ββ, ll, ll_0, r2_p.
+//! - fixest convention and [`GlmParts`]: fixest 0.14.2 (`glm_fx_*.json`, see that section).
 //!
 //! Every test runs over [`KINDS`]. `cargo test --test glm -- --nocapture` prints the largest
 //! observed relative error per fixture.
 
 use fereg_core::{
-    AbsorbTerm, AbsorberKind, Ctx, EstResult, Family, FactorValues, GlmOptions, Guess, Layout, Prep, RfError, Separation, Session, Spec, Vce,
-    WeightKind,
+    AbsorbTerm, AbsorberKind, Ctx, EstResult, Family, FactorValues, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Prep, RfError, Separation,
+    Session, Spec, Vce, WeightKind,
 };
 
 const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense, AbsorberKind::Fast];
@@ -789,4 +790,214 @@ fn large_problems_are_thread_count_invariant() {
             assert_eq!(scalar(&a, "converged"), 1.0);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// fixest convention ([`GlmConvention::Fixest`]) and [`GlmParts`]: ground truth from fixest 0.14.2
+// `fepois` / `feglm(family = "logit")` at glm.tol = 1e-12 (`tests/data/gen_glm_parts_fixtures.R`,
+// data `glm_parts.csv`, fixtures `glm_fx_*.json`): sample, coefficients (rtol 1e-7), deviance,
+// log-likelihood, sumFE, IRLS iterations, and the inverse Hessian inv(xt'·diag(w)·xt) (rtol 1e-7
+// vs fixest's cov.iid and vcov(iid)·(n − K)/(n − 1); 1e-6 vs the one at the converged estimate).
+
+const FX_MODELS: &[&str] = &["fe1", "fe2", "fe3", "w", "off", "w_off", "nofe", "nofe_w_off"];
+
+struct FxRun {
+    session: Session,
+    res: EstResult,
+    parts: Option<GlmParts>,
+}
+
+/// Fixture model `fx` with every FE term saved, fixest-style sample rules (singletons and the
+/// perfect-fit rule) and no extra separation checks; `conv` = None runs plain [`Session::glm`].
+fn run_fx(fx: &J, csv: &Csv, kind: AbsorberKind, maxiter: usize, conv: Option<GlmConvention>) -> Result<FxRun, RfError> {
+    let family = if fx.get("family").unwrap().str() == "poisson" { Family::Poisson } else { Family::Logit };
+    let fe: Vec<&str> = match fx.get("fe").unwrap() {
+        J::Arr(v) => v.iter().map(J::str).collect(),
+        _ => panic!("fe"),
+    };
+    let fcols: Vec<&[f64]> = fe.iter().map(|f| csv.col(f)).collect();
+    let y = csv.col(fx.get("y").unwrap().str());
+    let weighted = fx.get("weights").unwrap().num() == 1.0;
+    let prep = Prep {
+        n: y.len(),
+        factors: fcols.iter().map(|c| FactorValues::Num(c)).collect(),
+        absorb: (0..fe.len()).map(|q| AbsorbTerm { factors: vec![q], intercept: true, slopes: vec![], save: true }).collect(),
+        slope_vars: vec![],
+        weights: weighted.then(|| csv.col("w")),
+        weight_kind: if weighted { WeightKind::Aweight } else { WeightKind::None },
+        vce: Vce::Unadjusted,
+        drop_singletons: true,
+        family,
+        y_for_sep: Some(y),
+        sep_fe: true,
+    };
+    let ctx = Ctx::quiet(3);
+    let mut session = Session::prepare_with(prep, &ctx, kind)?;
+    let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
+    let kc = |v: &[f64]| -> Vec<f64> { kept.iter().map(|&i| v[i]).collect() };
+    let cols = [kc(y), kc(csv.col("x1")), kc(csv.col("x2"))];
+    let refs: Vec<&[f64]> = cols.iter().map(Vec::as_slice).collect();
+    let rows = session.gather(&refs, &ctx)?;
+    let offset = if fx.get("offset").unwrap().num() == 1.0 { Some(session.gather(&[&kc(csv.col("off"))], &ctx)?) } else { None };
+    let opts = GlmOptions {
+        family,
+        tol: 1e-12,
+        maxiter,
+        itol: 1e-12,
+        separation: Separation::default(),
+        guess: Guess::Simple,
+        log: false,
+    };
+    let (res, parts) = match conv {
+        Some(c) => session.glm_parts(rows, &Layout::ols(2), offset, &Spec::default(), &opts, c, &ctx).map(|(r, p)| (r, Some(p)))?,
+        None => (session.glm(rows, &Layout::ols(2), offset, &Spec::default(), &opts, &ctx)?, None),
+    };
+    Ok(FxRun { session, res, parts })
+}
+
+/// Inverse of a small symmetric positive definite matrix (Gauss–Jordan).
+fn inv_small(a: &[f64], k: usize) -> Vec<f64> {
+    let mut m = a.to_vec();
+    let mut inv: Vec<f64> = (0..k * k).map(|i| f64::from(u8::from(i / k == i % k))).collect();
+    for c in 0..k {
+        let p = m[c * k + c];
+        for j in 0..k {
+            m[c * k + j] /= p;
+            inv[c * k + j] /= p;
+        }
+        for r in (0..k).filter(|&r| r != c) {
+            let f = m[r * k + c];
+            for j in 0..k {
+                m[r * k + j] -= f * m[c * k + j];
+                inv[r * k + j] -= f * inv[c * k + j];
+            }
+        }
+    }
+    inv
+}
+
+fn check_fx(name: &str, kind: AbsorberKind) {
+    let fx = fixture(&format!("fx_{name}"));
+    let csv = Csv::read("parts");
+    let FxRun { session, res, parts } = run_fx(&fx, &csv, kind, 25, Some(GlmConvention::Fixest)).unwrap();
+    let parts = parts.unwrap();
+    let mut e = Errs::default();
+    let n = session.n();
+    assert!(parts.converged, "{name}: not converged in {} iterations", parts.iterations);
+    assert_eq!(n as f64, fx.get("nobs").unwrap().num(), "{name}: nobs");
+    let obs: Vec<f64> = session.kept_index().iter().map(|&i| f64::from(i) + 1.0).collect();
+    assert_eq!(obs, fx.get("obs").unwrap().nums(), "{name}: sample");
+    assert_eq!(parts.status, vec![0, 0]);
+    assert_eq!(parts.k, 2);
+    for v in [&parts.eta, &parts.mu, &parts.w, &parts.fe_sum, &parts.working_resid] {
+        assert_eq!(v.len(), n);
+    }
+    assert_eq!(parts.xt.len(), 2 * n);
+
+    // Coefficients (fixest reports `(Intercept)` first when there is no FE).
+    let want = fx.get("coef").unwrap().nums();
+    let nofe = want.len() == 3;
+    if nofe {
+        e.scalar("cons", parts.cons, want[0], 1e-7);
+    }
+    e.vec("coef", &parts.coef, &want[want.len() - 2..], 1e-7);
+    e.scalar("deviance", parts.deviance, fx.get("deviance").unwrap().num(), 1e-9);
+    let poisson = fx.get("family").unwrap().str() == "poisson";
+    let weighted = fx.get("weights").unwrap().num() == 1.0;
+    // fixest's weighted logit log-likelihood treats the weights as binomial trial counts
+    // (binomial()$aic with rounded weights); ours is Σ w·[y ln μ + (1 − y) ln(1 − μ)].
+    if poisson || !weighted {
+        e.scalar("ll", scalar(&res, "ll"), fx.get("loglik").unwrap().num(), 1e-9);
+    }
+
+    // η = x'β + fe_sum + offset, and the saved FE slots add up to fe_sum.
+    let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
+    let has_off = fx.get("offset").unwrap().num() == 1.0;
+    let rebuilt: Vec<f64> = kept
+        .iter()
+        .zip(&parts.fe_sum)
+        .map(|(&i, f)| f + parts.coef[0] * csv.col("x1")[i] + parts.coef[1] * csv.col("x2")[i] + if has_off { csv.col("off")[i] } else { 0.0 })
+        .collect();
+    e.vec_scaled("eta identity", &rebuilt, &parts.eta, 1e-10);
+    if nofe {
+        assert!(parts.fe.is_empty());
+        e.vec_scaled("fe_sum = cons", &parts.fe_sum, &vec![parts.cons; n], 1e-9);
+    } else {
+        let sum: Vec<f64> = (0..n).map(|i| parts.fe.iter().map(|s| s[i]).sum()).collect();
+        e.vec_scaled("sum of fe slots", &sum, &parts.fe_sum, 1e-9);
+        e.vec_scaled("sumFE", &parts.fe_sum, &fx.get("sumFE").unwrap().nums(), 1e-7);
+    }
+    let mu_from_eta: Vec<f64> = parts.eta.iter().map(|&t| if poisson { t.exp() } else { 1.0 / (1.0 + (-t).exp()) }).collect();
+    e.vec("mu", &parts.mu, &mu_from_eta, 1e-12);
+
+    // inv(xt'·diag(w)·xt) is fixest's cov.iid (slope block), i.e. vcov(iid)/((n−1)/(n−K)).
+    let mut h = [0.0; 4];
+    for i in 0..n {
+        let (a, b) = (parts.xt[2 * i], parts.xt[2 * i + 1]);
+        h[0] += parts.w[i] * a * a;
+        h[1] += parts.w[i] * a * b;
+        h[3] += parts.w[i] * b * b;
+    }
+    h[2] = h[1];
+    let inv = inv_small(&h, 2);
+    let slope = |m: &[f64]| -> Vec<f64> {
+        let k = if nofe { 3 } else { 2 };
+        let o = k - 2;
+        vec![m[o * k + o], m[o * k + o + 1], m[(o + 1) * k + o], m[(o + 1) * k + o + 1]]
+    };
+    e.vec("cov.iid", &inv, &slope(&fx.get("cov_iid").unwrap().nums()), 1e-7);
+    let nf = n as f64;
+    let adj = (nf - 1.0) / (nf - fx.get("nparams").unwrap().num());
+    let v_iid: Vec<f64> = slope(&fx.get("vcov_iid").unwrap().nums()).iter().map(|v| v / adj).collect();
+    e.vec("vcov iid / adj", &inv, &v_iid, 1e-7);
+    // Like fixest, `w` comes from the start of the last iteration, whose μ is accurate to about
+    // sqrt(glm.tol): 3e-7 relative from the Hessian at the converged estimate on the logits.
+    e.vec("inverse Hessian at the estimate", &inv, &slope(&fx.get("cov_iid_conv").unwrap().nums()), 1e-6);
+    // Same starting values and stopping rule as fixest: the same IRLS path, up to one iteration.
+    let fx_iter = fx.get("iterations").unwrap().num();
+    assert!((parts.iterations as f64 - fx_iter).abs() <= 1.0, "{name}: {} IRLS iterations, fixest {fx_iter}", parts.iterations);
+    e.report(&format!("fx_{name} {kind:?} it={}/{fx_iter}", parts.iterations));
+}
+
+#[test]
+fn fixest_convention_matches_fixest() {
+    let mut failed = Vec::new();
+    for fam in ["p", "l"] {
+        for m in FX_MODELS {
+            let name = format!("{fam}_{m}");
+            for &kind in KINDS {
+                if std::panic::catch_unwind(|| check_fx(&name, kind)).is_err() {
+                    failed.push(format!("{name} {kind:?}"));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
+}
+
+/// Reaching the IRLS cap is a note with `converged` = false, not an error.
+#[test]
+fn fixest_convention_reports_non_convergence() {
+    let fx = fixture("fx_p_fe2");
+    let csv = Csv::read("parts");
+    let FxRun { res, parts, .. } = run_fx(&fx, &csv, AbsorberKind::Fast, 2, Some(GlmConvention::Fixest)).unwrap();
+    let parts = parts.unwrap();
+    assert!(!parts.converged);
+    assert_eq!(parts.iterations, 2);
+    assert_eq!(scalar(&res, "converged"), 0.0);
+    assert!(res.notes.iter().any(|s| s.starts_with("Absence of convergence")), "{:?}", res.notes);
+}
+
+/// `glm_parts` under the ppmlhdfe convention returns exactly `glm`'s results, and its parts agree.
+#[test]
+fn parts_do_not_change_ppmlhdfe_results() {
+    let fx = fixture("fx_p_w_off");
+    let csv = Csv::read("parts");
+    let plain = run_fx(&fx, &csv, AbsorberKind::Fast, 10_000, None).unwrap();
+    let with = run_fx(&fx, &csv, AbsorberKind::Fast, 10_000, Some(GlmConvention::Ppmlhdfe)).unwrap();
+    assert_eq!(plain.res, with.res);
+    let parts = with.parts.unwrap();
+    assert_eq!(parts.coef, mat(&with.res, "b")[..2]);
+    assert_eq!(parts.cons, mat(&with.res, "b")[2]);
+    assert!(parts.converged);
 }
