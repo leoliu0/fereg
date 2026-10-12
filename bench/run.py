@@ -7,13 +7,17 @@ burn-in and 3 timed runs (1 when the burn-in exceeds 60 s) and prints one
 (keyed by config, T, tool; later runs replace earlier ones) and the whole CSV is
 rendered into ``RESULTS.md``.
 
-Gate (plan 8.5): PASS iff the fereg median is below the median of every
+Gates (plan 8.5). Stata: PASS iff the fereg median is below the median of every
 competitor that finished; a competitor timeout counts as slower when fereg
 finished. Competitor errors are excluded from the comparison and shown as such.
+The fereg Python (``fereg_py``) and R (``fereg_r``) packages have their own gates
+with the same rule against fixest, pyfixest MAP and pyfixest LSMR (LANG_GATES);
+they never enter the Stata gate.
 
 Examples:
   uv run python run.py --grid smoke --tools reghdfe,fixest
   uv run python run.py --grid gate --groups G1,G4 --threads 16
+  uv run python run.py --grid gate --tools fereg_py,fereg_r --missing
   uv run python run.py --report-only
 """
 
@@ -44,9 +48,11 @@ RAW_DIR = RESULTS_DIR / "raw"
 RESULTS_CSV = RESULTS_DIR / "results.csv"
 RESULTS_MD = HERE / "RESULTS.md"
 
-ALL_TOOLS = ["fereg", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"]
+ALL_TOOLS = ["fereg", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr",
+             "fereg_py", "fereg_r"]
 STATA_TOOLS = {"fereg", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe"}
-# Tools per group (plan 8.4 table); fereg is the candidate in every group.
+R_TOOLS = {"fixest": "run_fixest.R", "fereg_r": "run_fereg.R"}  # tool -> Rscript runner (CSV input)
+# Tools per group of the Stata gate (plan 8.4 table); fereg is the candidate in every group.
 GROUP_TOOLS = {
     "G1": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
     "G2": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
@@ -55,6 +61,12 @@ GROUP_TOOLS = {
     "G5": ["fereg", "ppmlhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
     "G6": ["fereg", "fixest", "pyfixest_map", "pyfixest_lsmr"],
     "G7": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+}
+# Language-package gates: candidate -> (section title, competitors, coefficient reference).
+# Both packages run in every group (fixest syntax covers IV, Poisson, logit and fe[x] slopes).
+LANG_GATES = {
+    "fereg_py": ("Python package `fereg`", ["pyfixest_map", "pyfixest_lsmr", "fixest"], "fixest"),
+    "fereg_r": ("R package `fereg`", ["fixest", "pyfixest_map", "pyfixest_lsmr"], "fixest"),
 }
 GROUP_TITLES = {
     "G1": "G1 OLS (fixest DGP)",
@@ -284,8 +296,9 @@ def run_job(job: Job, reps: int, timeout: float) -> None:
         shutil.rmtree(jd)
     jd.mkdir(parents=True)
     env = thread_env(T)
+    r_tool = job.tool in R_TOOLS
     paths = gen_data.ensure(c.dataset, ("dta",) if job.tool in STATA_TOOLS else
-                            ("csv",) if job.tool == "fixest" else ("parquet",))
+                            ("csv",) if r_tool else ("parquet",))
     if job.tool in STATA_TOOLS:
         out = jd / "results.txt"
         do = jd / "job.do"
@@ -304,14 +317,16 @@ def run_job(job: Job, reps: int, timeout: float) -> None:
         stata_log = jd / "job.log"
         tail = stata_log.read_text(errors="replace")[-2000:] if stata_log.exists() else log_text[-2000:]
     else:
-        if job.tool == "fixest":
-            argv = ["Rscript", str(HERE / "run_fixest.R"), f"data={paths['csv']}"]
+        if r_tool:
+            argv = ["Rscript", str(HERE / R_TOOLS[job.tool]), f"data={paths['csv']}"]
+        elif job.tool == "fereg_py":
+            argv = [sys.executable, str(HERE / "run_fereg_py.py"), f"data={paths['parquet']}"]
         else:
             argv = [sys.executable, str(HERE / "run_pyfixest.py"), f"data={paths['parquet']}",
                     f"demeaner={job.tool.split('_', 1)[1]}"]
         argv += [f"fml={r_formula(c)}", f"method={method(c)}", f"vcov={c.vcov}", f"threads={T}", f"reps={reps}"]
         if c.fixef_maxiter:
-            argv.append(f"{'fixef_iter' if job.tool == 'fixest' else 'fixef_maxiter'}={c.fixef_maxiter}")
+            argv.append(f"{'fixef_iter' if r_tool else 'fixef_maxiter'}={c.fixef_maxiter}")
         text, timed_out = _run_proc(argv, jd, env, timeout, jd / "stdout.txt")
         tail = text[-2000:]
 
@@ -397,19 +412,89 @@ def _gap(a: dict, ref: dict) -> float | None:
     return max(abs(a[k] - ref[k]) / max(abs(ref[k]), 1e-300) for k in common)
 
 
-def gate(rows_by_tool: dict[str, dict]) -> tuple[str, str]:
-    """(ratio fereg/best finished competitor, PASS/FAIL/n/a)."""
-    rf = rows_by_tool.get("fereg")
-    comps = {t: r for t, r in rows_by_tool.items() if t != "fereg"}
-    finished = [float(r["median_s"]) for r in comps.values() if r["status"] == "ok"]
+def gate(rows_by_tool: dict[str, dict], cand: str = "fereg", comps: list[str] | None = None) -> tuple[str, str]:
+    """(ratio cand/best finished competitor, PASS/FAIL/n/a); comps defaults to every other tool of the row."""
+    rf = rows_by_tool.get(cand)
+    comps_r = {t: r for t, r in rows_by_tool.items() if t != cand and (comps is None or t in comps)}
+    finished = [float(r["median_s"]) for r in comps_r.values() if r["status"] == "ok"]
     best = min(finished) if finished else None
-    if rf is None or not comps:
+    if rf is None or not comps_r:
         return "", "n/a"
     if rf["status"] != "ok":
         return "", "FAIL"
     t = float(rf["median_s"])
     ratio = f"{t / best:.2f}" if best else ""
     return ratio, ("PASS" if best is None or t < best else "FAIL")
+
+
+def _gap_line(cfg: str, T: str, byt: dict[str, dict], tools: list[str], refs: list[str]) -> str | None:
+    """Coefficient-gap row versus the first tool of ``refs`` that has coefficients in the row."""
+    ref_tool = next((t for t in refs if byt.get(t, {}).get("coefs")), None)
+    if ref_tool is None:
+        return None
+    ref_c = json.loads(byt[ref_tool]["coefs"])
+    gaps = []
+    for t in tools:
+        r = byt.get(t)
+        gp = _gap(json.loads(r["coefs"]), ref_c) if r and r["coefs"] and t != ref_tool else None
+        gaps.append("" if gp is None else f"{gp:.1e}")
+    return f"| `{cfg}` | {T} | {ref_tool} | " + " | ".join(gaps) + " |"
+
+
+def _gate_section(lines: list[str], by_group: dict, cand: str, comps: dict[str, list[str]] | None,
+                  refs: list[str], head: str) -> tuple[int, int, list[tuple[str, str, str, str]]]:
+    """Append one table per group for ``cand``; returns (n_pass, n_fail, [(group, config, T, ratio)] of FAIL rows).
+
+    ``comps`` maps group -> competitor list (None: the Stata GROUP_TOOLS, every other tool of the row).
+    """
+    n_pass = n_fail = 0
+    fails = []
+    for g in sorted(by_group):
+        cols = [cand] + (comps[g] if comps is not None else [t for t in GROUP_TOOLS[g] if t != cand])
+        cells = {k: {t: r for t, r in v.items() if t in cols} for k, v in by_group[g].items()}
+        cells = {k: v for k, v in cells.items() if v}
+        if not cells:
+            continue
+        tools = [t for t in cols if any(t in v for v in cells.values())]
+        lines += [f"{head} {GROUP_TITLES[g]}", ""]
+        lines.append("| config | T | " + " | ".join(tools) + " | ratio | gate |")
+        lines.append("|---|---:|" + "---:|" * len(tools) + "---:|---|")
+        gap_lines = []
+        for (cfg, T), byt in sorted(cells.items(), key=lambda kv: (kv[0][0], -int(kv[0][1]))):
+            ratio, verdict = gate(byt, cand, None if comps is None else comps[g])
+            n_pass += verdict == "PASS"
+            n_fail += verdict == "FAIL"
+            if verdict == "FAIL":
+                fails.append((g, cfg, T, ratio))
+            lines.append(f"| `{cfg}` | {T} | " + " | ".join(_fmt_t(byt.get(t)) for t in tools)
+                         + f" | {ratio} | {verdict} |")
+            gl = _gap_line(cfg, T, byt, tools, refs)
+            if gl:
+                gap_lines.append(gl)
+        lines.append("")
+        if gap_lines:
+            lines += ["Coefficient gap:", "", "| config | T | vs | " + " | ".join(tools) + " |",
+                      "|---|---:|---|" + "---:|" * len(tools)] + gap_lines + [""]
+    return n_pass, n_fail, fails
+
+
+def _thin_keys(rows: list[dict], margin: float) -> set[tuple[str, str, str]]:
+    """Row keys of gate candidates whose row FAILs or has ratio > 1/margin (see ``--thin``)."""
+    by_cell: dict[tuple[str, str], dict[str, dict]] = {}
+    groups: dict[tuple[str, str], str] = {}
+    for r in rows:
+        by_cell.setdefault((r["config"], str(r["threads"])), {})[r["tool"]] = r
+        groups[(r["config"], str(r["threads"]))] = r["group"]
+    gates = {"fereg": None} | {c: comps for c, (_, comps, _) in LANG_GATES.items()}
+    out = set()
+    for (cfg, T), byt in by_cell.items():
+        for cand, comps in gates.items():
+            if comps is None:  # Stata gate: the group's Stata-gate tools
+                comps = [t for t in GROUP_TOOLS[groups[(cfg, T)]] if t != cand]
+            ratio, verdict = gate(byt, cand, comps)
+            if verdict == "FAIL" or (ratio and float(ratio) > 1 / margin):
+                out.add((cfg, T, cand))
+    return out
 
 
 def write_report(rows: list[dict]) -> None:
@@ -427,35 +512,30 @@ def write_report(rows: list[dict]) -> None:
     by_group: dict[str, dict[tuple[str, str], dict[str, dict]]] = {}
     for r in rows:
         by_group.setdefault(r["group"], {}).setdefault((r["config"], str(r["threads"])), {})[r["tool"]] = r
-    n_pass = n_fail = 0
-    for g in sorted(by_group):
-        cells = by_group[g]
-        tools = [t for t in GROUP_TOOLS[g] if any(t in v for v in cells.values())]
-        lines += [f"## {GROUP_TITLES[g]}", ""]
-        lines.append("| config | T | " + " | ".join(tools) + " | ratio | gate |")
-        lines.append("|---|---:|" + "---:|" * len(tools) + "---:|---|")
-        gap_lines = []
-        for (cfg, T), byt in sorted(cells.items(), key=lambda kv: (kv[0][0], -int(kv[0][1]))):
-            ratio, verdict = gate(byt)
-            n_pass += verdict == "PASS"
-            n_fail += verdict == "FAIL"
-            lines.append(f"| `{cfg}` | {T} | " + " | ".join(_fmt_t(byt.get(t)) for t in tools)
-                         + f" | {ratio} | {verdict} |")
-            ref_tool = "fereg" if byt.get("fereg", {}).get("coefs") else "fixest"
-            ref = byt.get(ref_tool, {}).get("coefs")
-            if ref:
-                ref_c = json.loads(ref)
-                gaps = []
-                for t in tools:
-                    r = byt.get(t)
-                    gp = _gap(json.loads(r["coefs"]), ref_c) if r and r["coefs"] and t != ref_tool else None
-                    gaps.append("" if gp is None else f"{gp:.1e}")
-                gap_lines.append(f"| `{cfg}` | {T} | {ref_tool} | " + " | ".join(gaps) + " |")
-        lines.append("")
-        if gap_lines:
-            lines += ["Coefficient gap:", "", "| config | T | vs | " + " | ".join(tools) + " |",
-                      "|---|---:|---|" + "---:|" * len(tools)] + gap_lines + [""]
-    lines.insert(9, f"**Gate summary:** {n_pass} PASS, {n_fail} FAIL.\n")
+    n_pass, n_fail, _ = _gate_section(lines, by_group, "fereg", None, ["fereg", "fixest"], "##")
+    summary = [f"**Gate summary:** {n_pass} PASS, {n_fail} FAIL.", ""]
+
+    for cand, (title, comps, ref) in LANG_GATES.items():
+        if not any(r["tool"] == cand for r in rows):
+            continue
+        sec = [
+            f"# {title} gate",
+            "",
+            f"`ratio` = {cand} / fastest finished competitor among {', '.join(comps)}. Gate: PASS iff {cand} is",
+            "faster than every one of them that finished (a timeout counts as slower; errors and `unsupported`",
+            f"are excluded). Coefficient gap: max relative difference versus {ref} (versus the Stata fereg",
+            f"when {ref} has no coefficients for the row).",
+            "",
+        ]
+        body: list[str] = []
+        p, f, fails = _gate_section(body, by_group, cand, {g: comps for g in GROUP_TOOLS}, [ref, "fereg"], "##")
+        sec += [f"**{cand} gate summary:** {p} PASS, {f} FAIL.", ""]
+        if fails:
+            sec += ["FAIL rows:", "", "| group | config | T | ratio |", "|---|---|---:|---:|"]
+            sec += [f"| {g} | `{cfg}` | {T} | {ratio or 'n/a'} |" for g, cfg, T, ratio in fails] + [""]
+        lines += sec + body
+        summary += [f"**{cand} gate summary:** {p} PASS, {f} FAIL (section below).", ""]
+    lines[9:9] = summary
     RESULTS_MD.write_text("\n".join(lines))
 
 
@@ -472,6 +552,9 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--dry-run", action="store_true", help="list the jobs without running them")
     ap.add_argument("--missing", action="store_true", help="skip jobs that already have a row in results.csv (resume)")
+    ap.add_argument("--thin", type=float, default=None, metavar="MARGIN",
+                    help="re-run only gate candidates (fereg, fereg_py, fereg_r) whose row FAILs or wins by less "
+                         "than MARGIN (e.g. 1.2: ratio above 1/1.2); competitors are never selected")
     ap.add_argument("--report-only", action="store_true", help="re-render RESULTS.md from results.csv")
     a = ap.parse_args()
 
@@ -492,12 +575,15 @@ def main() -> None:
         for T in ts:
             if T not in threads:
                 continue
-            for tool in GROUP_TOOLS[cfg.group]:
+            for tool in GROUP_TOOLS[cfg.group] + list(LANG_GATES):
                 if tool in tools:
                     jobs.append(Job(tool, cfg, T))
     if a.missing:
         done = {_row_key(r) for r in load_results()}
         jobs = [j for j in jobs if _row_key(job_row(j)) not in done]
+    if a.thin is not None:
+        thin = _thin_keys(load_results(), a.thin)
+        jobs = [j for j in jobs if _row_key(job_row(j)) in thin]
     if a.dry_run:
         for j in jobs:
             print(f"{j.cfg.group} T={j.threads:<2} {j.tool:<14} {j.cfg.key}")

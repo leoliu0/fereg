@@ -172,6 +172,144 @@ against `reghdfe ... tol(1e-12)` (`rf_compare_e`, b 1e-7, V 1e-6) on the simple 
 1e5 data with 1 and 2 regressors, with bitwise-identical b at 1 and 16 threads. Gate: 273 PASS,
 0 FAIL.
 
+## 2026-10-12: Python and R packages (`fereg_py`, `fereg_r`)
+
+Gate run: `uv run python run.py --grid gate --tools fereg_py,fereg_r --missing` (504 jobs, all
+`ok`). It ran while other agents were compiling (load average 7–12). The 41 FAIL or < 1.2× rows
+were then re-run on a quiet machine with `--thin 1.2`. G5/G6 were re-run in full after the
+packages were rebuilt at `98abc75` (core-glm merge; the OLS/IV/slopes paths are unchanged since
+`5cf856d`).
+
+Under load the first pass showed spurious T=16 FAILs. The quiet re-run cleared them:
+
+| row | T | first pass | quiet re-run |
+|---|---:|---:|---:|
+| R `akm_sorting_1` | 16 | 0.656 | 0.134 |
+| R `akm_scale_1` | 16 | 0.049 | 0.010 |
+| R 1e7 3 FEs | 16 | 1.578 | 1.101 |
+| R G5 1e5 k=5 | 16 | 0.101 | 0.022 |
+| Python `akm_sorting_3` | 1 | 1.117 | 0.482 |
+
+Result: `fereg_py` 265 PASS / 8 FAIL; `fereg_r` 268 PASS / 5 FAIL. Each remaining FAIL has one of
+the two causes below. Neither is a solver problem. Coefficient gaps:
+- versus the Stata `fereg`, the largest relative gap is 9.4e-9 (Python) and 3.0e-8 (R);
+- versus fixest the median gap is about 1e-13 and the largest is 5.6e-5. All 20 rows above 1e-6
+  are difficult 3-FE or Poisson rows, where fixest itself sits 5.6e-5 from the Stata `fereg`
+  (fixest's looser `fixef.tol`).
+
+Profiling scripts timed the package call end to end and the `_core.fit` / `fereg_fit` Rust call
+separately, as medians of 3–5 runs after a warm-up. Overrides of the `_core.fit` arguments
+isolated each cause.
+
+### P1. R: fixest FE normalization at every estimation (all 5 R FAILs)
+
+The R binding always estimates with `keep_fixef = TRUE` and `FixefNorm::Fixest`. In the core,
+`fit/fixef.rs::get_fe_gnl` is fully serial:
+- a CSR row list per term;
+- a per-row `BinaryHeap` with lazy deletion for the "most determined row" buckets, which is
+  O(N log N);
+- a serial per-row FE-sum pass.
+
+fixest's `feols` computes no FE values; `fixef()` recovers them on demand. Python passes the same
+core with `fixef_norm` overridden. Rust call in seconds:
+
+| row | T | Python (minnorm) | Python, `keep_fixef=False` | Python, `fixef_norm=fixest` | R | fixest (gate) |
+|---|---:|---:|---:|---:|---:|---:|
+| 1e5 3 FEs `y~x1` | 1 | 0.0068 | 0.0057 | 0.0098 | 0.011 | 0.011 |
+| 1e6 3 FEs `y~x1` | 1 | 0.0744 | 0.0605 | 0.1207 | 0.124 | 0.087 |
+| 1e7 3 FEs `y~x1` | 16 | 0.362 | 0.230 | 1.074 | 1.105 | 1.268 |
+| `akm_mobility_1` 1e6 | 1 | 0.1215 | 0.1059 | 0.1710 | 0.177 | 0.146 |
+| `akm_mobility_1` 1e6 | 16 | 0.0552 | 0.0422 | 0.1070 | 0.108 | 0.106 |
+| G7 1e6 `firm_id[x2]` | 1 | 0.1118 | 0.0988 | 0.1602 | 0.162 | 0.166 |
+
+With `fixef_norm=fixest` Python reproduces R's time on every row. Without FE values, every one of
+these rows passes.
+
+Proposals (R package and core owners):
+1. **Lazy FE values.** Estimate with `keep_fixef = FALSE`. Compute the values in
+   `fixef()`, in `predict(newdata=)` and in `ssc(K.exact = TRUE)` (the references) from the
+   retained `FitState`, as fixest does. Expected effect:
+   - R time drops to the `keep_fixef=False` column: 1e7 3 FEs 1.10 → about 0.23 s, and
+     1e6 3 FEs T=1 0.124 → about 0.061 s (fixest 0.087);
+   - this clears all 5 R FAILs.
+
+   pyfixest's `fixef()` is lazy too. Doing the same in Python saves its minnorm cost: 10–25%,
+   e.g. 0.362 → 0.230 s at 1e7 3 FEs and 0.074 → 0.061 s at 1e6.
+2. **A faster `get_fe_gnl`**, which is still needed when `fixef()` is called:
+   - replace each `BinaryHeap` bucket with a two-level bitset (one u64 summary word per 64
+     words), which gives O(1) insert, delete and find-min for "lowest row with r determined
+     terms";
+   - build the per-term CSR lists with the parallel counting sort already used by `structure.rs`;
+   - compute the per-row FE sum in parallel.
+
+### P2. R: copies of N-length outputs (about 15–20 ms at 1e7)
+
+`output()` copies `resid` and `fitted` into new R vectors (plus `eta` and `irls_weights` for GLMs).
+Each copy is serial and page-faults on first write. Python moves each `Vec` into numpy with no
+copy. Evidence at 1e7 `y~x1|indiv_id+year`, T=16:
+- R: 0.218 s full vs 0.199 s `lean = TRUE`;
+- Python: full and lean are equal (0.230 vs 0.230 at 3 FEs).
+
+Proposals (pick one):
+- allocate the R vectors on the main thread (`Doubles::new(n)`) and fill them inside the pool
+  with a parallel chunked copy (worker threads only write raw memory);
+- let the core write residuals into a caller-provided buffer;
+- return only `resid` and derive `fitted = y − resid` lazily in R.
+
+### P3. Python logit (all 8 Python FAILs): pyfixest's sample, not speed
+
+All 8 rows are G6 at T=1, where `fereg_py` is 1.0–1.8× fixest. At T=16 every G6 row passes.
+`fereg_py` reproduces pyfixest's `fe` separation check, which drops all-zero FE groups but keeps
+all-one groups. On those groups η diverges, and IRLS iterates until their deviance change falls
+under `glm_tol`. fixest, `fereg_r` and the Stata `fereg` drop the groups.
+
+Evidence on `fx_simple_1000000 binary_y~x1|indiv_id+year`, T=1 (Rust call):
+
+| run | N | IRLS iterations | time (s) | per iteration (s) |
+|---|---:|---:|---:|---:|
+| pyfixest flavor (`fereg_py`, matches pyfixest) | 972,820 | 14 | 0.719 | 0.051 |
+| fixest flavor (`fereg_r`, matches fixest) | 964,110 | 5 | 0.343 | 0.069 |
+
+At 1e5 the counts are 15 vs 5 iterations, 0.078 vs 0.036 s. The two flavors' β differ by 1.4e-9
+relative. Against pyfixest itself (MAP 1.5 s, LSMR 6.2 s on this row) `fereg_py` is 2–9× faster.
+
+Proposal (Python package and core owners): under the pyfixest flavor, exclude all-one (and
+all-zero) FE groups from the IRLS iterations, as fixest does. Their linear predictor diverges, so
+in the limit they contribute nothing to the score of β. pyfixest's reported N, df and statistics
+stay, and β moves by about 1e-9 relative to pyfixest. Expected effect: G6 T=1 back to the fixest
+flavor's time (about 0.34 s here vs fixest 0.396), which clears all 8 rows.
+
+This changes numbers at the 1e-9 level. If parity with pyfixest must stay bitwise-close, keep the
+current behaviour and record these rows as convention-bound.
+
+### The R-vs-Python Rust call: 0.222 vs 0.161 s (1e7, `y~x1|indiv_id+year`, T=16)
+
+Reproduced: R 0.218 s, Python 0.162 s. Breakdown:
+
+| step | Rust call (s) |
+|---|---:|
+| Python default (pyfixest flavor, minnorm FE values, zero-copy outputs) | 0.162 |
+| Python with `fixef_norm=fixest` (R's FE normalization, P1) | 0.2065 |
+| R `lean = TRUE` (no resid/fitted copies; FE values still computed) | 0.199 |
+| R full (adds the resid/fitted copies, P2) | 0.218 |
+
+So the gap is about 45 ms of fixest FE normalization plus about 15–20 ms of output copies.
+
+Excluded:
+- **Build profile and flags.**
+  - Both crates build with opt-level 3, fat LTO, 1 codegen unit, and the same dependency versions
+    (faer 0.24.4, rayon 1.12.0, pulp 0.22.3, approx-chol 0.6.0).
+  - The in-place `R CMD INSTALL r/fereg` build uses the repository `.cargo/config.toml`
+    (x86-64-v2): 182 SSE4.x/POPCNT instructions in `fereg.so`, 177 in the Python `_core`.
+  - A tarball install (`R CMD build` + `R CMD INSTALL`, i.e. CRAN or r-universe) builds outside the
+    repository for baseline x86-64: 0 such instructions. It times the same: 0.218 vs 0.218 s
+    (2 FEs, 1e7), 1.064 vs 1.079 s (3 FEs, 1e7), 0.040 vs 0.039 s (2 FEs, 1e6, T=1).
+- **Factor column type.** int32, double and factor columns give 1.116 / 1.113 / 1.120 s at 1e7 with
+  3 FEs.
+- **Threads.** Both runners pass T explicitly.
+- **Data conversion on input.** Inputs are zero-copy in both bindings: R `as_real_slice` /
+  `as_integer_slice`, numpy borrowed slices.
+
 ## Earlier tuning (commit log)
 
 - `0a25c0f`, `738d70f`: one-pass (parallel) sample scan, uninitialized read buffers.

@@ -1,9 +1,10 @@
 [project]
 name = "fereg-bench"
 version = "0.1.0"
-description = "Benchmark harness for fereg vs reghdfe, xhdfe, fixest and pyfixest"
+description = "Benchmark harness for fereg (Stata, Python, R) vs reghdfe, xhdfe, fixest and pyfixest"
 requires-python = ">=3.14"
 dependencies = [
+    "fereg",
     "numpy>=2.5.4",
     "pandas>=3.0.6",
     "pyarrow>=26.0.0",
@@ -12,3 +13,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+# The fereg Python package from this repository, built by maturin (release profile, the
+# repository's .cargo/config.toml). After changing the Rust or Python sources run
+# `uv sync --reinstall-package fereg` to rebuild it.
+[tool.uv.sources]
+fereg = { path = "../python" }
