@@ -6,7 +6,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT"
 authors = ["Leo Liu <auleo.liu@gmail.com>"]
 repository = "https://github.com/leoliu0/fereg"

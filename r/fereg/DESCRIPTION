@@ -1,6 +1,6 @@
 Package: fereg
 Title: Fast Fixed-Effects Estimation with the 'fixest' Interface
-Version: 0.2.0
+Version: 0.2.1
 Authors@R: c(
     person("Leo", "Liu", email = "auleo.liu@gmail.com", role = c("aut", "cre")),
     person("Authors of the dependency Rust crates", role = "ctb",

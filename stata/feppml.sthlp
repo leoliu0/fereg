@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0}{...}
+{* *! version 0.2.1}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
