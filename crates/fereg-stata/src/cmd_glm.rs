@@ -94,15 +94,17 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
         };
         ph.mark(&format!("glm: read {} x {r}", stored.session.n()));
         if sepcheck {
+            // The check drops the separated observations from the session: map its results
+            // through the sample at the call.
+            let kept = io::kept_obs(&stored.session, &stored.obs);
             let chk = stored.session.glm_separation(rows, &lay, offset, &spec, &g, ctx)?;
             ph.mark("glm: separation check");
             let mut res = EstResult::default();
-            res.set_scalar("N", stored.session.n() as f64);
+            res.set_scalar("N", kept.len() as f64);
             res.set_scalar("num_separated", chk.num_separated as f64);
             res.set_scalar("separation_complete", f64::from(u8::from(chk.complete)));
             res.set_scalar("relu_iterations", chk.iterations as f64);
             io::store_scalars_macros(&res)?;
-            let kept = io::kept_obs(&stored.session, &stored.obs);
             if let Some(p) = sep_out {
                 let v: Vec<f64> = chk.separated.iter().map(|&b| f64::from(u8::from(b))).collect();
                 io::store_kept((before_out + p) as i32, &kept, &v)?;

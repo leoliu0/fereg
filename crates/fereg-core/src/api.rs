@@ -301,13 +301,16 @@ pub struct GlmParts {
     pub converged: bool,
 }
 
-/// Result of [`crate::Session::glm_separation`] (ppmlhdfe `tagsep()` / `zvarname()`): the ReLU
-/// separation check on the current sample, without estimation. Vectors are in kept order over
-/// the session sample at the call (the session itself is not changed).
+/// Result of [`crate::Session::glm_separation`] (ppmlhdfe `tagsep()` / `zvarname()`): the
+/// separation check (the `fe` rule unless prepare applied it, and ReLU rounds) on the current
+/// sample, without estimation. Vectors are in kept order over the session sample at the call
+/// (the session is left on the sample without the separated observations).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SeparationCheck {
     pub separated: Vec<bool>,
-    /// Certificate of separation: positive on separated observations, 0 elsewhere.
+    /// Certificate of separation: positive on separated observations, 0 elsewhere. Each value
+    /// comes from the step that separated the observation (the ReLU prediction, or 1 for the
+    /// `fe` rule: the group indicator).
     pub certificate: Vec<f64>,
     pub num_separated: usize,
     /// False when the check stopped without certifying its result.
