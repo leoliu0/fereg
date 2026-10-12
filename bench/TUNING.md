@@ -310,6 +310,59 @@ Excluded:
 - **Data conversion on input.** Inputs are zero-copy in both bindings: R `as_real_slice` /
   `as_integer_slice`, numpy borrowed slices.
 
+### After stage D (`888d8ec`): lazy FE values, parallel output fill, pyfixest-flavor logit
+
+Stage D (`c583aa9`, `c55608f`, `de7a893`, `888d8ec`) implements P1–P3:
+- FE values are computed on demand from the fit state (R `fixef()`/`predict(newdata)`, Python
+  `FitState.fixef`);
+- reference propagation is faster (parallel CSR, bitset min-sets);
+- R fills `resid`/`fitted`/`eta`/weights in parallel;
+- the pyfixest-flavor logit runs IRLS without its diverging all-0/all-1 levels.
+
+Both packages were rebuilt at `888d8ec` (0.2.1). All 546 `fereg_py`/`fereg_r` gate jobs were
+re-run (all `ok`), then the five rows with ratio > 1/1.2 were re-run with `--thin 1.2` on a quiet
+machine. No competitor or Stata row changed.
+
+Result: `fereg_py` 273 PASS / 0 FAIL, `fereg_r` 273 PASS / 0 FAIL. No new FAILs.
+
+The 13 former FAIL rows (T = threads; ratio = candidate / fastest finished competitor):
+
+| tool | row | T | before s | before ratio | after s | after ratio |
+|---|---|---:|---:|---:|---:|---:|
+| py | G6 difficult 1e5 `binary_y~x1` FE2 | 1 | 0.083 | 1.72 | 0.039 | 0.81 |
+| py | G6 difficult 1e5 `binary_y~x1..x5` FE2 | 1 | 0.106 | 1.04 | 0.054 | 0.53 |
+| py | G6 difficult 1e6 `binary_y~x1` FE2 | 1 | 0.729 | 1.81 | 0.362 | 0.90 |
+| py | G6 difficult 1e6 `binary_y~x1..x5` FE2 | 1 | 0.996 | 1.02 | 0.510 | 0.52 |
+| py | G6 simple 1e5 `binary_y~x1` FE2 | 1 | 0.081 | 1.61 | 0.039 | 0.77 |
+| py | G6 simple 1e5 `binary_y~x1` FE3 | 1 | 0.113 | 1.33 | 0.063 | 0.74 |
+| py | G6 simple 1e6 `binary_y~x1` FE2 | 1 | 0.715 | 1.81 | 0.360 | 0.91 |
+| py | G6 simple 1e6 `binary_y~x1` FE3 | 1 | 1.111 | 1.37 | 0.633 | 0.78 |
+| R | G2 `akm_mobility_1` 1e6 | 1 | 0.176 | 1.21 | 0.110 | 0.75 |
+| R | G2 `akm_mobility_1` 1e6 | 16 | 0.111 | 1.05 | 0.045 | 0.42 |
+| R | G1 simple 1e5 `y~x1` FE3 | 1 | 0.013 | 1.18 | 0.008 | 0.73 |
+| R | G1 simple 1e6 `y~x1` FE3 | 1 | 0.125 | 1.44 | 0.066 | 0.76 |
+| R | G7 simple 1e6 `firm_id[x2]` | 1 | 0.170 | 1.02 | 0.105 | 0.63 |
+
+Python logit now keeps pyfixest's sample (N = 972,820 on simple 1e6 FE2) and reaches the fixest
+flavor's β (1.2158325747) in the same time as R. Its gap to pyfixest is 1.4e-9 relative.
+
+The 1e7 rows (`y~x1`, T=16, Rust call medians) moved as follows:
+
+| model | Python before (s) | Python after (s) | R before (s) | R after (s) |
+|---|---:|---:|---:|---:|
+| 3 FEs | 0.362 | 0.241 | 1.105 | 0.248 |
+
+The R-vs-Python gap is gone.
+
+Rows still within 1.2×, all T=1 and all PASS:
+- G6 1e6 `binary_y~x1` FE2 vs fixest: Python 0.90–0.91, R 0.87–0.88. Both run 5 IRLS iterations,
+  on par with the Stata `fereg` on the same row (0.359 s).
+- Python `akm_scale_1` 1e4: 0.88 (10.9 ms vs pyfixest LSMR 12.4 ms; mostly fixed per-call overhead).
+
+Coefficient gaps are unchanged:
+- versus fixest: median 5.7e-14, max 5.6e-5 (fixest's tolerance on difficult 3-FE/Poisson rows);
+- versus the Stata `fereg`: max 3.0e-8.
+
 ## Earlier tuning (commit log)
 
 - `0a25c0f`, `738d70f`: one-pass (parallel) sample scan, uninitialized read buffers.

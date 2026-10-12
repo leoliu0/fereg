@@ -28,7 +28,7 @@ Recorded 2026-10-11 (plan Phase 0.3). Every version below was read from the inst
 
 ## fereg packages (candidates of the Python and R gates)
 
-Recorded 2026-10-12, both built from repository commit `98abc75` (version 0.2.1; it ships as 0.3.0).
+Recorded 2026-10-12, both built from repository commit `888d8ec` (version 0.2.1; it ships as 0.3.0).
 
 | Tool | Version | Where / how installed |
 |---|---|---|
