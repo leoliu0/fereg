@@ -1,4 +1,4 @@
-*! version 0.2.0  fereg: header of feppml and felogit results
+*! version 0.2.1  fereg: header of feppml and felogit results
 *! feppml layout from ppmlhdfe_header.ado of ppmlhdfe 2.3.3 (MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
 program _rf_glm_header
 	version 16

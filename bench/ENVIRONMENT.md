@@ -26,6 +26,15 @@ Recorded 2026-10-11 (plan Phase 0.3). Every version below was read from the inst
 | pyfixest | 0.60.0 | `bench/pyproject.toml` / `uv.lock` |
 | numpy / pandas / pyarrow | 2.5.4 / 3.0.6 / 26.0.0 | same |
 
+## fereg packages (candidates of the Python and R gates)
+
+Recorded 2026-10-12, both built from repository commit `98abc75` (version 0.2.1; it ships as 0.3.0).
+
+| Tool | Version | Where / how installed |
+|---|---|---|
+| `fereg_py`: Python package `fereg` | 0.2.1 | `bench/pyproject.toml` path dependency on `../python` (`[tool.uv.sources]`), built by maturin with the workspace `release` profile (fat LTO, 1 codegen unit) and the repository `.cargo/config.toml` (`target-cpu=x86-64-v2`). Rebuild after source changes: `uv sync --reinstall-package fereg`. |
+| `fereg_r`: R package `fereg` | 0.2.1 | `sh scripts/sync-core.sh && R CMD INSTALL r/fereg` into `~/R/library`. The in-place build also picks up the repository `.cargo/config.toml` (x86-64-v2); a tarball install does not (see `TUNING.md`, 2026-10-12 packages). |
+
 ## How each tool is run
 
 | Tool | Thread control | Notes |
@@ -37,6 +46,8 @@ Recorded 2026-10-11 (plan Phase 0.3). Every version below was read from the inst
 | fixest | `setFixest_nthreads(T)`, `nthreads = T`, `setDTthreads(T)` | Data loaded with `data.table::fread`. Timed with `system.time()[["elapsed"]]`, which has 1 ms resolution. |
 | pyfixest MAP | `RAYON_NUM_THREADS=T`, set before import | `demeaner=pf.MapDemeaner()`: fixef_tol 1e-6, fixef_maxiter 10000, Rust backend. |
 | pyfixest LSMR | same | `demeaner=pf.LsmrDemeaner()`: `within` backend (CPU, float64), additive-Schwarz preconditioner, atol = btol = 1e-8, fixef_maxiter 1000. |
+| fereg_py | `RAYON_NUM_THREADS=T` before import, `nthreads=T` | `run_fereg_py.py`: `fereg.feols/fepois/feglm(family="logit")` on the parquet data with pyfixest's arguments; package defaults (fixef_tol 1e-8, fixef_maxiter 16000; 10000 in G2/G3 as for pyfixest). |
+| fereg_r | `nthreads = T`, `options(fereg.nthreads = T)`, `setDTthreads(T)` | `run_fereg.R`: `fereg::feols/fepois/feglm(family = "logit")` on `fread` data with fixest's arguments; package defaults (fixef.tol 1e-8, fixef.iter 16000; 10000 in G2/G3 as for fixest). Timed with `system.time()`, 1 ms resolution. |
 
 - `run.py` sets `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `RAYON_NUM_THREADS` and `NUMBA_NUM_THREADS` to T for every subprocess.
 - In the AKM groups G2/G3, fixest (`fixef.iter`) and pyfixest (`fixef_maxiter`) get 10000. This matches upstream `benchmark_akm_sweep.py`, which uses `build_standard_feols_benchmarkers(fixef_maxiter=10000)`.
@@ -67,7 +78,7 @@ Recorded 2026-10-11 (plan Phase 0.3). Every version below was read from the inst
 
 ## Capability gaps (shown as `unsupported` in RESULTS.md)
 
-- pyfixest 0.60.0 has no varying slopes. `y ~ x1 | indiv_id + year + firm_id[x2]` raises `FactorEvaluationError`, so pyfixest is not run in G7.
+- pyfixest 0.60.0 has no varying slopes. `y ~ x1 | indiv_id + year + firm_id[x2]` raises `FactorEvaluationError`, so pyfixest is not run in G7. Both fereg packages accept the fixest syntax `firm_id[x2]` and run in every group.
 - Logit (G6) has no Stata competitor. The competitors are fixest `feglm(family = "logit")` and pyfixest `feglm(family="logit")`.
 
 ## Data

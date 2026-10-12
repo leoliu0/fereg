@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0}{...}
+{* *! version 0.2.1}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -56,6 +56,8 @@ separation checks, same output and the same stored results, computed by a parall
 
 {syntab:Separation}
 {synopt :{opt sep:aration(list)}}methods used to detect and drop separated observations; default {cmd:fe simplex relu}{p_end}
+{synopt :{opth tagsep(newvar)}}only identify the separated observations (ReLU) and tag them in {it:newvar}; nothing is estimated{p_end}
+{synopt :{opth zvar:name(newvar)}}with {opt tagsep()}, also save the certificate of separation{p_end}
 
 {syntab:Optimization and performance}
 {synopt :{opt tol:erance(#)}}IRLS convergence tolerance; default {cmd:1e-8}{p_end}
@@ -147,6 +149,24 @@ pseudo-maximum (separated observations), which are dropped before estimation (Co
 {cmd:all} (or {cmd:full}) means {cmd:fe relu simplex mu}; {cmd:none} (or {cmd:no}, {cmd:off}) disables the checks.
 The number of separated observations is reported in the output and in {cmd:e(num_separated)}.
 
+{phang}
+{opt tagsep(newvar)} runs the separation check instead of the regression, as {cmd:ppmlhdfe}'s
+{opt tagsep()}: {cmd:separation()} is replaced by {cmd:relu} alone (the {cmd:fe} rule is not applied, so
+observations in fixed-effect groups whose outcome is always zero are found and tagged by ReLU; singletons are
+still dropped), and {it:newvar} (byte) is 1 for separated observations and 0 for the other observations of
+the sample, missing elsewhere. Nothing is estimated and no {cmd:e()} results are posted. An existing variable
+named {it:newvar} is replaced (as {cmd:ppmlhdfe} does), unless the model uses it. A warning is printed if the
+check stopped before certifying its result.
+
+{phang}
+{opt zvarname(newvar)} (requires {opt tagsep()}) also saves the certificate of separation z (double): z > 0
+on separated observations and 0 elsewhere in the sample. Observations in fixed-effect groups whose outcome is
+always zero get z = 1 (the group indicator); the other separated observations get the ReLU certificate, a
+combination of the regressors and fixed effects that is 0 wherever y > 0 on the sample that remains. As in
+{cmd:ppmlhdfe}, z is rescaled so that its most frequent positive value is 1 when the rescaling factor is
+between 0.01 and 100. Certificates are not unique, so z can differ from {cmd:ppmlhdfe}'s; the tagged
+observations are what matters.
+
 {dlgtab:Optimization and performance}
 
 {phang}
@@ -185,7 +205,7 @@ Solver-tuning options are accepted and ignored with a note: {opt technique()}, {
 
 {pstd}
 The following {cmd:ppmlhdfe} options are not available and stop with an error: {cmd:guess(variable} {it:varname}{cmd:)},
-{opt tagsep()}, {opt zvarname()}, {opt r2}, {opt timeit}, and the undocumented advanced options of the
+{opt r2}, {opt timeit}, and the undocumented advanced options of the
 {cmd:ppmlhdfe} Mata class (e.g. {opt simplex_tol()}, {opt use_exact_solver}). {cmd:aweight}s are not allowed
 (as in {cmd:ppmlhdfe}).
 
@@ -218,6 +238,9 @@ shift. Only their sum (d) is unique.{p_end}
 {cmd:e(estat_cmd)} is {cmd:fereg_estat} ({cmd:ppmlhdfe}'s is {cmd:reghdfe5_estat}); both provide
 {cmd:estat summarize}, {cmd:estat vce} and {cmd:estat ic} (with e(df_m) + 1 parameters).{p_end}
 {phang2}o String variables are allowed inside fixed-effect and cluster interactions.{p_end}
+{phang2}o {opt zvarname()} without {opt tagsep()} is an error ({cmd:ppmlhdfe} ignores it). With {opt tagsep()},
+the variables are labeled {cmd:[feppml: ReLU]} ...; {opt r2} (the verification regression of the certificate) is
+not available.{p_end}
 
 
 {marker postestimation}{...}
