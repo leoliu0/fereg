@@ -34,7 +34,7 @@ jobs:
           . "$HOME/.cargo/env"
           cargo run --release -p regfast-core --example mock_expected
           cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
-          target/mockhost regfast.linux64.plugin
+          target/mockhost ./regfast.linux64.plugin
 
       - uses: actions/upload-artifact@v4
         with:
@@ -64,7 +64,7 @@ jobs:
         run: |
           cargo run --release -p regfast-core --example mock_expected
           cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -o target/mockhost
-          target/mockhost regfast.macos-universal.plugin
+          target/mockhost ./regfast.macos-universal.plugin
 
       - uses: actions/upload-artifact@v4
         with:
