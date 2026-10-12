@@ -14,9 +14,11 @@ use crate::api::{Ctx, RfError, Separation};
 use crate::par;
 
 pub mod dist;
+mod design;
 mod fixef;
 mod input;
 mod ols;
+mod state;
 mod vcov;
 
 /// A categorical column over the input rows.
@@ -161,7 +163,9 @@ pub enum FixefNorm {
     /// other FE (the one on the component's first observation) is 0.
     #[default]
     Fixest,
-    /// pyfixest `fixef()`: minimum-norm solution.
+    /// pyfixest `fixef()`: the first intercept term free, the first level of every other
+    /// intercept term pinned at 0 (pyfixest omits it), the remaining indeterminacy (shifts per
+    /// connected component) resolved by minimum norm.
     MinNorm,
 }
 
@@ -337,7 +341,9 @@ pub struct IvFirstStage {
     pub collinear: Vec<CoefSource>,
     /// fixest `ivf1`: iid F test of the excluded instruments.
     pub f_test: TestStat,
-    /// fixest `ivwald1`: Wald test of the excluded instruments with the stage's vcov.
+    /// fixest `ivwald1`: Wald test of the excluded instruments with the stage's vcov, p from
+    /// F(df1, df2). Pyfixest flavor: pyfixest's first-stage `wald_test` (pseudo-inverse; p from
+    /// χ²(df1) on stat·df1; df2 NaN).
     pub wald: TestStat,
 }
 
@@ -363,7 +369,8 @@ pub struct FixefValues {
     pub values: Vec<f64>,
     /// Input row of the first estimation observation of each level (hosts read labels there).
     pub first_obs: Vec<u32>,
-    /// Levels fixed at 0 by the normalization (fixest `attr(, "references")`).
+    /// Levels fixed at 0 by the normalization (fixest `attr(, "references")`; slope slots: levels
+    /// whose slope is not identified; [`FixefNorm::MinNorm`]: the pinned first level).
     pub references: usize,
 }
 
@@ -419,9 +426,11 @@ pub struct FitOutput {
     pub fe_sizes: Vec<usize>,
     pub stats: FitStats,
     pub iv: Option<IvStats>,
-    /// y − fitted (IV: fixest's corrected residuals; GLM: response residuals y − μ).
+    /// Residuals (IV: fixest's corrected residuals y − Xβ − FE with the original endogenous
+    /// variables; GLM: response residuals y − μ).
     pub resid: Option<Vec<f64>>,
-    /// Fitted values including the fixed effects (GLM: μ).
+    /// Fitted values including the fixed effects (IV: fixest's y − second-stage residual, i.e.
+    /// with the first-stage fitted endogenous variables; GLM: μ).
     pub fitted: Option<Vec<f64>>,
     /// GLM linear predictor η (including the offset).
     pub eta: Option<Vec<f64>>,
@@ -435,7 +444,7 @@ pub struct FitOutput {
 
 /// Retained data for post-hoc variance matrices (fixest `summary(m, vcov=)`, pyfixest `m.vcov()`).
 pub struct FitState {
-    _private: (),
+    inner: state::State,
 }
 
 impl FitState {
@@ -451,27 +460,23 @@ impl FitState {
         cluster: &[Vec<usize>],
         ctx: &Ctx,
     ) -> Result<VcovOutput, RfError> {
-        let _ = (kind, ssc, factors, factor_names, cluster, ctx);
-        Err(RfError::Internal("fit::FitState::vcov is not implemented yet".into()))
+        self.inner.vcov(kind, ssc, factors, factor_names, cluster, ctx)
     }
 
     /// Estimation rows.
     pub fn nobs(&self) -> usize {
-        0
+        self.inner.obs.len()
     }
 }
 
 /// Estimates one model.
 pub fn fit(input: &FitInput, spec: &FitSpec, ctx: &Ctx) -> Result<FitOutput, RfError> {
     input::validate(input, spec)?;
-    if !input.endog.is_empty() || !input.inst.is_empty() {
-        return Err(RfError::InvalidInput("IV estimation is not available yet".into()));
-    }
     if spec.model != Model::Ols {
         return Err(RfError::InvalidInput("Poisson and logit estimation are not available yet".into()));
     }
     par::with_pool(par::threads_for(ctx.threads, input.n), |pool| {
         let sample = input::build(input, spec, ctx, pool)?;
-        ols::ols(input, spec, sample, ctx, pool)
+        ols::linear(input, spec, sample, ctx, pool)
     })?
 }

@@ -68,23 +68,36 @@ pub(crate) fn validate(input: &FitInput, spec: &FitSpec) -> Result<(), RfError> 
     if spec.model == Model::Ols && input.offset.is_some() {
         return bad("an offset is only supported for Poisson and logit models".into());
     }
+    if !input.endog.is_empty() && spec.model != Model::Ols {
+        return bad("instrumental variables are only supported for linear models".into());
+    }
+    if input.inst.len() < input.endog.len() || (input.endog.is_empty() && !input.inst.is_empty()) {
+        return bad("IV estimation needs at least as many instruments as endogenous regressors".into());
+    }
     if !(spec.collin_tol >= 0.0) || !(spec.fixef_tol > 0.0) || spec.fixef_maxiter == 0 {
         return bad("invalid tolerance or iteration limit".into());
     }
     Ok(())
 }
 
+/// Whether row `i` of a factor column is missing.
+pub(crate) fn factor_missing(col: &FactorCol, i: usize) -> bool {
+    match *col {
+        FactorCol::F64(v) => !v[i].is_finite(),
+        FactorCol::I32(v) => v[i] == i32::MIN,
+        FactorCol::I64(v) => v[i] == i64::MIN,
+        FactorCol::Codes { codes, nlevels, base } => !(0..i64::from(nlevels)).contains(&(i64::from(codes[i]) - i64::from(base))),
+    }
+}
+
+/// Dense codes of a factor column over the rows `kept` (ascending input rows, none missing).
+pub(crate) fn factor_kept_codes(col: &FactorCol, kept: &[u32], pool: &Pool) -> Result<Codes, RfError> {
+    factor::restrict(&factor::factorize_col(col, pool)?, kept, pool)
+}
+
 /// Missing entries of a factor column within `range`, as `bit` in `mask`.
 fn mark_factor(col: &FactorCol, range: std::ops::Range<usize>, mask: &mut [u16], bit: u16) {
-    match *col {
-        FactorCol::F64(v) => mask.iter_mut().zip(&v[range]).for_each(|(m, x)| *m |= if x.is_finite() { 0 } else { bit }),
-        FactorCol::I32(v) => mask.iter_mut().zip(&v[range]).for_each(|(m, &x)| *m |= if x == i32::MIN { bit } else { 0 }),
-        FactorCol::I64(v) => mask.iter_mut().zip(&v[range]).for_each(|(m, &x)| *m |= if x == i64::MIN { bit } else { 0 }),
-        FactorCol::Codes { codes, nlevels, base } => mask.iter_mut().zip(&codes[range]).for_each(|(m, &c)| {
-            let l = i64::from(c) - i64::from(base);
-            *m |= if (0..i64::from(nlevels)).contains(&l) { 0 } else { bit };
-        }),
-    }
+    mask.iter_mut().zip(range).for_each(|(m, i)| *m |= if factor_missing(col, i) { bit } else { 0 });
 }
 
 fn mark_values(v: &[f64], range: std::ops::Range<usize>, mask: &mut [u16], bit: u16) {
