@@ -31,8 +31,9 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # fereg-py is a Python extension module (no Rust tests; linking a test binary needs libpython).
       - name: Rust tests
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --exclude fereg-py
 
       - name: Build plugin
         shell: bash
