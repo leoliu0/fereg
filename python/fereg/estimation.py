@@ -81,7 +81,8 @@ def estimate(ctx: FitContext) -> Feols:
         glm_maxiter=ctx.glm_maxiter,
         relu=ctx.relu,
         keep_resid=not ctx.lean,
-        keep_fixef=not ctx.lean,
+        # FE values are computed on demand from the state (fixef(), predict(newdata)).
+        keep_fixef=False,
         keep_state=not ctx.lean,
         threads=ctx.threads,
     )

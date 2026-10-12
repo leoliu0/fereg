@@ -1,24 +1,34 @@
-//! The data a fit retains for post-hoc variance matrices ([`super::FitState`]): the residualized
-//! row block with the design and residual combos, the bread, the weights, the row order and the
-//! fixed-effect codes (nesting tests and fixest's `K.exact`).
+//! The data a fit retains for post-hoc variance matrices and fixed-effect values
+//! ([`super::FitState`]): the residualized row block with the design and residual combos, the
+//! bread, the weights, the row order, the fixed-effect codes (nesting tests and fixest's
+//! `K.exact`) and the solved fixed-effect values.
 
 use rayon::prelude::*;
 
-use super::input::{factor_missing, factor_kept_codes};
+use super::fixef::{self, FeLevels};
+use super::input::{factor_missing, interaction_kept_codes};
 use super::vcov::{self, ClusterInfo, FeInfo, Model};
-use super::{FactorCol, Flavor, Ssc, VcovKind, VcovOutput, fixef};
+use super::{FactorCol, FitInput, FixefNorm, FixefValues, Flavor, Ssc, VcovKind, VcovOutput};
 use crate::api::Ctx;
 use crate::error::RfError;
-use crate::factor::{self, Codes};
+use crate::factor::Codes;
 use crate::par::{self, Pool};
+use crate::session::Term;
 
 /// One fixed-effect term over the estimation rows (kept order).
 pub(crate) struct StateFe {
     pub codes: Vec<u32>,
+    /// Levels in the degrees of freedom (pyfixest's `feglm` counts those present before its
+    /// `fe` separation check; otherwise `levels`).
     pub g: usize,
+    /// Levels present: every code is below it.
+    pub levels: usize,
     pub intercept: bool,
     /// Data-column names of its factors.
     pub names: Vec<String>,
+    /// Slope values per row (kept order) and their indices into `FitInput::slopes`.
+    pub slopes: Vec<Vec<f64>>,
+    pub slope_ids: Vec<usize>,
 }
 
 impl StateFe {
@@ -27,12 +37,30 @@ impl StateFe {
     }
 }
 
+/// The session's terms (moved) as state terms, with `g[q]` levels in the degrees of freedom.
+pub(crate) fn state_terms(terms: Vec<Term>, input: &FitInput, g: &[usize]) -> Vec<StateFe> {
+    terms
+        .into_iter()
+        .zip(&input.fe)
+        .zip(g)
+        .map(|((t, ft), &g)| StateFe {
+            codes: t.codes,
+            g,
+            levels: t.g,
+            intercept: t.intercept,
+            names: ft.factors.iter().map(|&f| input.factor_names[f].clone()).collect(),
+            slopes: t.slopes,
+            slope_ids: ft.slopes.clone(),
+        })
+        .collect()
+}
+
 /// fixest references per term (`K.exact`): over the intercept terms, 0 for slope-only terms.
-pub(crate) fn term_refs(fe: &[FeInfo]) -> Vec<usize> {
+pub(crate) fn term_refs(fe: &[FeInfo], pool: &Pool) -> Vec<usize> {
     let icpt: Vec<&FeInfo> = fe.iter().filter(|t| t.intercept).collect();
     let codes: Vec<&[u32]> = icpt.iter().map(|t| t.codes).collect();
     let sizes: Vec<usize> = icpt.iter().map(|t| t.g).collect();
-    let mut refs = fixef::references(&codes, &sizes).into_iter();
+    let mut refs = fixef::references(&codes, &sizes, pool).into_iter();
     fe.iter().map(|t| if t.intercept { refs.next().unwrap_or(0) } else { 0 }).collect()
 }
 
@@ -58,29 +86,20 @@ pub(crate) struct State {
     /// Input row of each estimation row (kept order).
     pub obs: Vec<u32>,
     pub fe: Vec<StateFe>,
+    /// Solved fixed-effect values (`None` without fixed-effect terms).
+    pub fixef: Option<FeLevels>,
 }
 
 impl State {
     /// Codes over the estimation rows of the cluster dimension `dim` (factor indices into
     /// `factors`); a missing value on an estimation row is an error.
     fn cluster_codes(&self, factors: &[FactorCol], names: &[String], dim: &[usize], pool: &Pool) -> Result<Codes, RfError> {
-        let parts: Vec<Codes> = dim
-            .iter()
-            .map(|&f| {
-                let col = &factors[f];
-                if pool.install(|| self.obs.par_iter().any(|&i| factor_missing(col, i as usize))) {
-                    return Err(RfError::InvalidInput(format!(
-                        "the cluster variable {} has missing values on estimation rows",
-                        names[f]
-                    )));
-                }
-                factor_kept_codes(col, &self.obs, pool)
-            })
-            .collect::<Result<_, _>>()?;
-        match parts.as_slice() {
-            [one] => Ok(one.clone()),
-            _ => factor::combine(&parts.iter().collect::<Vec<_>>(), pool),
+        for &f in dim {
+            if pool.install(|| self.obs.par_iter().any(|&i| factor_missing(&factors[f], i as usize))) {
+                return Err(RfError::InvalidInput(format!("the cluster variable {} has missing values on estimation rows", names[f])));
+            }
         }
+        interaction_kept_codes(factors, dim, &self.obs, pool)
     }
 
     pub(crate) fn vcov(
@@ -134,8 +153,13 @@ impl State {
                 row_order: &self.row_order,
             };
             let fe_info: Vec<FeInfo> = self.fe.iter().map(StateFe::info).collect();
-            let refs = || term_refs(&fe_info);
+            let refs = || term_refs(&fe_info, pool);
             vcov::compute(&model, kind, ssc, &fe_info, &cl_info, &refs, pool).map(|(v, _)| v)
         })?
+    }
+
+    pub(crate) fn fixef(&self, norm: FixefNorm, ctx: &Ctx) -> Result<Vec<FixefValues>, RfError> {
+        let Some(fe) = &self.fixef else { return Ok(Vec::new()) };
+        par::with_pool(par::threads_for(ctx.threads, self.obs.len()), |pool| fixef::fixef_values(&self.fe, &self.obs, fe, norm, pool))?
     }
 }

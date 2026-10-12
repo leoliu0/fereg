@@ -12,6 +12,7 @@ name = "fereg"
 [dependencies]
 extendr-api = { version = "=0.9.0", features = ["result_condition"] }
 fereg-core = { path = "fereg-core" }
+rayon = "1.12"
 
 [profile.release]
 opt-level = 3

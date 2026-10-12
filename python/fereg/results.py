@@ -7,6 +7,7 @@ costs O(k²) Python work regardless of the number of observations.
 
 from __future__ import annotations
 
+import functools
 import re
 import warnings
 from dataclasses import dataclass, field, replace
@@ -434,13 +435,11 @@ class Feols:
             raise ValueError("The regression model does not have fixed effects.")
         if self._fixef_dict:
             return self._fixef_dict
-        if not self._out.fixef:
-            raise ValueError("fixef() is not available: the model was estimated with lean=True.")
         from .design import term_labels
 
         d = self._design
         res: dict[str, dict[str, float]] = {}
-        for f in self._out.fixef:
+        for f in self._fixef_values:
             key = self._fixef_key(f["term"], f["slope"])
             labels = term_labels(d, f["term"], f["first_obs"])
             values = f["values"]
@@ -451,6 +450,20 @@ class Feols:
         self._fixef_dict = res
         return res
 
+    @functools.cached_property
+    def _fixef_values(self) -> list[dict]:
+        """Per-term, per-slot FE values (core ``FixefValues``), computed on first use.
+
+        Fits do not compute them (pyfixest's ``fixef()`` is lazy too); the retained state
+        normalizes the solver's per-level values on demand, with the GIL released.
+        """
+        state = self._out.state
+        if state is None:
+            raise ValueError(
+                "Fixed-effect values are not available: the model was estimated with lean=True."
+            )
+        return state.fixef("minnorm", threads=self._ctx.threads)
+
     def _fixef_key(self, term: int, slope: int | None) -> str:
         """pyfixest key ``C(fe)`` (``C(a^b)`` for interactions, ``C(fe):x`` for slopes)."""
         label = "^".join(self.FixestFormula.fe[term].factors)
@@ -460,10 +473,8 @@ class Feols:
         """Σ fixed effects (× slopes) for every row of the newdata design; unseen level → NaN."""
         d = self._design
         fe_hat = np.zeros(nd.n)
-        if not self._out.fixef:
-            raise ValueError("predict(newdata) needs the fixed effects, which lean=True discards.")
         keys_cache: dict[int, tuple[pd.Index, np.ndarray]] = {}
-        for f in self._out.fixef:
+        for f in self._fixef_values:
             term = f["term"]
             if term not in keys_cache:
                 train = pd.Index(_level_keys(d, term, f["first_obs"]))
@@ -659,6 +670,11 @@ class Fepois(Feols):
         return self._require(self._out.irls_weights, "_irls_weights")
 
     @property
+    def _weights(self) -> np.ndarray:
+        """Final IRLS weights, shape (N, 1) (pyfixest stores these in ``_weights`` for GLMs)."""
+        return self._irls_weights.reshape(-1, 1)
+
+    @property
     def _u_hat_response(self) -> np.ndarray:
         return self._require(self._out.resid, "_u_hat_response")
 
@@ -687,6 +703,10 @@ class Fepois(Feols):
         return np.exp(eta)
 
 
+# Bound of the logit mean in the core (`glm::family::MU_MIN` = 100·ε).
+_MU_MIN = 100.0 * np.finfo(np.float64).eps
+
+
 class Feglm(Feols):
     """GLM estimation results (pyfixest ``Feglm``)."""
 
@@ -712,13 +732,29 @@ class Feglm(Feols):
         return self._require(self._out.irls_weights, "_irls_weights")
 
     @property
+    def _weights(self) -> np.ndarray:
+        """Final IRLS weights, shape (N, 1) (pyfixest stores these in ``_weights`` for GLMs)."""
+        return self._irls_weights.reshape(-1, 1)
+
+    @property
     def _u_hat_response(self) -> np.ndarray:
         return self._require(self._out.resid, "_u_hat_response")
 
     @property
     def _u_hat_working(self) -> np.ndarray:
         mu = self._Y_hat_response
-        return self._u_hat_response / (mu * (1.0 - mu))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            e = self._u_hat_response / (mu * (1.0 - mu))
+        # Rows of FE levels with an all-one (or all-zero) outcome sit at the bound μ = 1 − MU_MIN
+        # (MU_MIN): their FE is ±inf, the fit is exact and the working residual is 0 (the
+        # limit pyfixest's IRLS approaches).
+        e[(mu <= _MU_MIN) | (mu >= 1.0 - _MU_MIN)] = 0.0
+        return e
+
+    @property
+    def _u_hat(self) -> np.ndarray:
+        """Working residuals scaled by sqrt(IRLS weights), as pyfixest stores them."""
+        return self._u_hat_working * np.sqrt(self._irls_weights)
 
     def resid(self, type: str = "working") -> np.ndarray:
         """Working (pyfixest default) or response residuals."""
@@ -731,6 +767,13 @@ class Feglm(Feols):
 
 class Felogit(Feglm):
     """Logit estimation results (pyfixest ``Felogit``)."""
+
+    # η of μ = 1 − MU_MIN. Rows of all-one (all-zero) FE levels have FE = ±inf; their
+    # predictions sit at the bound, as the fitted values of the estimation sample do.
+    _ETA_BOUND = float(np.log((1.0 - _MU_MIN) / _MU_MIN))
+
+    def _linear_predictor_newdata(self, newdata) -> np.ndarray:
+        return np.clip(super()._linear_predictor_newdata(newdata), -self._ETA_BOUND, self._ETA_BOUND)
 
     def _response(self, eta: np.ndarray) -> np.ndarray:
         return 1.0 / (1.0 + np.exp(-eta))

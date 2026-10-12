@@ -9,11 +9,12 @@ use std::os::raw::c_int;
 
 use extendr_api::prelude::*;
 use fereg_core::fit::{
-    self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FitSpec, FitState, FixefNorm,
+    self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FixefValues, FitSpec, FitState, FixefNorm,
     FixefRm, Flavor, GDf, KFixef, Model, Ssc, TDf, TestStat, VcovKind, VcovOutput,
     WeightsType,
 };
-use fereg_core::{Ctx, RfError};
+use fereg_core::{Ctx, RfError, par};
+use rayon::prelude::*;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -282,7 +283,57 @@ fn vcov_out(v: &VcovOutput) -> Robj {
     ])
 }
 
-fn output(out: FitOutput, n_input: usize) -> Robj {
+fn fixef_list(values: &[FixefValues]) -> Robj {
+    let items: Vec<Robj> = values
+        .iter()
+        .map(|f| {
+            named(vec![
+                ("term", int(f.term + 1)),
+                ("slope", real(f.slope.map_or(f64::NAN, |j| (j + 1) as f64))),
+                ("values", reals(&f.values)),
+                ("first_obs", rows_1based(&f.first_obs)),
+                ("references", int(f.references)),
+            ])
+        })
+        .collect();
+    List::from_values(items).into()
+}
+
+/// Copies per-observation vectors into new R double vectors (`NULL` for `None`). The vectors are
+/// allocated on the R thread; worker threads only write their memory, in chunks of `COPY_CHUNK`.
+fn obs_vectors<const K: usize>(src: [Option<&[f64]>; K], threads: usize) -> Result<[Robj; K]> {
+    const COPY_CHUNK: usize = 1 << 16;
+    let mut out: [Robj; K] = std::array::from_fn(|k| match src[k] {
+        Some(v) => Robj::alloc_vector(extendr_api::rtype_to_sxp(Rtype::Doubles), v.len()),
+        None => ().into(),
+    });
+    let mut pairs: Vec<(&mut [f64], &[f64])> = Vec::with_capacity(K);
+    for (r, s) in out.iter_mut().zip(src) {
+        if let Some(s) = s {
+            pairs.push((r.as_real_slice_mut().expect("double vector"), s));
+        }
+    }
+    let total: usize = pairs.iter().map(|(_, s)| s.len()).sum();
+    let threads = par::threads_for(threads, total.div_ceil(COPY_CHUNK) * par::CHUNK);
+    if threads <= 1 {
+        for (d, s) in pairs {
+            d.copy_from_slice(s);
+        }
+    } else {
+        par::with_pool(threads, |pool| {
+            pool.install(|| {
+                pairs
+                    .into_par_iter()
+                    .flat_map(|(d, s)| d.par_chunks_mut(COPY_CHUNK).zip(s.par_chunks(COPY_CHUNK)))
+                    .for_each(|(d, s)| d.copy_from_slice(s))
+            })
+        })
+        .map_err(core_err)?;
+    }
+    Ok(out)
+}
+
+fn output(out: FitOutput, n_input: usize, threads: usize) -> Result<Robj> {
     let s = &out.stats;
     let stats = named(vec![
         ("ssr", real(s.ssr)),
@@ -332,19 +383,7 @@ fn output(out: FitOutput, n_input: usize) -> Robj {
             ])
         }
     };
-    let fixef: Vec<Robj> = out
-        .fixef
-        .iter()
-        .map(|f| {
-            named(vec![
-                ("term", int(f.term + 1)),
-                ("slope", real(f.slope.map_or(f64::NAN, |j| (j + 1) as f64))),
-                ("values", reals(&f.values)),
-                ("first_obs", rows_1based(&f.first_obs)),
-                ("references", int(f.references)),
-            ])
-        })
-        .collect();
+    let fixef = fixef_list(&out.fixef);
     let d = &out.dropped;
     let na = &d.na_by;
     let mut na_by: Robj = [na.y, na.x, na.endog, na.inst, na.fe, na.cluster, na.weights, na.offset, na.extra]
@@ -363,14 +402,16 @@ fn output(out: FitOutput, n_input: usize) -> Robj {
         ("separated", int(d.separated)),
         ("na_by", na_by),
     ]);
-    let opt_vec = |v: &Option<Vec<f64>>| -> Robj { v.as_deref().map_or_else(|| ().into(), reals) };
+    // Per-observation outputs: R vectors allocated here (R thread), filled in parallel.
+    let [resid, fitted, eta, irls_weights] =
+        obs_vectors([out.resid.as_deref(), out.fitted.as_deref(), out.eta.as_deref(), out.irls_weights.as_deref()], threads)?;
     // All rows kept: the R side uses the input rows directly instead of an index vector.
     let obs: Robj = if out.obs.len() == n_input { ().into() } else { rows_1based(&out.obs) };
     let state: Robj = match out.state {
         Some(st) => ExternalPtr::new(st).into(),
         None => ().into(),
     };
-    named(vec![
+    Ok(named(vec![
         ("nobs", int(out.nobs)),
         ("nobs_origin", int(out.nobs_origin)),
         ("sumw", real(out.sumw)),
@@ -384,14 +425,14 @@ fn output(out: FitOutput, n_input: usize) -> Robj {
         ("fe_sizes", reals(&out.fe_sizes.iter().map(|&g| g as f64).collect::<Vec<_>>())),
         ("stats", stats),
         ("iv", iv),
-        ("resid", opt_vec(&out.resid)),
-        ("fitted", opt_vec(&out.fitted)),
-        ("eta", opt_vec(&out.eta)),
-        ("irls_weights", opt_vec(&out.irls_weights)),
-        ("fixef", List::from_values(fixef).into()),
+        ("resid", resid),
+        ("fitted", fitted),
+        ("eta", eta),
+        ("irls_weights", irls_weights),
+        ("fixef", fixef),
         ("notes", Strings::from_values(out.notes.iter().map(String::as_str)).into()),
         ("state", state),
-    ])
+    ]))
 }
 
 // ---- entry points ---------------------------------------------------------------------------
@@ -453,16 +494,13 @@ fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
     let spec = spec_of(&spec)?;
     let ctx = ctx(nthreads);
     let out = fit::fit(&fit_input, &spec, &ctx).map_err(core_err)?;
-    Ok(output(out, n))
+    output(out, n, nthreads.max(0) as usize)
 }
 
 /// Variance matrix of a fitted model under another estimator / small-sample correction.
 #[extendr]
 fn fereg_vcov(state: Robj, kind: &str, ssc: List, factors: List, factor_names: Strings, cluster: List, nthreads: i32) -> Result<Robj> {
-    let st: &ExternalPtr<FitState> = (&state).try_into().map_err(|_| {
-        invalid("fereg: the estimation state is not available (lean = TRUE, or the object was saved and reloaded); re-estimate the model with the new vcov")
-    })?;
-    let st: &FitState = st.try_addr().map_err(|_| invalid("fereg: the estimation state is not available; re-estimate the model"))?;
+    let st = state_of(&state)?;
     let fac_r: Vec<Robj> = factors.values().collect();
     let names: Vec<String> = factor_names.iter().map(|s| s.to_string()).collect();
     if names.len() != fac_r.len() {
@@ -477,6 +515,24 @@ fn fereg_vcov(state: Robj, kind: &str, ssc: List, factors: List, factor_names: S
     Ok(vcov_out(&v))
 }
 
+/// Fixed-effect values (fixest normalization) of a fitted model, computed from its state.
+#[extendr]
+fn fereg_fixef(state: Robj, nthreads: i32) -> Result<Robj> {
+    let st = state_of(&state)?;
+    let values = st.fixef(FixefNorm::Fixest, &ctx(nthreads)).map_err(core_err)?;
+    Ok(fixef_list(&values))
+}
+
+/// The estimation state behind an external pointer (NULL after `lean = TRUE`; a null pointer
+/// after the object was saved and reloaded).
+fn state_of(state: &Robj) -> Result<&FitState> {
+    let unavailable = || {
+        invalid("fereg: the estimation state is not available (lean = TRUE, or the object was saved and reloaded); re-estimate the model")
+    };
+    let st: &ExternalPtr<FitState> = state.try_into().map_err(|_| unavailable())?;
+    st.try_addr().map_err(|_| unavailable())
+}
+
 /// Version of the bundled fereg-core.
 #[extendr]
 fn fereg_core_version() -> &'static str {
@@ -487,5 +543,6 @@ extendr_module! {
     mod fereg;
     fn fereg_fit;
     fn fereg_vcov;
+    fn fereg_fixef;
     fn fereg_core_version;
 }
