@@ -70,6 +70,33 @@ def test_logit_parity(fml, vcov):
     np.testing.assert_allclose(ours.predict(type="response"), theirs.predict(type="response"), rtol=1e-6)
 
 
+def test_logit_all_one_levels(capsys):
+    """FE levels with an all-one outcome stay in pyfixest's sample; their FE is +inf in fereg
+    (pyfixest stops near +25) and their predictions sit at the bound."""
+    data = DATA.copy()
+    data.loc[data["f1"].isin([1, 2]), "y_bin"] = 1.0
+    fml = "y_bin ~ x1 + x2 | f1 + f3"
+    theirs = pf.feglm(fml, data, family="logit", demeaner=TIGHT, **GLM_KW)
+    ours = fereg.feglm(fml, data, family="logit", **GLM_KW)
+    compare(ours, theirs, rtol=1e-6)
+    np.testing.assert_allclose(ours.deviance, theirs.deviance, rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(ours.resid(), theirs.resid(), rtol=1e-6, atol=1e-8)
+    ft, fo = theirs.fixef(atol=1e-14, btol=1e-14), ours.fixef()
+    assert list(fo) == list(ft) and list(fo["C(f1)"]) == list(ft["C(f1)"])
+    assert fo["C(f1)"]["1"] == np.inf and ft["C(f1)"]["1"] > 20
+    finite = [k for k, v in fo["C(f1)"].items() if np.isfinite(v)]
+    np.testing.assert_allclose([fo["C(f1)"][k] for k in finite], [ft["C(f1)"][k] for k in finite], rtol=1e-5)
+    for new in (None, data):
+        po, pt = ours.predict(newdata=new, type="response"), theirs.predict(newdata=new, type="response")
+        assert np.array_equal(np.isnan(po), np.isnan(pt))
+        np.testing.assert_allclose(po[~np.isnan(po)], pt[~np.isnan(pt)], rtol=1e-6, atol=1e-10)
+    in_sample = ours.predict(newdata=data)[ours._obs]
+    np.testing.assert_allclose(in_sample, ours.predict(), rtol=1e-10)
+    ours.summary()
+    assert "Deviance" in capsys.readouterr().out
+    fereg.etable([ours])
+
+
 def test_logit_rejects_nonbinary():
     with pytest.raises(ValueError, match="0 and 1"):
         fereg.feglm("y_pois ~ x1 | f1", DATA, family="logit")

@@ -177,10 +177,32 @@ def test_posthoc_vcov():
         assert ours._df_k == theirs._df_k
 
 
-def test_lean_has_no_vcov():
+def test_lean_drops_state():
     ours = fereg.feols("y ~ x1 | f1", DATA, lean=True)
-    with pytest.raises(ValueError, match="lean"):
-        ours.vcov("hetero")
+    assert ours._out.state is None
+    for call in (lambda: ours.vcov("hetero"), ours.fixef, lambda: ours.predict(newdata=DATA)):
+        with pytest.raises(ValueError, match="lean"):
+            call()
+
+
+def test_fixef_values_are_lazy_and_cached():
+    ours = fereg.feols("y ~ x1 + x2 | f1 + f2", DATA)
+    assert ours._out.fixef == [] and "_fixef_values" not in ours.__dict__
+    first = ours.fixef()
+    values = ours.__dict__["_fixef_values"]
+    assert ours.fixef() is first
+    ours.predict(newdata=DATA)
+    assert ours.__dict__["_fixef_values"] is values
+    # Same values as an eager fit (keep_fixef=True).
+    from fereg._binding import fit_design
+
+    eager = fit_design(
+        ours._design, model="ols", vcov="iid", ssc=None, weights_type="aweights", fixef_rm="singleton",
+        collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, keep_fixef=True,
+    )
+    for a, b in zip(values, eager.fixef):
+        assert (a["term"], a["slope"], a["references"]) == (b["term"], b["slope"], b["references"])
+        assert np.array_equal(a["values"], b["values"]) and np.array_equal(a["first_obs"], b["first_obs"])
 
 
 def test_nan_cluster_is_error():

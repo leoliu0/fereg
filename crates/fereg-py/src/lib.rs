@@ -174,6 +174,29 @@ fn opt_array(py: Python<'_>, v: Option<Vec<f64>>) -> Py<PyAny> {
     }
 }
 
+fn parse_fixef_norm(s: &str) -> PyResult<FixefNorm> {
+    match s {
+        "fixest" => Ok(FixefNorm::Fixest),
+        "minnorm" => Ok(FixefNorm::MinNorm),
+        _ => Err(PyValueError::new_err(format!("unknown fixef_norm '{s}'"))),
+    }
+}
+
+/// `FixefValues` as dicts `{term, slope, values, first_obs, references}` (arrays moved, not copied).
+fn fixef_list(py: Python<'_>, values: Vec<cf::FixefValues>) -> PyResult<Bound<'_, PyList>> {
+    let out = PyList::empty(py);
+    for f in values {
+        let d = PyDict::new(py);
+        d.set_item("term", f.term)?;
+        d.set_item("slope", f.slope)?;
+        d.set_item("values", f.values.into_pyarray(py))?;
+        d.set_item("first_obs", f.first_obs.into_pyarray(py))?;
+        d.set_item("references", f.references)?;
+        out.append(d)?;
+    }
+    Ok(out)
+}
+
 /// Builds the core context: `threads` workers (0 = all CPUs), Ctrl-C polling and, when
 /// `verbose > 0`, log lines written to `sys.stdout`. Must be called inside `py.detach`.
 fn with_ctx<T>(threads: usize, verbose: u8, f: impl FnOnce(&Ctx) -> T) -> T {
@@ -189,7 +212,8 @@ fn with_ctx<T>(threads: usize, verbose: u8, f: impl FnOnce(&Ctx) -> T) -> T {
     f(&ctx)
 }
 
-/// Retained data for post-hoc variance matrices (`Feols.vcov(...)`).
+/// Retained data for post-hoc variance matrices (`Feols.vcov(...)`) and lazily computed
+/// fixed-effect values (`Feols.fixef()`, `predict(newdata)`).
 #[pyclass(frozen, module = "fereg._core")]
 struct FitState {
     inner: cf::FitState,
@@ -223,6 +247,14 @@ impl FitState {
             .detach(|| with_ctx(threads, 0, |ctx| self.inner.vcov(kind, &ssc, &cols, &names, &cluster, ctx)))
             .map_err(to_pyerr)?;
         vcov_dict(py, out)
+    }
+
+    /// Fixed-effect values under `norm` ("minnorm" | "fixest"), as `FitResult.fixef`.
+    #[pyo3(signature = (norm="minnorm", threads=0))]
+    fn fixef<'py>(&self, py: Python<'py>, norm: &str, threads: usize) -> PyResult<Bound<'py, PyList>> {
+        let norm = parse_fixef_norm(norm)?;
+        let values = py.detach(|| with_ctx(threads, 0, |ctx| self.inner.fixef(norm, ctx))).map_err(to_pyerr)?;
+        fixef_list(py, values)
     }
 
     /// Estimation rows.
@@ -333,16 +365,7 @@ fn convert(py: Python<'_>, o: cf::FitOutput) -> PyResult<FitResult> {
         }
     };
 
-    let fixef = PyList::empty(py);
-    for f in o.fixef {
-        let d = PyDict::new(py);
-        d.set_item("term", f.term)?;
-        d.set_item("slope", f.slope)?;
-        d.set_item("values", f.values.into_pyarray(py))?;
-        d.set_item("first_obs", f.first_obs.into_pyarray(py))?;
-        d.set_item("references", f.references)?;
-        fixef.append(d)?;
-    }
+    let fixef = fixef_list(py, o.fixef)?;
 
     let state = match o.state {
         Some(st) => Py::new(py, FitState { inner: st })?.into_any(),
@@ -406,11 +429,7 @@ fn parse_spec(
             "perfect" => FixefRm::Perfect,
             _ => return Err(bad("fixef_rm", fixef_rm)),
         },
-        fixef_norm: match fixef_norm {
-            "fixest" => FixefNorm::Fixest,
-            "minnorm" => FixefNorm::MinNorm,
-            _ => return Err(bad("fixef_norm", fixef_norm)),
-        },
+        fixef_norm: parse_fixef_norm(fixef_norm)?,
         ..FitSpec::default()
     })
 }
