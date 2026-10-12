@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.9.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fereg"
+description = "Fast high-dimensional fixed-effects regressions (OLS, IV, Poisson, logit) with pyfixest-compatible results"
+dynamic = ["version"]
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Leo Liu", email = "auleo.liu@gmail.com" }]
+dependencies = ["numpy>=1.25", "pandas>=1.5"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.optional-dependencies]
+# Fallback for formula terms the native parser does not handle.
+formulaic = ["formulaic>=1.1"]
+
+[project.urls]
+Repository = "https://github.com/leoliu0/fereg"
+
+[tool.maturin]
+manifest-path = "../crates/fereg-py/Cargo.toml"
+python-source = "."
+module-name = "fereg._core"
+strip = true
+profile = "release"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
