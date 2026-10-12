@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -75,3 +79,144 @@ jobs:
         run: |
           cl /nologo /O2 /DSYSTEM=STWIN32 /Icrates\fereg-stata\c tests\mockhost\mockhost.c /Fe:target\mockhost.exe
           target\mockhost.exe stata\fereg.plugin
+
+  versions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cargo, R package and Stata ado versions agree
+        run: sh scripts/check-versions.sh
+
+  python:
+    name: python (${{ matrix.os }}, ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python: ["3.10", "3.14"]
+        include:
+          # One job installs R + fixest so the two-endogenous IV parity test runs against fixest;
+          # everywhere else it skips (no Rscript, or Rscript without fixest).
+          - os: ubuntu-24.04
+            python: "3.14"
+            with-r: true
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: py${{ matrix.python }}
+
+      - name: Build and install the wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin==1.15.0
+          (cd python && maturin build --release --locked --out ../dist -i python)
+          python -m pip install dist/*.whl
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install pytest polars pyarrow formulaic tabulate scipy
+          # pyfixest 0.60.0 has no wheel for every platform (e.g. macOS cp310): its parity tests
+          # skip (pytest.importorskip) where no wheel exists instead of compiling it from source.
+          python -m pip install --only-binary pyfixest pyfixest==0.60.0 \
+            || echo "::warning::no pyfixest 0.60.0 wheel for this platform; pyfixest parity tests skip"
+
+      - uses: r-lib/actions/setup-r@v2
+        if: matrix.with-r
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        if: matrix.with-r
+        with:
+          packages: any::fixest
+
+      # Run from the repository root so the installed wheel (not python/fereg) is imported.
+      - name: pytest
+        run: python -m pytest python/tests -rs
+
+      - name: IV parity vs fixest ran (not skipped)
+        if: matrix.with-r
+        run: |
+          python -m pytest "python/tests/test_parity_iv.py::test_two_endogenous_vs_fixest" -rs | tee pytest-iv.txt
+          grep -q "1 passed" pytest-iv.txt
+
+  r:
+    name: R (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      NOT_CRAN: "true"
+      _R_CHECK_FORCE_SUGGESTS_: "true"
+    steps:
+      - uses: actions/checkout@v7
+
+      # Windows R builds with Rtools (GNU ABI): the Rust target is x86_64-pc-windows-gnu.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'Windows' && 'x86_64-pc-windows-gnu' || '' }}
+
+      - name: Copy fereg-core into the R package
+        run: sh scripts/sync-core.sh
+
+      # The Makevars build in a temporary directory; FEREG_CARGO_TARGET_DIR points cargo at a
+      # cached target directory instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: r/fereg/src/rust -> target
+          key: r
+      - name: Cargo target directory
+        run: echo "FEREG_CARGO_TARGET_DIR=$(pwd -W 2>/dev/null || pwd)/r/fereg/src/rust/target" >> "$GITHUB_ENV"
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r/fereg
+          extra-packages: any::fixest, any::testthat, any::data.table, any::generics
+
+      - name: R CMD build
+        run: R CMD build r/fereg
+
+      - name: R CMD check
+        run: R CMD check --no-manual fereg_*.tar.gz
+
+      - name: Check log has no WARNING or ERROR; tests ran without skips
+        if: always()
+        run: |
+          log=fereg.Rcheck/00check.log
+          test -f "$log"
+          status=$(grep '^Status:' "$log" || true)
+          echo "$status"
+          test -n "$status"
+          if echo "$status" | grep -Eq 'WARNING|ERROR'; then
+            grep -n -B2 -A12 -E '\.\.\. (WARNING|ERROR)$' "$log" || true
+            exit 1
+          fi
+          summary=$(grep -h -E '\[ FAIL [0-9]+ \| WARN [0-9]+ \| SKIP [0-9]+ \| PASS [0-9]+ \]' fereg.Rcheck/tests/testthat.Rout* | tail -1)
+          echo "testthat: $summary"
+          # Test warnings are not checked: on macOS the CRAN fixest binary (the reference) warns
+          # that it has no OpenMP when the tests ask it for 2 threads.
+          echo "$summary" | grep -Eq 'FAIL 0 \| WARN [0-9]+ \| SKIP 0 \|'
+
+      - name: Installation and test output
+        if: failure()
+        run: |
+          cat fereg.Rcheck/00install.out || true
+          cat fereg.Rcheck/tests/testthat.Rout* || true
