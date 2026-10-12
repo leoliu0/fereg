@@ -209,3 +209,27 @@ fn posthoc_requests() {
     assert_eq!(a, b);
     assert_eq!(a.n_clusters.len(), 3);
 }
+
+/// `FitState::fixef` (fixed effects on demand) equals the values computed at fit time, under
+/// both normalizations, and a fit without `keep_fixef` returns none.
+#[test]
+fn lazy_fixef_matches_eager() {
+    let mut cases = read_json("fit_fixest_fe.json").list();
+    for file in ["fit_fixest_iv.json", "fit_fixest_glm.json", "fit_pyfixest_b.json", "fit_pyfixest_glm.json"] {
+        cases.extend(read_json(file).list().into_iter().filter(|c| c.get("error").is_none() && !c.at("fe").list().is_empty()));
+    }
+    assert!(cases.len() >= 40);
+    for j in &cases {
+        let name = j.at("name").str();
+        let case = Case::new(j, FactorKind::F64);
+        let input = case.input();
+        let flavor = if name.starts_with("py_") { Flavor::Pyfixest } else { Flavor::Fixest };
+        let lazy = fit::fit(&input, &fit::FitSpec { keep_fixef: false, ..case.spec(flavor) }, &Ctx::quiet(3)).unwrap();
+        assert!(lazy.fixef.is_empty(), "{name}");
+        for norm in [FixefNorm::Fixest, FixefNorm::MinNorm] {
+            let eager = fit::fit(&input, &fit::FitSpec { keep_fixef: true, fixef_norm: norm, ..case.spec(flavor) }, &Ctx::quiet(3)).unwrap();
+            assert_eq!(eager.coef, lazy.coef, "{name}");
+            assert_eq!(lazy.state.as_ref().unwrap().fixef(norm, &Ctx::quiet(1)).unwrap(), eager.fixef, "{name} {norm:?}");
+        }
+    }
+}

@@ -30,6 +30,23 @@ pub(crate) struct Sample {
     /// Pyfixest flavor with its `fe` separation check: levels per intercept term before that
     /// check (pyfixest's `feglm` keeps these counts in its degrees of freedom).
     pub levels_before_separation: Option<Vec<usize>>,
+    /// Pyfixest-flavor logit: the rows of the reported sample left out of the session.
+    pub excluded: Option<Excluded>,
+}
+
+/// Rows of the reported sample left out of the session (Pyfixest-flavor logit): those of the
+/// levels whose remaining outcomes are all 0 or all 1 (recursively, as fixest's perfect-fit
+/// rule). pyfixest keeps them, but their linear predictor diverges in its IRLS and they carry
+/// no information on β: IRLS runs without them (exactly the limit pyfixest approaches) and the
+/// outputs report them at the bound.
+pub(crate) struct Excluded {
+    /// Input rows left out (ascending).
+    pub rows: Vec<u32>,
+    /// Input rows of the reported sample before any GLM-internal drop (ascending), and the
+    /// codes over them of every term and cluster dimension.
+    pub reported: Vec<u32>,
+    pub terms: Vec<Codes>,
+    pub clusters: Vec<Codes>,
 }
 
 pub(crate) fn validate(input: &FitInput, spec: &FitSpec) -> Result<(), RfError> {
@@ -47,6 +64,9 @@ pub(crate) fn validate(input: &FitInput, spec: &FitSpec) -> Result<(), RfError> 
     }
     if input.factor_names.len() != input.factors.len() {
         return bad("one name per factor is required".into());
+    }
+    if input.fe.len() > 255 {
+        return bad("at most 255 fixed-effect terms are supported".into());
     }
     for t in &input.fe {
         if t.factors.is_empty() || t.factors.iter().any(|&f| f >= input.factors.len()) {
@@ -96,6 +116,16 @@ pub(crate) fn factor_missing(col: &FactorCol, i: usize) -> bool {
 /// Dense codes of a factor column over the rows `kept` (ascending input rows, none missing).
 pub(crate) fn factor_kept_codes(col: &FactorCol, kept: &[u32], pool: &Pool) -> Result<Codes, RfError> {
     factor::restrict(&factor::factorize_col(col, pool)?, kept, pool)
+}
+
+/// Dense codes over the input rows `kept` of the interaction of the factor columns `dim`
+/// (combined in `dim` order, as the session's terms and clusters).
+pub(crate) fn interaction_kept_codes(factors: &[FactorCol], dim: &[usize], kept: &[u32], pool: &Pool) -> Result<Codes, RfError> {
+    let mut parts: Vec<Codes> = dim.iter().map(|&f| factor_kept_codes(&factors[f], kept, pool)).collect::<Result<_, _>>()?;
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("one part"));
+    }
+    factor::combine(&parts.iter().collect::<Vec<_>>(), pool)
 }
 
 /// Missing entries of a factor column within `range`, as `bit` in `mask`.
@@ -251,17 +281,37 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         counts.fe_separated = separated as u64;
         levels
     });
+    let excluded = if pyfixest_sep && family == Family::Logit {
+        let reported_mask = alive.clone();
+        sample::drop_singletons(&tc, &mut alive, None, Some(SepRule { y: input.y, family }), false, pool);
+        let rows: Vec<u32> = pool.install(|| (0..input.n as u32).into_par_iter().filter(|&i| reported_mask[i as usize] && !alive[i as usize]).collect());
+        if rows.is_empty() {
+            None
+        } else {
+            let reported: Vec<u32> = pool.install(|| (0..input.n as u32).into_par_iter().filter(|&i| reported_mask[i as usize]).collect());
+            let on_reported = |c: &Codes| factor::restrict(c, &reported, pool);
+            Some(Excluded {
+                terms: term_codes.iter().map(on_reported).collect::<Result<_, _>>()?,
+                clusters: cluster_codes.iter().map(|(_, c)| on_reported(c)).collect::<Result<_, _>>()?,
+                rows,
+                reported,
+            })
+        }
+    } else {
+        None
+    };
     crate::solve::log_phase(ctx, &mut t, "fit: singletons");
     dropped.singletons = counts.singletons as usize;
     dropped.perfect_fit = counts.fe_separated as usize;
-    let kept = input.n - dropped.na - dropped.zero_weight - dropped.singletons - dropped.perfect_fit;
+    let left_out = excluded.as_ref().map_or(0, |e| e.rows.len());
+    let kept = input.n - dropped.na - dropped.zero_weight - dropped.singletons - dropped.perfect_fit - left_out;
     if kept < 2 {
         return Err(RfError::TooFewObs);
     }
 
     // GLM fixed-effect values come from the session's saved terms (linear models read the
     // absorber's coefficients directly).
-    let save = spec.model != Model::Ols && spec.keep_fixef;
+    let save = spec.model != Model::Ols && (spec.keep_fixef || spec.keep_state);
     let absorb: Vec<AbsorbTerm> =
         input.fe.iter().map(|t| AbsorbTerm { factors: t.factors.clone(), intercept: t.intercept, slopes: t.slopes.clone(), save }).collect();
     let parts = Parts {
@@ -282,7 +332,7 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         counts,
     };
     let session = Session::from_parts(parts, AbsorberKind::Fast, pool, ctx)?;
-    Ok(Sample { session, dropped, levels_before_separation })
+    Ok(Sample { session, dropped, levels_before_separation, excluded })
 }
 
 /// pyfixest's `fe` separation check (fepois_.py `_check_for_separation_fe`): unless every

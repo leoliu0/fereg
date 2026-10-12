@@ -154,7 +154,11 @@ pub enum FixefRm {
     /// Singletons plus, for GLMs, FE levels whose outcome is constant at a bound (Poisson: all 0;
     /// logit: all 0 or all 1), recursively. Same as `Singleton` for OLS. fixest `perfect_fit`.
     /// [`Flavor::Pyfixest`]: pyfixest's `fe` separation check instead, once after the
-    /// singletons, dropping levels whose outcome is all 0 (logit too).
+    /// singletons, dropping levels whose outcome is all 0 (logit too). For logit the rest of
+    /// fixest's rule applies to IRLS only: the rows of levels whose remaining outcomes are all 0
+    /// or all 1 stay in the reported sample (pyfixest's nobs and degrees of freedom) at the limit
+    /// pyfixest's IRLS approaches: μ at the bound (1 − 100ε or 100ε), IRLS weight w·μ(1 − μ), no
+    /// contribution to the scores, and fixed effects ±∞ on levels with no other row.
     #[default]
     Perfect,
 }
@@ -225,10 +229,12 @@ pub struct FitSpec {
     pub glm_maxiter: usize,
     /// Return residuals and fitted values (and GLM `eta`, IRLS weights).
     pub keep_resid: bool,
-    /// Return the fixed-effect values.
+    /// Return the fixed-effect values (normalized at fit time; [`FitState::fixef`] computes
+    /// them on demand instead).
     pub keep_fixef: bool,
     pub fixef_norm: FixefNorm,
-    /// Keep the [`FitState`] for post-hoc variance matrices (`false` = fixest/pyfixest `lean`).
+    /// Keep the [`FitState`] for post-hoc variance matrices and fixed-effect values (`false` =
+    /// fixest/pyfixest `lean`).
     pub keep_state: bool,
 }
 
@@ -453,7 +459,8 @@ pub struct FitOutput {
     pub state: Option<FitState>,
 }
 
-/// Retained data for post-hoc variance matrices (fixest `summary(m, vcov=)`, pyfixest `m.vcov()`).
+/// Retained data for post-hoc variance matrices (fixest `summary(m, vcov=)`, pyfixest
+/// `m.vcov()`) and fixed-effect values (fixest / pyfixest `fixef()`).
 pub struct FitState {
     inner: state::State,
 }
@@ -472,6 +479,13 @@ impl FitState {
         ctx: &Ctx,
     ) -> Result<VcovOutput, RfError> {
         self.inner.vcov(kind, ssc, factors, factor_names, cluster, ctx)
+    }
+
+    /// Fixed-effect values of the fit under `norm`, as [`FitOutput::fixef`] with
+    /// [`FitSpec::keep_fixef`] (empty without fixed-effect terms). Hosts that fit with
+    /// `keep_fixef = false` call this on demand (fixest `fixef()`, `predict(newdata)`).
+    pub fn fixef(&self, norm: FixefNorm, ctx: &Ctx) -> Result<Vec<FixefValues>, RfError> {
+        self.inner.fixef(norm, ctx)
     }
 
     /// Estimation rows.
