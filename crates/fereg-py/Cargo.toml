@@ -1,0 +1,19 @@
+[package]
+name = "fereg-py"
+description = "Python bindings of fereg-core (the `fereg._core` extension module)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# Must equal the last component of `module-name` in python/pyproject.toml and the #[pymodule] name.
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+fereg-core = { path = "../fereg-core" }
+pyo3 = "0.29.3"
+numpy = "0.29.0"

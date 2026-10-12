@@ -1,5 +1,7 @@
 [workspace]
-members = ["crates/fereg-core", "crates/fereg-stata"]
+members = ["crates/fereg-core", "crates/fereg-stata", "crates/fereg-py"]
+# The R package's Rust crate is its own workspace (built by R CMD INSTALL).
+exclude = ["r"]
 resolver = "3"
 
 [workspace.package]

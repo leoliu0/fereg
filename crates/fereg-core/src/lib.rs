@@ -2,7 +2,9 @@
 //!
 //! The solver eliminates the largest fixed effect exactly and runs preconditioned conjugate
 //! gradient on cell-compressed sufficient statistics (see `structure`, `operator`, `cg`).
-//! Numbers follow reghdfe / ivreghdfe / ppmlhdfe conventions.
+//! The Stata plugin's estimators (`ols`, `iv`, `glm`) follow reghdfe / ivreghdfe / ppmlhdfe
+//! conventions; `fit` is the host-neutral layer of the Python and R packages (fixest / pyfixest
+//! conventions).
 
 pub mod absorber;
 pub mod api;
@@ -11,6 +13,7 @@ pub mod dof;
 pub mod error;
 pub mod factor;
 pub mod fe_recovery;
+pub mod fit;
 pub mod gather;
 pub mod glm;
 pub mod iv;
