@@ -27,6 +27,9 @@ const GROUPS: usize = 9;
 pub(crate) struct Sample {
     pub session: Session,
     pub dropped: Dropped,
+    /// Pyfixest flavor with its `fe` separation check: levels per intercept term before that
+    /// check (pyfixest's `feglm` keeps these counts in its degrees of freedom).
+    pub levels_before_separation: Option<Vec<usize>>,
 }
 
 pub(crate) fn validate(input: &FitInput, spec: &FitSpec) -> Result<(), RfError> {
@@ -238,8 +241,16 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         .filter(|(t, _)| t.intercept)
         .map(|(_, c)| TermCodes { codes: &c.codes, g: c.n as usize })
         .collect();
-    let sep = sep_fe.then_some(SepRule { y: input.y, family });
-    let counts = sample::drop_singletons(&tc, &mut alive, None, sep, singletons, pool);
+    // fixest removes perfect-fit levels inside the singleton loop; pyfixest runs its `fe` check
+    // once afterwards.
+    let pyfixest_sep = sep_fe && spec.flavor == Flavor::Pyfixest;
+    let sep = (sep_fe && !pyfixest_sep).then_some(SepRule { y: input.y, family });
+    let mut counts = sample::drop_singletons(&tc, &mut alive, None, sep, singletons, pool);
+    let levels_before_separation = pyfixest_sep.then(|| {
+        let (separated, levels) = pyfixest_separation(&tc, &mut alive, input.y);
+        counts.fe_separated = separated as u64;
+        levels
+    });
     crate::solve::log_phase(ctx, &mut t, "fit: singletons");
     dropped.singletons = counts.singletons as usize;
     dropped.perfect_fit = counts.fe_separated as usize;
@@ -248,8 +259,11 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         return Err(RfError::TooFewObs);
     }
 
+    // GLM fixed-effect values come from the session's saved terms (linear models read the
+    // absorber's coefficients directly).
+    let save = spec.model != Model::Ols && spec.keep_fixef;
     let absorb: Vec<AbsorbTerm> =
-        input.fe.iter().map(|t| AbsorbTerm { factors: t.factors.clone(), intercept: t.intercept, slopes: t.slopes.clone(), save: false }).collect();
+        input.fe.iter().map(|t| AbsorbTerm { factors: t.factors.clone(), intercept: t.intercept, slopes: t.slopes.clone(), save }).collect();
     let parts = Parts {
         n_input: input.n,
         alive,
@@ -268,5 +282,43 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         counts,
     };
     let session = Session::from_parts(parts, AbsorberKind::Fast, pool, ctx)?;
-    Ok(Sample { session, dropped })
+    Ok(Sample { session, dropped, levels_before_separation })
+}
+
+/// pyfixest's `fe` separation check (fepois_.py `_check_for_separation_fe`): unless every
+/// outcome is positive, drop the rows of every level, of any intercept term, whose outcomes are
+/// all zero; one pass, no singleton re-check (logit too: all-one levels stay). Returns the rows
+/// dropped and the levels present per term before the check.
+fn pyfixest_separation(tc: &[TermCodes], alive: &mut [bool], y: &[f64]) -> (usize, Vec<usize>) {
+    let levels: Vec<usize> = tc
+        .iter()
+        .map(|t| {
+            let mut seen = vec![false; t.g];
+            t.codes.iter().zip(alive.iter()).filter(|(_, a)| **a).for_each(|(&c, _)| seen[c as usize] = true);
+            seen.iter().filter(|s| **s).count()
+        })
+        .collect();
+    if alive.iter().zip(y).all(|(a, &v)| !*a || v > 0.0) {
+        return (0, levels);
+    }
+    let mut drop = vec![false; alive.len()];
+    for t in tc {
+        let mut positive = vec![false; t.g];
+        for ((&c, &a), &v) in t.codes.iter().zip(alive.iter()).zip(y) {
+            if a && v > 0.0 {
+                positive[c as usize] = true;
+            }
+        }
+        for ((&c, &a), d) in t.codes.iter().zip(alive.iter()).zip(drop.iter_mut()) {
+            *d |= a && !positive[c as usize];
+        }
+    }
+    let mut n = 0;
+    for (a, d) in alive.iter_mut().zip(drop) {
+        if *a && d {
+            *a = false;
+            n += 1;
+        }
+    }
+    (n, levels)
 }

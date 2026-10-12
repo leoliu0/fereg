@@ -3,8 +3,9 @@
     python/.venv/bin/python crates/fereg-core/tests/data/gen_fit_fixtures.py   (repository root)
 
 Reads tests/data/fit_d1.csv (written by gen_fit_fixtures.R) and writes, in the layout of the
-fixest fixtures (the fields pyfixest reports), tests/data/fit_pyfixest.json (OLS) and
-tests/data/fit_pyfixest_b.json (IV, fixed-effect values, post-hoc variance matrices).
+fixest fixtures (the fields pyfixest reports), tests/data/fit_pyfixest.json (OLS),
+tests/data/fit_pyfixest_b.json (IV, fixed-effect values, post-hoc variance matrices) and
+tests/data/fit_pyfixest_glm.json (Poisson and logit, iwls_tol = 1e-12).
 """
 
 import json
@@ -24,9 +25,15 @@ def num(v):
     return [None if not np.isfinite(x) else float(x) for x in np.asarray(v, dtype=float).ravel()]
 
 
-def fit(fml, vcov, weights, weights_type, ssc, intercept):
+def fit(fml, vcov, weights, weights_type, ssc, intercept, model="ols", offset=None):
+    dm = pf.MapDemeaner(fixef_tol=1e-12, fixef_maxiter=100000)
+    glm = dict(vcov=vcov, ssc=pf.ssc(**ssc), iwls_tol=1e-12, iwls_maxiter=100, demeaner=dm)
+    if model == "poisson":
+        return pf.fepois(fml, data, weights=weights, weights_type=weights_type, offset=offset, **glm)
+    if model == "logit":
+        return pf.feglm(fml, data, family="logit", **glm)
     return pf.feols(fml, data, vcov=vcov, weights=weights, weights_type=weights_type, ssc=pf.ssc(**ssc),
-                    drop_intercept=not intercept, demeaner=pf.MapDemeaner(fixef_tol=1e-12, fixef_maxiter=100000))
+                    drop_intercept=not intercept, demeaner=dm)
 
 
 def vcov_fields(m):
@@ -34,11 +41,11 @@ def vcov_fields(m):
 
 
 def case(name, fml, y, x, fe, intercept, vcov, cluster=(), weights=None, weights_type="aweights", ssc=None,
-         endog=(), inst=(), fixef=False, posthoc=()):
+         endog=(), inst=(), fixef=False, posthoc=(), model="ols", offset=None):
     ssc = {**SSC, **(ssc or {})}
     out = dict(
-        name=name, data="fit_d1.csv", y=y, x=x, endog=list(endog), inst=list(inst), fe=fe, intercept=intercept,
-        weights=weights, weights_type=weights_type,
+        name=name, data="fit_d1.csv", model=model, y=y, x=x, endog=list(endog), inst=list(inst), fe=fe, intercept=intercept,
+        weights=weights, weights_type=weights_type, offset=offset,
         vcov=vcov if isinstance(vcov, str) else "cluster", cluster=[list(d) for d in cluster],
         ssc={"K.adj": ssc["k_adj"], "K.fixef": ssc["k_fixef"], "K.exact": False, "G.adj": ssc["G_adj"], "G.df": ssc["G_df"], "t.df": "min"},
         posthoc=[dict(vcov=p[0] if isinstance(p[0], str) else "cluster", cluster=[list(d) for d in p[1]],
@@ -46,20 +53,30 @@ def case(name, fml, y, x, fe, intercept, vcov, cluster=(), weights=None, weights
                  for p in posthoc],
     )
     try:
-        m = fit(fml, vcov, weights, weights_type, ssc, intercept)
+        m = fit(fml, vcov, weights, weights_type, ssc, intercept, model, offset)
     except Exception as e:  # noqa: BLE001 - the error class is the expectation
         out["error"] = type(e).__name__
         return out
     names = list(m._coefnames)
     out["expect"] = dict(
         coef_names=["(Intercept)" if n == "Intercept" else n for n in names],
-        coef=num(m.coef()), nobs=int(m._N_rows) if hasattr(m, "_N_rows") else int(m._N),
+        # pyfixest's feglm does not update _N_rows after its separation check.
+        coef=num(m.coef()), nobs=int(m._N_rows) if hasattr(m, "_N_rows") and model == "ols" else int(m._N),
         n_eff=float(m._N), collin=list(m._collin_vars) if m._collin_vars else [],
-        r2=float(m._r2), ar2=float(m._adj_r2),
-        wr2=float(m._r2_within) if fe else None, war2=float(m._adj_r2_within) if fe else None, rmse=float(m._rmse),
-        resid=num(m.resid()) if vcov == "iid" else [],
         **vcov_fields(m),
     )
+    if model == "ols":
+        out["expect"].update(
+            r2=float(m._r2), ar2=float(m._adj_r2),
+            wr2=float(m._r2_within) if fe else None, war2=float(m._adj_r2_within) if fe else None, rmse=float(m._rmse),
+            resid=num(m.resid()) if vcov == "iid" else [],
+        )
+    else:
+        # pyfixest reports no log-likelihood for logit, and none of these with some options.
+        out["expect"]["deviance"] = float(m.deviance)
+        for key, attr in [("ll", "_loglik"), ("ll_null", "_loglik_null"), ("pr2", "_pseudo_r2")]:
+            if getattr(m, attr, None) is not None:
+                out["expect"][key] = float(getattr(m, attr))
     if endog:
         m.first_stage()
         f1 = m._model_1st_stage
@@ -126,3 +143,21 @@ cases = [
 ]
 (DIR / "fit_pyfixest_b.json").write_text(json.dumps(cases))
 print("fit_pyfixest_b.json", len(cases), "cases")
+
+FP = "yp ~ x1 + x2 | g + h"
+FB = "yb ~ x1 + x2 | g + h"
+pois = dict(model="poisson")
+logit = dict(model="logit")
+cases = [
+    case("py_pois_fe2_iid", FP, "yp", ["x1", "x2"], fe2, True, "iid", **pois),
+    case("py_pois_fe2_hetero", FP, "yp", ["x1", "x2"], fe2, True, "hetero", **pois),
+    case("py_pois_fe2_cl_c3", FP, "yp", ["x1", "x2"], fe2, True, {"CRV1": "c3"}, [["c3"]], **pois),
+    case("py_pois_fe2_off_w", FP, "yp", ["x1", "x2"], fe2, True, "hetero", weights="w", offset="lo", **pois),
+    case("py_pois_nofe", "yp ~ x1 + x2", "yp", ["x1", "x2"], [], True, "iid", posthoc=[("hetero", [])], **pois),
+    case("py_logit_fe2_iid", FB, "yb", ["x1", "x2"], fe2, True, "iid", **logit),
+    case("py_logit_fe2_cl_g", FB, "yb", ["x1", "x2"], fe2, True, {"CRV1": "g"}, [["g"]], **logit),
+    case("py_logit_fe1_hetero", "yb ~ x1 + x2 | g", "yb", ["x1", "x2"], [["g"]], True, "hetero", **logit),
+    case("py_logit_nofe", "yb ~ x1 + x2", "yb", ["x1", "x2"], [], True, "iid", **logit),
+]
+(DIR / "fit_pyfixest_glm.json").write_text(json.dumps(cases))
+print("fit_pyfixest_glm.json", len(cases), "cases")

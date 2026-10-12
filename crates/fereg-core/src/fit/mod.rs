@@ -16,6 +16,7 @@ use crate::par;
 pub mod dist;
 mod design;
 mod fixef;
+mod glm;
 mod input;
 mod ols;
 mod state;
@@ -152,6 +153,8 @@ pub enum FixefRm {
     Singleton,
     /// Singletons plus, for GLMs, FE levels whose outcome is constant at a bound (Poisson: all 0;
     /// logit: all 0 or all 1), recursively. Same as `Singleton` for OLS. fixest `perfect_fit`.
+    /// [`Flavor::Pyfixest`]: pyfixest's `fe` separation check instead, once after the
+    /// singletons, dropping levels whose outcome is all 0 (logit too).
     #[default]
     Perfect,
 }
@@ -297,23 +300,31 @@ pub struct VcovOutput {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FitStats {
-    /// Σw·e².
+    /// Σw·e² (GLM: response residuals y − μ).
     pub ssr: f64,
     /// Σw·(y − ȳ_w)².
     pub ssr_null: f64,
-    /// Σw·ỹ² (y net of the fixed effects).
+    /// Σw·ỹ² (y net of the fixed effects); NaN for GLMs.
     pub ssr_fe_only: f64,
-    /// ssr / (n − nparams).
+    /// ssr / (n − nparams); NaN for GLMs.
     pub sigma2: f64,
     /// sqrt(ssr / n), n = Σw when weighted.
     pub rmse: f64,
+    /// R² family; NaN for GLMs.
     pub r2: f64,
     pub ar2: f64,
     pub wr2: f64,
     pub war2: f64,
+    /// fixest `logLik`: OLS −n/2·(1 + ln 2π + ln(Σe²/n)); Poisson Σw(y·η − μ − lnΓ(y+1)); logit
+    /// Σ ln dbinom(round(w·y), round(w), μ) (fixest's binomial with the weights as trials).
     pub loglik: f64,
+    /// Log-likelihood of the constant-only model. GLM (fixest `ll_null`): without the offset;
+    /// Poisson `sy·ln(sy/N) − sy − Σ lnΓ(y+1)` (sy = Σwy, N = Σw, unweighted factorials), logit
+    /// `sy·ln p + (N − sy)·ln(1 − p)` with p = sy/N.
     pub ll_null: f64,
+    /// OLS: ssr. GLM: the model deviance.
     pub deviance: f64,
+    /// OLS: ssr_null. GLM: deviance of the constant-only model without offset.
     pub null_deviance: f64,
     /// 1 − ll/ll_null.
     pub pseudo_r2: f64,
@@ -472,11 +483,11 @@ impl FitState {
 /// Estimates one model.
 pub fn fit(input: &FitInput, spec: &FitSpec, ctx: &Ctx) -> Result<FitOutput, RfError> {
     input::validate(input, spec)?;
-    if spec.model != Model::Ols {
-        return Err(RfError::InvalidInput("Poisson and logit estimation are not available yet".into()));
-    }
     par::with_pool(par::threads_for(ctx.threads, input.n), |pool| {
         let sample = input::build(input, spec, ctx, pool)?;
-        ols::linear(input, spec, sample, ctx, pool)
+        match spec.model {
+            Model::Ols => ols::linear(input, spec, sample, ctx, pool),
+            Model::Poisson | Model::Logit => glm::glm(input, spec, sample, ctx, pool),
+        }
     })?
 }

@@ -217,7 +217,7 @@ pub fn pchisq_upper(x: f64, df: f64) -> f64 {
 }
 
 /// ln Γ(x) for x > 0 (Lanczos, g = 7, n = 9; relative error < 1e-15).
-fn ln_gamma(x: f64) -> f64 {
+pub(crate) fn ln_gamma(x: f64) -> f64 {
     const C: [f64; 9] = [
         0.999_999_999_999_809_9,
         676.520_368_121_885_1,

@@ -22,15 +22,20 @@ use crate::stats;
 /// fixest `nparams`: kept coefficients plus FE parameters (fixest_env.R): every intercept term
 /// counts G·(1 + #slopes), a slope-only term G·#slopes, minus one per intercept term beyond the first.
 pub(crate) fn nparams(k: usize, session: &Session) -> usize {
-    let terms = session.terms();
+    let sizes: Vec<usize> = session.terms().iter().map(|t| t.g).collect();
+    nparams_with(k, session.terms(), &sizes)
+}
+
+/// [`nparams`] with `sizes[q]` levels for term q.
+pub(crate) fn nparams_with(k: usize, terms: &[crate::session::Term], sizes: &[usize]) -> usize {
     let n_icpt = terms.iter().filter(|t| t.intercept).count();
-    let fe: usize = terms.iter().map(|t| t.g * (usize::from(t.intercept) + t.slopes.len())).sum();
+    let fe: usize = terms.iter().zip(sizes).map(|(t, g)| g * (usize::from(t.intercept) + t.slopes.len())).sum();
     k + fe - n_icpt.saturating_sub(1)
 }
 
 /// Weighted mean and Σw(y − ȳ_w)² of the input y over the kept rows (kept order weights),
 /// chunked with Chan's merge in chunk order. Returns (Σw, ȳ_w, ssr_null).
-fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -> (f64, f64, f64) {
+pub(crate) fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -> (f64, f64, f64) {
     let parts = par::map_chunks(pool, kept.len(), CHUNK, |_, range| {
         let wi = |i: usize| w.map_or(1.0, |w| w[i]);
         let sw: f64 = range.clone().map(wi).sum();
@@ -48,35 +53,28 @@ fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -> (f64, f64
     (sw, mean, m2)
 }
 
-/// Fitted values y − e (kept order) and their squared correlation with y (fixest `sq.cor`; NaN
-/// when the fitted values are constant), in one chunked pass with Chan's merge.
-fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec<f64>, f64), RfError> {
-    let mut fitted = par::alloc_vec(kept.len(), 0.0)?;
-    let parts: Vec<[f64; 6]> = pool.install(|| {
-        fitted
-            .par_chunks_mut(CHUNK)
-            .zip(kept.par_chunks(CHUNK).zip(e.par_chunks(CHUNK)))
-            .map(|(f, (kc, ec))| {
-                let c = f.len() as f64;
-                let (mut sy, mut sf) = (0.0, 0.0);
-                for ((f, &i), &ei) in f.iter_mut().zip(kc).zip(ec) {
-                    let yi = y[i as usize];
-                    *f = yi - ei;
-                    sy += yi;
-                    sf += *f;
-                }
-                let (my, mf) = (sy / c, sf / c);
-                let (mut syy, mut sff, mut syf) = (0.0, 0.0, 0.0);
-                for (f, &i) in f.iter().zip(kc) {
-                    let (dy, df) = (y[i as usize] - my, f - mf);
-                    syy += dy * dy;
-                    sff += df * df;
-                    syf += dy * df;
-                }
-                [c, my, mf, syy, sff, syf]
-            })
-            .collect()
-    });
+/// Partial sums of one chunk for [`sq_cor`]: count, means of y and f, centered Σy², Σf², Σyf.
+pub(crate) fn cor_part(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> [f64; 6] {
+    let (mut c, mut sy, mut sf) = (0.0, 0.0, 0.0);
+    for (y, f) in pairs.clone() {
+        c += 1.0;
+        sy += y;
+        sf += f;
+    }
+    let (my, mf) = (sy / c, sf / c);
+    let (mut syy, mut sff, mut syf) = (0.0, 0.0, 0.0);
+    for (y, f) in pairs {
+        let (dy, df) = (y - my, f - mf);
+        syy += dy * dy;
+        sff += df * df;
+        syf += dy * df;
+    }
+    [c, my, mf, syy, sff, syf]
+}
+
+/// Squared correlation of y and f from chunk partials ([`cor_part`], merged with Chan's formula
+/// in chunk order); NaN when f is constant (fixest `sq.cor`).
+pub(crate) fn sq_cor(parts: Vec<[f64; 6]>) -> f64 {
     let mut it = parts.into_iter();
     let mut a = it.next().unwrap_or([0.0; 6]);
     for b in it {
@@ -85,7 +83,25 @@ fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec
         let f = a[0] * b[0] / n;
         a = [n, a[1] + dy * b[0] / n, a[2] + df * b[0] / n, a[3] + b[3] + dy * dy * f, a[4] + b[4] + df * df * f, a[5] + b[5] + dy * df * f];
     }
-    Ok((fitted, if a[4] == 0.0 { f64::NAN } else { a[5] * a[5] / (a[3] * a[4]) }))
+    if a[4] == 0.0 { f64::NAN } else { a[5] * a[5] / (a[3] * a[4]) }
+}
+
+/// Fitted values y − e (kept order) and their squared correlation with y, in one chunked pass.
+fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec<f64>, f64), RfError> {
+    let mut fitted = par::alloc_vec(kept.len(), 0.0)?;
+    let parts: Vec<[f64; 6]> = pool.install(|| {
+        fitted
+            .par_chunks_mut(CHUNK)
+            .zip(kept.par_chunks(CHUNK).zip(e.par_chunks(CHUNK)))
+            .map(|(f, (kc, ec))| {
+                for ((f, &i), &ei) in f.iter_mut().zip(kc).zip(ec) {
+                    *f = y[i as usize] - ei;
+                }
+                cor_part(kc.iter().map(|&i| y[i as usize]).zip(f.iter().copied()))
+            })
+            .collect()
+    });
+    Ok((fitted, sq_cor(parts)))
 }
 
 /// Columns of the row block: [y, endog…, (1), inst…, x…].
@@ -154,7 +170,7 @@ struct Regressor {
 }
 
 pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
-    let Sample { mut session, dropped } = sample;
+    let Sample { mut session, dropped, .. } = sample;
     let mut t = std::time::Instant::now();
     let n = session.n();
     let has_fe = !input.fe.is_empty();

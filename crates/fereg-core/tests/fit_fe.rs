@@ -1,6 +1,6 @@
 //! `fit` varying slopes, fixed-effect values and post-hoc variance matrices against fixest 0.14.2
-//! (tests/data/fit_fixest_fe.json, the `fixef` of fit_fixest_iv.json) and pyfixest 0.60.0 (the
-//! `fixef` and post-hoc cases of tests/data/fit_pyfixest_b.json).
+//! (tests/data/fit_fixest_fe.json, the `fixef` of fit_fixest_iv.json and fit_fixest_glm.json) and
+//! pyfixest 0.60.0 (the `fixef` and post-hoc cases of tests/data/fit_pyfixest_b.json).
 
 mod fit_common;
 
@@ -89,7 +89,9 @@ fn check_fixest_fixef(j: &J, case: &Case, out: &FitOutput) {
 #[test]
 fn fixest_fe_cases() {
     let mut cases = read_json("fit_fixest_fe.json").list();
-    cases.extend(read_json("fit_fixest_iv.json").list().into_iter().filter(|c| c.at("expect").get("fixef").is_some()));
+    for file in ["fit_fixest_iv.json", "fit_fixest_glm.json"] {
+        cases.extend(read_json(file).list().into_iter().filter(|c| c.at("expect").get("fixef").is_some()));
+    }
     assert!(cases.len() >= 16);
     for j in &cases {
         let (case, out) = check_case(j, Flavor::Fixest, FactorKind::F64, 4, RTOL);
@@ -97,11 +99,13 @@ fn fixest_fe_cases() {
     }
 }
 
-/// The fixed effects add up to the fitted values net of the regressors at every row.
+/// The fixed effects add up to the fitted values net of the regressors at every row (GLM: the
+/// linear predictor net of the offset and the regressors).
 #[test]
 fn fixef_sum_identity() {
-    let cases = read_json("fit_fixest_fe.json").list();
-    for name in ["sl_g_s_h_iid", "sl_only", "fx_fe3_comp", "fx_inter"] {
+    let mut cases = read_json("fit_fixest_fe.json").list();
+    cases.extend(read_json("fit_fixest_glm.json").list());
+    for name in ["sl_g_s_h_iid", "sl_only", "fx_fe3_comp", "fx_inter", "pois_sl", "pois_sl_only", "pois_fe2_off_w", "logit_fe1_off"] {
         let j = cases.iter().find(|c| c.at("name").str() == name).unwrap();
         let case = Case::new(j, FactorKind::F64);
         let input = case.input();
@@ -111,7 +115,8 @@ fn fixef_sum_identity() {
             let terms: Vec<(usize, Option<usize>, Vec<f64>, Vec<Vec<f64>>)> =
                 ours(&case, &out).into_iter().zip(&out.fixef).map(|((_, labels, values, _), f)| (f.term, f.slope, values, labels)).collect();
             let sums = fe_sum(&case, &out, &terms);
-            let fitted = out.fitted.as_ref().unwrap();
+            let glm = case.model() != fit::Model::Ols;
+            let base = if glm { out.eta.as_ref().unwrap() } else { out.fitted.as_ref().unwrap() };
             let net: Vec<f64> = out
                 .obs
                 .iter()
@@ -127,7 +132,7 @@ fn fixef_sum_identity() {
                             _ => unreachable!(),
                         })
                         .sum();
-                    fitted[k] - xb
+                    base[k] - xb - input.offset.map_or(0.0, |o| o[i as usize])
                 })
                 .collect();
             let scale = net.iter().fold(0.0f64, |m, v| m.max(v.abs()));

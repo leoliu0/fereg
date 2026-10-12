@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use fereg_core::Ctx;
-use fereg_core::fit::{self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FitSpec, Flavor, GDf, KFixef, Ssc, TDf, VcovKind, VcovOutput, WeightsType};
+use fereg_core::fit::{self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FitSpec, Flavor, GDf, KFixef, Model, Ssc, TDf, VcovKind, VcovOutput, WeightsType};
 
 #[derive(Clone, Debug)]
 pub enum J {
@@ -292,6 +292,10 @@ impl Case {
                 Some(J::Str(w)) => Some(self.csv.col(w)),
                 _ => None,
             },
+            offset: match j.get("offset") {
+                Some(J::Str(o)) => Some(self.csv.col(o)),
+                _ => None,
+            },
             cluster: self.cluster.clone(),
             ..Default::default()
         }
@@ -300,6 +304,7 @@ impl Case {
     pub fn spec(&self, flavor: Flavor) -> FitSpec {
         let j = &self.json;
         FitSpec {
+            model: self.model(),
             flavor,
             intercept: j.at("intercept").bool(),
             vcov: parse_vcov(j.at("vcov")),
@@ -309,7 +314,17 @@ impl Case {
                 _ => WeightsType::Aweights,
             },
             fixef_tol: 1e-12,
+            glm_tol: 1e-12,
+            glm_maxiter: 100,
             ..Default::default()
+        }
+    }
+
+    pub fn model(&self) -> Model {
+        match self.json.get("model").map(J::str) {
+            Some("poisson") => Model::Poisson,
+            Some("logit") => Model::Logit,
+            _ => Model::Ols,
         }
     }
 
@@ -383,7 +398,10 @@ pub fn check_vcov(what: &str, v: &VcovOutput, names: &[String], e: &J, want_name
     let got: Vec<f64> = p.iter().flat_map(|&a| p.iter().map(move |&b| v.vcov[a * k + b])).collect();
     assert_vec(&format!("{what} vcov"), &got, &want, rtol, scale);
     assert_eq!(v.df_k, e.at("df_k").num(), "{what}: df_k");
-    assert_eq!(v.df_t, Some(e.at("df_t").num()), "{what}: df_t");
+    // GLMs report normal inference (fixest still attaches its df.t).
+    if let Some(t) = v.df_t {
+        assert_eq!(t, e.at("df_t").num(), "{what}: df_t");
+    }
     if let Some(g) = e.get("G") {
         let ours: Vec<f64> = v.n_clusters.iter().map(|&g| g as f64).collect();
         assert_eq!(ours, g.nums(), "{what}: clusters");
@@ -409,6 +427,8 @@ pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol:
     check_coef(&name, &out.coef, &names, &e.at("coef").nums(), &want_names, rtol);
     check_vcov(&name, &out.vcov, &names, e, &want_names, rtol);
     assert_eq!(out.nobs as f64, e.at("nobs").num(), "{name}: nobs");
+    let glm = case.model() != Model::Ols;
+    assert_eq!(out.vcov.df_t.is_none(), glm, "{name}: normal inference iff GLM");
     if let Some(np) = e.get("nparams") {
         assert_eq!(out.nparams as f64, np.num(), "{name}: nparams");
     }
@@ -434,10 +454,15 @@ pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol:
         ("ssr_null", s.ssr_null),
         ("ssr_fe_only", s.ssr_fe_only),
         ("sigma2", s.sigma2),
+        ("deviance", s.deviance),
         ("f_stat", s.f_test.stat),
         ("f_df1", s.f_test.df1),
         ("f_df2", s.f_test.df2),
     ] {
+        // fixest leaves ssr and ssr_null unset for GLMs (ours: response residuals).
+        if glm && (k == "ssr" || k == "ssr_null") {
+            continue;
+        }
         if let Some(x) = e.get(k) {
             assert_close(&what(k), v, x.num(), rtol);
         }
@@ -453,6 +478,13 @@ pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol:
             let fitted = f.nums();
             let scale = fitted.iter().fold(0.0f64, |m, v| m.max(v.abs()));
             assert_vec(&what("fitted"), out.fitted.as_ref().unwrap(), &fitted, rtol, scale);
+        }
+    }
+    for (k, ours) in [("eta", &out.eta), ("irls_weights", &out.irls_weights)] {
+        let want = e.get(k).map_or(Vec::new(), J::nums);
+        if !want.is_empty() {
+            let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            assert_vec(&what(k), ours.as_ref().unwrap(), &want, rtol, scale);
         }
     }
     let posthoc = case.posthoc();

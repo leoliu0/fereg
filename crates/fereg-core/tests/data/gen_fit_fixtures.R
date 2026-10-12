@@ -3,9 +3,10 @@
 #   Rscript crates/fereg-core/tests/data/gen_fit_fixtures.R   (from the repository root)
 #
 # Writes tests/data/fit_d1.csv (the data) and, one case per model and variance matrix,
-# tests/data/fit_fixest.json (OLS), fit_fixest_iv.json (IV) and fit_fixest_fe.json (varying
-# slopes, fixed-effect values, post-hoc variance matrices). fixef.tol is fixest's minimum
-# (> 2.2e-12); the Rust tests use 1e-12.
+# tests/data/fit_fixest.json (OLS), fit_fixest_iv.json (IV), fit_fixest_fe.json (varying
+# slopes, fixed-effect values, post-hoc variance matrices) and fit_fixest_glm.json (Poisson and
+# logit). fixef.tol is fixest's minimum (> 2.2e-12); the Rust tests use 1e-12. GLMs run with
+# glm.tol = 1e-12.
 suppressPackageStartupMessages({
   library(fixest)
   library(jsonlite)
@@ -45,12 +46,22 @@ yiv <- 1 + xe - 0.5 * xe2 + 0.5 * x1 + gm[g] + rnorm(12)[h] + u + rnorm(n)
 s1 <- runif(n, 0, 3)
 ys <- 1 + 0.5 * x1 + gm[g] + rnorm(45)[g] * s1 + rnorm(12)[h] + rnorm(n)
 hb <- ifelse(g <= 20, h, h + 12)
-d <- data.frame(y, x1, x2, x3, xg, g, h, k, c1, c3, cna, w, wi, z1, z2, z3, xe, xe2, yiv, s1, ys, hb)
+# GLM: offset lo, count outcome yp (all zero in g levels 38-39), binary outcome yb (all one in
+# g level 37, all zero in 36): fixest drops those perfect-fit levels.
+lo <- runif(n, -0.5, 0.5)
+yp <- rpois(n, exp(0.2 + 0.3 * x1 - 0.2 * x2 + 0.5 * gm[g] + 0.3 * rnorm(12)[h] + lo))
+yp[g %in% c(38, 39)] <- 0
+yb <- rbinom(n, 1, plogis(0.5 * x1 - 0.5 * x2 + gm[g] + rnorm(12)[h]))
+yb[g == 37] <- 1
+yb[g == 36] <- 0
+d <- data.frame(y, x1, x2, x3, xg, g, h, k, c1, c3, cna, w, wi, z1, z2, z3, xe, xe2, yiv, s1, ys, hb, lo, yp, yb)
 write.csv(d, file.path(dir, "fit_d1.csv"), row.names = FALSE, na = "NA")
 toy <- data.frame(g = rep(c(1, 2, 3), each = 2), x = c(1, 2, 1, 3, 2, 4), y = c(2, 3, 2, 5, 3, 7), t = c(1, 1, 1, 2, 2, 2))
 write.csv(toy, file.path(dir, "fit_toy.csv"), row.names = FALSE)
 
 num <- function(v) { v <- unname(as.numeric(v)); v }
+# A scalar that fixest may leave NULL / NA for some models.
+opt <- function(v) if (is.null(v) || length(v) == 0) NA else num(v)
 ssc_list <- function(s) list(K.adj = s$K.adj, K.fixef = s$K.fixef, K.exact = s$K.exact, G.adj = s$G.adj, G.df = s$G.df, t.df = s$t.df)
 
 # A fixed-effect term: factors (`^` interaction when several), varying slopes, intercept.
@@ -71,14 +82,19 @@ fixef_list <- function(m) {
 }
 
 # `posthoc`: list of list(vcov, cluster, ssc) evaluated with summary(m, vcov =, ssc =).
+# `model`: "ols" (feols), "poisson" (fepois) or "logit" (feglm, family = "logit").
 case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), ssc = fixest::ssc(), weights = NULL,
-                 endog = character(), inst = character(), fixef = FALSE, posthoc = list()) {
+                 endog = character(), inst = character(), fixef = FALSE, posthoc = list(), model = "ols", offset = NULL) {
   dat <- read.csv(file.path(dir, data))
   args <- list(fml = fml, data = dat, fixef.tol = TOL, fixef.iter = 100000, vcov = vcov, ssc = ssc, notes = FALSE)
   if (!is.null(weights)) args$weights <- as.formula(paste0("~", weights))
-  m <- do.call(feols, args)
+  if (!is.null(offset)) args$offset <- as.formula(paste0("~", offset))
+  glm <- model != "ols"
+  if (glm) args <- c(args, list(glm.tol = 1e-12, glm.iter = 100))
+  m <- switch(model, ols = do.call(feols, args), poisson = do.call(fepois, args),
+              logit = do.call(feglm, c(args, list(family = "logit"))))
   V <- vcov(m, attr = TRUE)
-  f <- fitstat(m, "f", simplify = FALSE)$f
+  f <- if (glm) list(stat = NA, p = NA, df1 = NA, df2 = NA) else fitstat(m, "f", simplify = FALSE)$f
   r2s <- r2(m, c("r2", "ar2", "wr2", "war2", "pr2", "apr2", "cor2"))
   expect <- c(vcov_attrs(V, dat, m, cluster), list(
     coef_names = names(coef(m)), coef = num(coef(m)),
@@ -86,13 +102,21 @@ case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), s
     collin = if (is.null(m$collin.var)) list() else m$collin.var,
     r2 = num(r2s["r2"]), ar2 = num(r2s["ar2"]), wr2 = num(r2s["wr2"]), war2 = num(r2s["war2"]),
     pr2 = num(r2s["pr2"]), apr2 = num(r2s["apr2"]), sq_cor = num(r2s["cor2"]),
-    rmse = num(fitstat(m, "rmse")[[1]]), ll = num(logLik(m)), ll_null = m$ll_null, ssr = m$ssr,
-    ssr_null = m$ssr_null, ssr_fe_only = if (is.null(m$ssr_fe_only)) NA else m$ssr_fe_only,
-    sigma2 = m$sigma2, f_stat = num(f$stat), f_p = num(f$p), f_df1 = num(f$df1), f_df2 = num(f$df2),
+    rmse = num(fitstat(m, "rmse")[[1]]), ll = num(logLik(m)), ll_null = m$ll_null, ssr = opt(m$ssr),
+    ssr_null = opt(m$ssr_null), ssr_fe_only = opt(m$ssr_fe_only),
+    sigma2 = opt(m$sigma2), f_stat = num(f$stat), f_p = num(f$p), f_df1 = num(f$df1), f_df2 = num(f$df2),
     # Residuals and fitted values do not depend on the variance matrix: stored once per model.
     resid = if (identical(vcov, "iid")) num(resid(m)) else list(),
     fitted = if (identical(vcov, "iid")) num(fitted(m)) else list(), obs = num(obs(m))
   ))
+  if (glm) {
+    expect$deviance <- m$deviance
+    expect$null_deviance <- opt(m$null.deviance)
+    expect$iterations <- m$iterations
+    expect$converged <- m$convStatus
+    expect$eta <- if (identical(vcov, "iid")) num(m$linear.predictors) else list()
+    expect$irls_weights <- if (identical(vcov, "iid")) num(m$irls_weights) else list()
+  }
   if (length(endog) > 0) {
     w <- if (is.null(weights)) 1 else dat[obs(m), weights]
     fs <- fitstat(m, c("ivf1", "ivwald1", "wh", "sargan"), simplify = FALSE)
@@ -118,7 +142,8 @@ case <- function(name, data, fml, y, x, fe, intercept, vcov, cluster = list(), s
     vcov_attrs(vcov(s, attr = TRUE), dat, m, if (is.null(p$cluster)) list() else p$cluster)
   })
   list(
-    name = name, data = data, y = y, x = x, endog = endog, inst = inst, fe = fe_terms(fe), intercept = intercept,
+    name = name, data = data, model = model, y = y, x = x, endog = endog, inst = inst, fe = fe_terms(fe), intercept = intercept,
+    offset = offset,
     weights = weights, vcov = if (is.character(vcov)) vcov else "cluster", cluster = cluster, ssc = ssc_list(ssc),
     posthoc = lapply(posthoc, function(p) list(vcov = if (is.character(p$vcov)) p$vcov else "cluster",
                                                cluster = if (is.null(p$cluster)) list() else p$cluster,
@@ -227,3 +252,32 @@ add("fx_inter", "fit_d1.csv", y ~ x1 + x2 | g + h^k, "y", c("x1", "x2"), list(li
 add("fx_nofe_posthoc", "fit_d1.csv", y ~ x1 + x2, "y", c("x1", "x2"), list(), TRUE, "iid",
     posthoc = list(list(vcov = "hetero"), list(vcov = ~c3 + k, cluster = list(list("c3"), list("k")))))
 write_cases("fit_fixest_fe.json")
+
+# Poisson and logit: 1-2 FE, perfect-fit levels, weights, offset, no FE, slopes, interaction,
+# every variance matrix, fixed-effect values, post-hoc variance matrices.
+FP <- yp ~ x1 + x2 | g + h
+FB <- yb ~ x1 + x2 | g + h
+for (v in list("iid", "hetero")) {
+  add(paste0("pois_fe2_", v), "fit_d1.csv", FP, "yp", c("x1", "x2"), fe2, TRUE, v, model = "poisson")
+  add(paste0("logit_fe2_", v), "fit_d1.csv", FB, "yb", c("x1", "x2"), fe2, TRUE, v, model = "logit")
+}
+add("pois_fe2_cl_c3_h", "fit_d1.csv", FP, "yp", c("x1", "x2"), fe2, TRUE, ~c3 + h, cluster = cl$c3_h, model = "poisson")
+add("logit_fe2_cl_g", "fit_d1.csv", FB, "yb", c("x1", "x2"), fe2, TRUE, ~g, cluster = cl$g, model = "logit")
+add("pois_fe2_off_w", "fit_d1.csv", FP, "yp", c("x1", "x2"), fe2, TRUE, "iid", weights = "w", offset = "lo", model = "poisson",
+    fixef = TRUE, posthoc = list(list(vcov = "hetero"), list(vcov = ~c1, cluster = cl$c1)))
+add("logit_fe1_off", "fit_d1.csv", yb ~ x1 + x2 | g, "yb", c("x1", "x2"), list(list("g")), TRUE, "iid", offset = "lo", model = "logit",
+    fixef = TRUE)
+add("logit_fe2_w", "fit_d1.csv", FB, "yb", c("x1", "x2"), fe2, TRUE, "hetero", weights = "w", model = "logit")
+add("pois_nofe", "fit_d1.csv", yp ~ x1 + x2, "yp", c("x1", "x2"), list(), TRUE, "iid", model = "poisson",
+    posthoc = list(list(vcov = "hetero"), list(vcov = ~c3, cluster = cl$c3)))
+add("pois_nofe_off_w_cl", "fit_d1.csv", yp ~ x1 + x2, "yp", c("x1", "x2"), list(), TRUE, ~c3, cluster = cl$c3, weights = "w",
+    offset = "lo", model = "poisson")
+add("logit_nofe", "fit_d1.csv", yb ~ x1 + x2, "yb", c("x1", "x2"), list(), TRUE, "iid", model = "logit")
+add("logit_nofe_off", "fit_d1.csv", yb ~ x1 + x2, "yb", c("x1", "x2"), list(), TRUE, "hetero", offset = "lo", model = "logit")
+add("pois_collin", "fit_d1.csv", yp ~ x1 + x2 + x3 + xg | g + h, "yp", c("x1", "x2", "x3", "xg"), fe2, TRUE, "iid", model = "poisson")
+add("pois_sl", "fit_d1.csv", yp ~ x1 | g[s1] + h, "yp", "x1", list(tg_s, list("h")), TRUE, "iid", model = "poisson", fixef = TRUE)
+add("pois_sl_only", "fit_d1.csv", yp ~ x1 | g[[s1]], "yp", "x1", list(term("g", "s1", FALSE)), TRUE, "iid", model = "poisson")
+add("pois_inter_fx", "fit_d1.csv", yp ~ x1 + x2 | g + h^k, "yp", c("x1", "x2"), list(list("g"), list("h", "k")), TRUE, "iid",
+    model = "poisson", fixef = TRUE)
+add("logit_fe3_tw", "fit_d1.csv", yb ~ x1 + x2 | g + h + k, "yb", c("x1", "x2"), fe3, TRUE, ~c3 + h, cluster = cl$c3_h, model = "logit")
+write_cases("fit_fixest_glm.json")
