@@ -1,0 +1,35 @@
+# fereg (Python)
+
+Fast high-dimensional fixed-effects regressions with pyfixest-compatible syntax and results.
+
+`fereg.feols`, `fereg.fepois` and `fereg.feglm` take pyfixest 0.60.0's formulas, arguments and
+defaults and return results with pyfixest's classes, names and methods, so estimates, standard
+errors and statistics match pyfixest's. The estimation runs in a parallel Rust core that
+eliminates the largest fixed effect exactly and solves the others by preconditioned conjugate
+gradient: at 10 million observations and 16 threads it is 5–100× faster than pyfixest and
+2–200× faster than R's fixest on the fixest benchmark designs.
+
+```python
+import fereg
+
+m = fereg.feols("y ~ x1 + x2 | firm + year", data=df, vcov={"CRV1": "firm"})
+iv = fereg.feols("y ~ x1 | firm + year | x2 ~ z", data=df)
+p = fereg.fepois("count ~ x1 | firm + year", data=df, vcov="hetero")
+lg = fereg.feglm("default ~ x1 | firm", data=df, family="logit")
+m.summary()
+print(fereg.etable([m, iv, p], type="md"))
+m.fixef()
+```
+
+Supported: OLS, IV/2SLS (several endogenous regressors), Poisson, logit; any number of fixed
+effects, `fe1^fe2` interactions and varying slopes `fe[x]`; weights; iid, hetero and up to
+four-way clustered variances (`ssc()` as in pyfixest); `i()`, `C()`, multiple estimation
+(`sw`, `csw`, several left-hand sides, `split`/`fsplit`); `predict`, `resid`, `fixef`, `tidy`,
+`etable`. Data can be pandas or polars. Not implemented: probit; HC2/HC3, CRV3, Newey–West,
+Driscoll–Kraay and `nid` variances (these raise `NotImplementedError`); wild bootstrap,
+`ccv`, `decompose`, `ritest`, plotting and DiD helpers.
+
+`nthreads` (default: all cores) sets the number of threads. Results do not depend on it.
+
+The same core powers the Stata commands `fereg`/`feppml`/`felogit` and the R package `fereg`:
+see <https://github.com/leoliu0/fereg>.

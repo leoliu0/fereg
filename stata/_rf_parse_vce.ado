@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
+*! version 0.3.0  fereg: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
 * Returns:
 *   s(vcetype)          unadjusted | robust | cluster
 *   s(num_clusters)     number of cluster dimensions

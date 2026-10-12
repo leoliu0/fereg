@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: model variables read by the plugin at prepare (protocol nmodel, cached)
+*! version 0.3.0  fereg: model variables read by the plugin at prepare (protocol nmodel, cached)
 *
 * Usage:
 *   _rf_model split <terms>            c_local rf_modelvars: the plain variable names (unique, in

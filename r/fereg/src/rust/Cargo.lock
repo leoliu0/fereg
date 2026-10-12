@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "fereg"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "extendr-api",
  "fereg-core",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "fereg-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "approx-chol",
  "faer",

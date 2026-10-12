@@ -34,10 +34,11 @@ panel <- make_panel()
 
 fixest_ok <- function() requireNamespace("fixest", quietly = TRUE)
 
-# fixest reference fits are run at tight tolerances (fixest's fixef.tol must exceed 2.2e-12).
-fx_feols <- function(...) fixest::feols(..., fixef.tol = 3e-12, nthreads = 2, notes = FALSE)
-fx_fepois <- function(...) fixest::fepois(..., fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 2, notes = FALSE)
-fx_feglm <- function(...) fixest::feglm(..., fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 2, notes = FALSE)
+# fixest reference fits are run at tight tolerances (fixest's fixef.tol must exceed 2.2e-12), on
+# one thread: CRAN's macOS fixest binary has no OpenMP and warns when asked for more.
+fx_feols <- function(...) fixest::feols(..., fixef.tol = 3e-12, nthreads = 1, notes = FALSE)
+fx_fepois <- function(...) fixest::fepois(..., fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 1, notes = FALSE)
+fx_feglm <- function(...) fixest::feglm(..., fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 1, notes = FALSE)
 
 fe_feols <- function(...) feols(..., fixef.tol = 1e-12, notes = FALSE)
 fe_fepois <- function(...) fepois(..., fixef.tol = 1e-12, glm.tol = 1e-12, notes = FALSE)

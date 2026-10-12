@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: estimation header (adapted from reghdfe_header.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
+*! version 0.3.0  fereg: estimation header (adapted from reghdfe_header.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
 program _rf_header
 	version 16
 	if !c(noisily) exit

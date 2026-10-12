@@ -39,7 +39,7 @@ test_that("logit matches fixest", {
 test_that("GLM residual types, predictions and post-hoc variances match fixest", {
   ours <- fe_fepois(count ~ x1 + x2 | id, panel, offset = ~ log(expo))
   # Called directly: fixest's predict() re-evaluates the offset argument from the call.
-  theirs <- fixest::fepois(count ~ x1 + x2 | id, panel, offset = ~ log(expo), fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 2, notes = FALSE)
+  theirs <- fixest::fepois(count ~ x1 + x2 | id, panel, offset = ~ log(expo), fixef.tol = 3e-12, glm.tol = 1e-12, nthreads = 1, notes = FALSE)
   for (t in c("response", "deviance", "pearson", "working")) {
     expect_equal(resid(ours, type = t), unname(resid(theirs, type = t)), tolerance = 1e-6, label = t)
   }

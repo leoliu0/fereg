@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.1}{...}
+{* *! version 0.3.0}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -30,11 +30,26 @@
 [{cmd:,} {opth a:bsorb(fereg##absorb:absvars)} {help fereg##options_table:options}]
 {p_end}
 
+{p 8 15 2}{cmd:fereg}
+{depvar} [{it:exogvars}] {cmd:(}{it:endogvars} {cmd:=} {it:instruments}{cmd:)} [{it:exogvars}]
+{ifin} {weight}
+[{cmd:,} {opth a:bsorb(fereg##absorb:absvars)} {opt first} {opt ffirst} {help fereg##options_table:options}]
+{p_end}
+
 {pstd}
-{cmd:fereg} is a drop-in replacement for {help reghdfe} 6.13.1 for linear models: same syntax, same
-defaults, same output and the same stored results, computed by a parallel compiled solver.
+{cmd:fereg} is a drop-in replacement for {help reghdfe} 6.13.1 for linear models, and for {cmd:ivreghdfe} 1.1.4
+for 2SLS: same syntax, same defaults, same output and the same stored results, computed by a parallel compiled
+solver.
 {it:indepvars} may contain factor variables and time-series operators; see {help fvvarlist} and {help tsvarlist}.
 {cmd:fweight}s, {cmd:aweight}s and {cmd:pweight}s are allowed; see {help weight}. The weight must be a variable.
+
+{pstd}
+The second form estimates two-stage least squares, as {cmd:ivreghdfe} does: the same sample, small-sample
+corrections, first-stage, underidentification, weak-identification (Cragg-Donald, Kleibergen-Paap, Stock-Yogo
+critical values) and overidentification (Sargan/Hansen J) statistics, and the same {cmd:e()} results.
+{opt first} also reports and stores the first-stage regressions ({cmd:e(firsteqs)}); {opt ffirst} reports the
+first-stage diagnostics only. {opt liml}, {opt gmm2s}, {opt cue}, {opt fuller()} and {opt kclass()} are not
+supported.
 
 {marker options_table}{...}
 {synoptset 26 tabbed}{...}
@@ -198,8 +213,7 @@ solver: {opt technique()}, {opt transform()}, {opt acceleration()}, {opt precond
 {pstd}
 The following {cmd:reghdfe} features are not supported and stop with error 198:
 {opt individual()}, {opt group()} and {opt aggregation()} (group fixed effects), and {cmd:vce(dkraay)}
-(Driscoll-Kraay). Instrumental-variable syntax ({it:depvar} [{it:exog}] {cmd:(}{it:endog} {cmd:=} {it:instruments}{cmd:)})
-and the options {opt first} and {opt ffirst} are not available in this version.
+(Driscoll-Kraay). Of the {cmd:ivreghdfe} estimators only 2SLS is available.
 
 
 {marker differences}{...}

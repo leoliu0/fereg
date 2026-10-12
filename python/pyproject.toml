@@ -6,6 +6,7 @@ build-backend = "maturin"
 name = "fereg"
 description = "Fast high-dimensional fixed-effects regressions (OLS, IV, Poisson, logit) with pyfixest-compatible results"
 dynamic = ["version"]
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Leo Liu", email = "auleo.liu@gmail.com" }]
