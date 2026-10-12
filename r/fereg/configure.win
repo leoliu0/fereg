@@ -1,0 +1,41 @@
+#!/bin/sh
+# Checks for the Rust toolchain and writes src/Makevars.win from src/Makevars.win.in.
+
+MSRV="1.85.0"
+
+export PATH="$PATH:$USERPROFILE/.cargo/bin"
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  cat <<EOF
+------------------------- RUST TOOLCHAIN NOT FOUND -------------------------
+fereg needs the Rust toolchain (cargo and rustc >= $MSRV) to build from source.
+Install it from https://rustup.rs and add the GNU target matching Rtools:
+  rustup target add x86_64-pc-windows-gnu
+then install fereg again.
+-----------------------------------------------------------------------------
+EOF
+  exit 1
+fi
+
+echo "fereg: using $(cargo --version)"
+echo "fereg: using $(rustc --version)"
+
+version=$(rustc --version | sed 's/^rustc \([0-9.]*\).*/\1/')
+if ! printf '%s\n%s\n' "$MSRV" "$version" | sort -t. -k1,1n -k2,2n -k3,3n -C; then
+  echo "fereg: rustc $version is too old; version $MSRV or newer is required (rustup update)."
+  exit 1
+fi
+
+# Rtools links with gcc (GNU ABI) or, for clang-based and ARM64 R builds, with llvm-mingw.
+arch=$("${R_HOME}/bin/Rscript" -e 'cat(R.version$arch)')
+cc=$("${R_HOME}/bin/R" CMD config CC)
+if [ "$arch" = "aarch64" ]; then
+  RUST_TARGET="aarch64-pc-windows-gnullvm"
+elif echo "$cc" | grep -q clang; then
+  RUST_TARGET="x86_64-pc-windows-gnullvm"
+else
+  RUST_TARGET="x86_64-pc-windows-gnu"
+fi
+echo "fereg: Rust target $RUST_TARGET"
+
+sed -e "s|@RUST_TARGET@|$RUST_TARGET|" src/Makevars.win.in > src/Makevars.win

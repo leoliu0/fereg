@@ -1,0 +1,41 @@
+#!/bin/sh
+# Checks for the Rust toolchain and writes src/Makevars from src/Makevars.in.
+
+MSRV="1.85.0"
+
+export PATH="$PATH:$HOME/.cargo/bin"
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  cat <<EOF
+------------------------- RUST TOOLCHAIN NOT FOUND -------------------------
+fereg needs the Rust toolchain (cargo and rustc >= $MSRV) to build from source.
+Install it from https://rustup.rs, or with your package manager, e.g.
+  Debian/Ubuntu: apt install cargo     Fedora: dnf install cargo
+  Arch: pacman -S rust                 macOS: brew install rust
+then install fereg again.
+-----------------------------------------------------------------------------
+EOF
+  exit 1
+fi
+
+echo "fereg: using $(cargo --version)"
+echo "fereg: using $(rustc --version)"
+
+# rustc >= MSRV (compare the numeric version fields).
+version=$(rustc --version | sed 's/^rustc \([0-9.]*\).*/\1/')
+if ! printf '%s\n%s\n' "$MSRV" "$version" | sort -t. -k1,1n -k2,2n -k3,3n -C; then
+  echo "fereg: rustc $version is too old; version $MSRV or newer is required (rustup update)."
+  exit 1
+fi
+
+# macOS: build the Rust objects for the deployment target R was built for.
+MACOSX_DT=""
+if [ "$(uname)" = "Darwin" ]; then
+  dt=$("${R_HOME}/bin/R" CMD config CC 2>/dev/null; "${R_HOME}/bin/R" CMD config CFLAGS 2>/dev/null; "${R_HOME}/bin/R" CMD config LDFLAGS 2>/dev/null)
+  dt=$(echo "$dt" | grep -o 'version-min=[0-9.]*' | head -n 1 | cut -d= -f2)
+  if [ -z "$dt" ]; then dt="11.0"; fi
+  MACOSX_DT="export MACOSX_DEPLOYMENT_TARGET=$dt;"
+  echo "fereg: macOS deployment target $dt"
+fi
+
+sed -e "s|@MACOSX_DT@|$MACOSX_DT|" src/Makevars.in > src/Makevars

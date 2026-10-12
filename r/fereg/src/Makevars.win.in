@@ -1,0 +1,39 @@
+# Generated into Makevars.win by ../configure.win. See Makevars.in for the build steps.
+# Windows builds use the GNU ABI Rust target matching Rtools (x86_64-pc-windows-gnu, or the
+# gnullvm targets for clang-based and ARM64 R builds).
+
+TARGET = @RUST_TARGET@
+LIBDIR = ./rust/lib
+STATLIB = $(LIBDIR)/libfereg.a
+PKG_LIBS = -L$(LIBDIR) -lfereg -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+CARGO_HOME_DIR = $(CURDIR)/.cargo
+
+all: $(SHLIB) cleanup_rust
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	@set -e; \
+	if [ -f ./rust/vendor.tar.xz ]; then \
+	  tar -xf ./rust/vendor.tar.xz -C ./rust; \
+	  mkdir -p "$(CARGO_HOME_DIR)"; \
+	  cp ./rust/vendor-config.toml "$(CARGO_HOME_DIR)/config.toml"; \
+	  offline=--offline; \
+	else \
+	  offline=; \
+	fi; \
+	target_dir="$${FEREG_CARGO_TARGET_DIR:-$(CURDIR)/rust/target}"; \
+	mkdir -p "$$target_dir/libgcc_mock"; \
+	touch "$$target_dir/libgcc_mock/libgcc_eh.a"; \
+	export LIBRARY_PATH="$${LIBRARY_PATH};$$target_dir/libgcc_mock"; \
+	export CARGO_HOME="$(CARGO_HOME_DIR)"; \
+	export PATH="$$PATH:$$USERPROFILE/.cargo/bin"; \
+	echo "fereg: building the Rust library with `rustc --version`"; \
+	cargo build -j 2 --target=$(TARGET) --lib --release $$offline --manifest-path=./rust/Cargo.toml --target-dir="$$target_dir"; \
+	mkdir -p $(LIBDIR); \
+	cp "$$target_dir/$(TARGET)/release/libfereg.a" $(STATLIB)
+
+cleanup_rust: $(SHLIB)
+	@rm -rf "$(CARGO_HOME_DIR)" ./rust/vendor ./rust/target $(LIBDIR)
+
+.PHONY: all cleanup_rust

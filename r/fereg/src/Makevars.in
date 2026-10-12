@@ -1,0 +1,41 @@
+# Generated into Makevars by ../configure.
+#
+# Builds the Rust static library (src/rust) with cargo and links it into fereg.so.
+# - CARGO_HOME lives inside the build directory (CRAN forbids writing to $HOME) and is removed
+#   afterwards together with the cargo target directory.
+# - Release tarballs carry the vendored crates (rust/vendor.tar.xz, see tools/vendor-crates.sh):
+#   cargo then builds offline from them. Without the tarball cargo downloads the crates.
+# - FEREG_CARGO_TARGET_DIR (development only) keeps the cargo target directory between installs.
+
+LIBDIR = ./rust/lib
+STATLIB = $(LIBDIR)/libfereg.a
+PKG_LIBS = -L$(LIBDIR) -lfereg
+CARGO_HOME_DIR = $(CURDIR)/.cargo
+
+all: $(SHLIB) cleanup_rust
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	@set -e; \
+	if [ -f ./rust/vendor.tar.xz ]; then \
+	  tar -xf ./rust/vendor.tar.xz -C ./rust; \
+	  mkdir -p "$(CARGO_HOME_DIR)"; \
+	  cp ./rust/vendor-config.toml "$(CARGO_HOME_DIR)/config.toml"; \
+	  offline=--offline; \
+	else \
+	  offline=; \
+	fi; \
+	target_dir="$${FEREG_CARGO_TARGET_DIR:-$(CURDIR)/rust/target}"; \
+	export CARGO_HOME="$(CARGO_HOME_DIR)"; \
+	export PATH="$$PATH:$$HOME/.cargo/bin"; \
+	@MACOSX_DT@ \
+	echo "fereg: building the Rust library with `rustc --version`"; \
+	cargo build -j 2 --lib --release $$offline --manifest-path=./rust/Cargo.toml --target-dir="$$target_dir"; \
+	mkdir -p $(LIBDIR); \
+	cp "$$target_dir/release/libfereg.a" $(STATLIB)
+
+cleanup_rust: $(SHLIB)
+	@rm -rf "$(CARGO_HOME_DIR)" ./rust/vendor ./rust/target $(LIBDIR)
+
+.PHONY: all cleanup_rust

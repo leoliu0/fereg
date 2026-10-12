@@ -1,0 +1,8 @@
+fereg bundles the Rust crate fereg-core (MIT, Leo Liu) and the crates.io
+dependencies listed in src/rust/Cargo.lock. Their authors and licenses:
+
+- extendr-api, extendr-ffi, extendr-macros: the extendr authors (MIT)
+- faer and its dependencies (faer-traits, pulp, gemm, ...): Sarah El Kazdadi and contributors (MIT)
+- rayon, rayon-core: Josh Stone, Niko Matsakis and contributors (MIT OR Apache-2.0)
+- approx-chol: its authors (MIT)
+- other transitive dependencies: see each crate's Cargo.toml in src/rust/vendor.tar.xz

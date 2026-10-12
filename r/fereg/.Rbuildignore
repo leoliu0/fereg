@@ -1,0 +1,9 @@
+^bootstrap\.R$
+^tools/vendor-crates\.sh$
+^src/rust/target$
+^src/rust/lib$
+^src/\.cargo$
+^src/Makevars$
+^src/Makevars\.win$
+^.*\.o$
+^.*\.so$

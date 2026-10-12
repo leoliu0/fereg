@@ -1,0 +1,7 @@
+# Copied to $CARGO_HOME/config.toml (src/.cargo) when src/rust/vendor.tar.xz is present.
+# Relative paths are resolved against src/, the parent of the .cargo directory.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "rust/vendor"
