@@ -103,6 +103,14 @@ In Stata (1e5, 3 FEs, T=1, `verbose(2)`): preconditioner 4.3 → 3.3 ms, estimat
   all runs: simple T=1 3.1 → 3.5 ms, difficult 2.6 → 2.3 ms; runs of ≥ 4 only: simple 3.6 ms,
   difficult 3.0 ms. With random firm codes most runs have length 1, and the run bookkeeping
   per row costs more than it saves.
+- **Row blocks sized for L2** (the packed triangle split into 4 row blocks of ≤ 32K entries):
+  simple T=1 assembly 3.1 → about 10 ms; every row block rescans all segments.
+- **Dense panel for the first small block's columns** (the 10 year columns of every row in a
+  35 KB array, the rest packed): simple T=1 3.1–3.3 ms (no gain); with contiguous panel updates
+  and unchecked indexing of the rest, also no gain; with the diagonal taken from the level
+  weights instead of per-cell writes, 2.9–3.1 ms (≤ 0.2 ms). Gating parts of the loop off
+  showed where the 3.3 ms goes: row updates 0.95, per-cell cross counts 1.1, scan, bitmap,
+  combine and mirror 1.25.
 
 ### The 1e5, 3 FEs, T=1 row
 
@@ -115,9 +123,54 @@ resolution:
 | regfast | mean of 50 consecutive runs (one timer around the loop) | 10.5–10.7 ms |
 | fixest | 50 runs, `Sys.time()` per run | median 11.6 ms, mean 12.9 ms, min 10.3 ms |
 
-Of the regfast time, 2.3 ms is ado code outside the two plugin calls, spread over the sections
-(post results 1.0, of which `ereturn post` 0.4, scalars 0.2, r(table) 0.3; sample 0.4; absorb
-parsing 0.3); the per-command plugin version check costs 4 µs.
+With a timer around the `plugin call` in a throwaway copy of `_rf_load` (50 commands), the two
+plugin calls took 8.2 of the 10.5 ms, so 2.3 ms is ado code, spread over the sections (post
+results 1.0, of which `ereturn post` 0.4, scalars 0.2, r(table) 0.3; sample 0.4; absorb parsing
+0.3). Timed directly (500 runs), the ~30 scalar posts through `PostScalar` cost 64 µs per
+command (22 µs from Mata), and the per-command plugin version check 4 µs.
+
+### 6. Deferred dense small block (small R, every block small)
+
+When every block is small and assembling + factoring the dense small block is estimated to
+cost more than 8 Jacobi PCG iterations, the solve starts with Jacobi on every coordinate. At
+the PCG probes (k = 6, 12) the dense factor is built, and PCG restarts from the current
+iterate, when the projected remaining iterations cost more than it. Once a probe has had to
+build it, later solves of the same solver (the next IRLS weights) build it up front. The
+decisions use only the structure, R and PCG values, so results stay identical at any thread
+count. Cost model (`solve.rs`): a PCG iteration costs 6e-10 s per cell and (block + column)
+when the cells fit in 32 MiB (else `C_CELL` = 2.8e-9) plus `C_COORD` per coordinate and
+column; the assembly 8e-10 s per unit of Σ_s d_s², the LDLT `C_FLOP`·m³/3.
+
+| `bench_solve --n 1e5 --fe 3`, residualize (best of 5, 2 interleaved rounds) | Before | After | Path after |
+|---|---|---|---|
+| simple, R=2, T=1 | 4.0–5.0 ms | 2.7–2.8 ms | Jacobi, 10 iterations |
+| simple, R=2, T=16 | 3.1–3.2 ms | 1.4–1.5 ms | Jacobi, 10 iterations |
+| difficult, R=2, T=1 | 3.8 ms | 5.3 ms | factor built at k=6, 7 iterations |
+| difficult, R=2, T=16 | 1.7 ms | 2.4 ms | factor built at k=6, 7 iterations |
+| R=11 | | | not deferred |
+
+The difficult rows pay the bounded cost of the policy (6 Jacobi iterations and a restart).
+Gate rows that changed (1 ms resolution, medians of 3; full regfast grid re-run):
+
+| 1e5, 3 FEs | T | Before | After |
+|---|---|---|---|
+| `regfast y x1`, simple | 1 | 11 | 10 (fixest 11: the former FAIL) |
+| `regfast y x1`, simple | 16 | 9 | 8 |
+| `regfast y x1`, difficult | 1 / 16 | 11 / 8 | 12 / 9 |
+| `ppmlfast negbin_y x1`, simple | 1 / 16 | 100 / 52 | 77 / 42 |
+| `logitfast binary_y x1`, simple | 1 / 16 | 83 / 41 | 66 / 32 |
+
+Without the up-front rule every IRLS solve deferred again: difficult `x1` logit 87 → 134 ms,
+Poisson 95 → 142 ms (T=1). With it (Stata, T=1, difficult 1e5, interleaved means of 20 runs):
+`ppmlfast x1` 82.4–83.2 → 81.7–83.0 ms; with `x1`–`x5`, where only the R=5 collinearity solve
+is deferred, `ppmlfast` 102.2–104.0 → 104.4–106.1 ms and `logitfast` 89.8–92.5 → 91.8–95.1 ms.
+
+In Stata, 1e5, 3 FEs, T=1, `y x1` (mean of 200 runs, three interleaved sessions each):
+10.3–10.8 ms before, 9.6–9.7 ms after. Single-run `timer` readings (100 runs): ≤ 9 ms 45%,
+10 ms 45%, 11 ms 9%, 12 ms 1% (before: ≤ 9 ms 4%, 10 ms 54%, 11 ms 32%, ≥ 12 ms 10%). Checked
+against `reghdfe ... tol(1e-12)` (`rf_compare_e`, b 1e-7, V 1e-6) on the simple and difficult
+1e5 data with 1 and 2 regressors, with bitwise-identical b at 1 and 16 threads. Gate: 273 PASS,
+0 FAIL.
 
 ## Earlier tuning (commit log)
 

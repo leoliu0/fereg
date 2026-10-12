@@ -99,6 +99,15 @@ const C_ENTRY: f64 = 6e-9;
 /// Accept the joint factor when its remaining cost is below this share of the projected PCG
 /// cost (model uncertainty margin).
 const JOINT_MARGIN: f64 = 0.8;
+/// Deferred dense small block (every block small, R small): a PCG iteration on cell data that fit
+/// in the cache costs C_CELL_CACHED per cell and (block code + column) instead of C_CELL, and
+/// the dense assembly costs C_SMALL_ASM per unit of Σ_s d_s² (fitted at 1e5 observations,
+/// 3 FEs: 0.23 ms per Jacobi iteration at R = 2, 3.0 ms assembly). The factor is deferred when
+/// it costs more than DEFER_ITERS such iterations.
+const C_CELL_CACHED: f64 = 6e-10;
+const CACHE_BYTES: usize = 32 << 20;
+const C_SMALL_ASM: f64 = 8e-10;
+const DEFER_ITERS: f64 = 8.0;
 
 /// Structural statistics of the joint factor (weight independent), filled stage by stage.
 #[derive(Clone, Copy, Debug, Default)]
@@ -161,6 +170,33 @@ fn block_precond_cost(st: &Structure, pre: &Precond, r: usize) -> f64 {
     C_DENSE * ms * ms * r as f64 + C_SOLVE * (factored * r) as f64
 }
 
+/// Cost of one PCG iteration with the Jacobi preconditioner on every coordinate, for the
+/// deferral decision of the dense small block.
+fn jacobi_iter_cost(st: &Structure, r: usize) -> f64 {
+    let c = if st.ncells * (st.nb * 4 + r * 16) <= CACHE_BYTES { C_CELL_CACHED } else { C_CELL };
+    c * (st.ncells * (st.nb + r)) as f64 + C_COORD * (st.m * r) as f64
+}
+
+/// Cost of assembling (unless the weight pass already did) and factoring the dense small block.
+fn small_build_cost(st: &Structure, ws: &WeightState) -> f64 {
+    let asm = if ws.small_s.is_some() { 0.0 } else { C_SMALL_ASM * st.small_work as f64 };
+    asm + C_FLOP * (st.m_small as f64).powi(3) / 3.0
+}
+
+/// The dense factor of the small super-block for the current weights.
+fn small_factor(ops: &Ops, pool: &Pool) -> Result<Dense, RfError> {
+    let (st, ws) = (ops.st, ops.ws);
+    let built;
+    let a = match ws.small_s.as_deref() {
+        Some(a) => a,
+        None => {
+            built = ops.assemble_small(pool)?;
+            &built
+        }
+    };
+    Dense::factor(a, st.m_small, &ws.redundant[..st.m_small], pool)
+}
+
 /// Joint factor state of a solver.
 #[derive(Default)]
 struct JointState {
@@ -205,6 +241,9 @@ pub struct FeSolver {
     /// CG count of the first solve after the last (re)factorization.
     base_iters: Option<usize>,
     need_refactor: bool,
+    /// A deferred solve had to build the dense small factor at a probe (Jacobi converges too
+    /// slowly on this graph): later solves, e.g. the next IRLS weights, build it up front.
+    small_upfront: bool,
     joint: JointState,
     cfg: SolverConfig,
     /// Kernel scratch reused across solves.
@@ -267,6 +306,7 @@ impl FeSolver {
             large_fresh: true,
             base_iters: None,
             need_refactor: false,
+            small_upfront: false,
             joint: JointState::default(),
             cfg,
             scratch: Scratch::default(),
@@ -300,27 +340,31 @@ impl FeSolver {
         joint_allowed(&self.cfg, &self.joint) && self.pre.joint.is_none() && self.st.has_large()
     }
 
-    fn ensure_basic(&mut self, pool: &Pool) -> Result<(), RfError> {
-        if self.basic_fresh {
-            return Ok(());
+    /// Current inverse diagonal, and the dense small factor unless `defer_small` (it is then
+    /// built at a PCG probe if the iterations turn out dearer, see [`System::probe`]).
+    fn ensure_basic(&mut self, defer_small: bool, pool: &Pool) -> Result<(), RfError> {
+        if !self.basic_fresh {
+            self.pre.inv_diag = jacobi::inverse_diagonal(&self.ws.diag, &self.ws.redundant);
+            self.pre.small = None;
+            self.basic_fresh = true;
         }
-        self.pre.inv_diag = jacobi::inverse_diagonal(&self.ws.diag, &self.ws.redundant);
-        self.pre.small = if self.st.m_small > 0 {
-            let ops = Ops { st: &self.st, ws: &self.ws };
-            let built;
-            let a = match self.ws.small_s.as_deref() {
-                Some(a) => a,
-                None => {
-                    built = ops.assemble_small(pool)?;
-                    &built
-                }
-            };
-            Some(Dense::factor(a, self.st.m_small, &self.ws.redundant[..self.st.m_small], pool)?)
-        } else {
-            None
-        };
-        self.basic_fresh = true;
+        if !defer_small && self.pre.small.is_none() && self.st.m_small > 0 {
+            self.pre.small = Some(small_factor(&Ops { st: &self.st, ws: &self.ws }, pool)?);
+        }
         Ok(())
+    }
+
+    /// Whether this solve starts with Jacobi on the small block instead of its dense factor:
+    /// every block is small (no large-block escalation or joint factor involved), the factor is
+    /// not built yet for these weights, no earlier deferral of this solver had to build it, and
+    /// it costs more than [`DEFER_ITERS`] iterations.
+    fn defer_small(&self, r: usize) -> bool {
+        let st = &self.st;
+        st.m_small > 0
+            && !st.has_large()
+            && !self.small_upfront
+            && !(self.basic_fresh && self.pre.small.is_some())
+            && small_build_cost(st, &self.ws) > DEFER_ITERS * jacobi_iter_cost(st, r)
     }
 
     fn refresh_large(&mut self, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
@@ -625,6 +669,10 @@ struct System<'a> {
     joint: &'a mut JointState,
     /// The joint factor was built during this solve.
     joint_built: bool,
+    /// The dense small factor is deferred (every block small; see `FeSolver::defer_small`).
+    small_deferred: bool,
+    /// The deferred small factor was built during this solve (a restart, not an escalation).
+    small_built: bool,
 }
 
 impl CgSystem for System<'_> {
@@ -646,6 +694,25 @@ impl CgSystem for System<'_> {
     }
 
     fn probe(&mut self, p: &cg::Probe, pool: &Pool, ctx: &Ctx) -> Result<Option<bool>, RfError> {
+        if self.small_deferred {
+            // Build the dense small factor when the projected Jacobi iterations cost more; the
+            // restart from the current iterate is then exact.
+            let st = self.ops.st;
+            let (iters, build) = (p.remaining * jacobi_iter_cost(st, self.w), small_build_cost(st, self.ops.ws));
+            if ctx.verbose >= 2 {
+                ctx.log(&format!(
+                    "regfast: deferred small block at k={} (rho={:.3}, remaining={:.0}): pcg est {iters:.4}s vs factor est {build:.4}s",
+                    p.k, p.rho_hat, p.remaining
+                ));
+            }
+            if iters > build {
+                self.pre.small = Some(small_factor(&self.ops, pool)?);
+                self.small_deferred = false;
+                self.small_built = true;
+                return Ok(Some(true));
+            }
+            return Ok(Some(false));
+        }
         if self.pre.joint.is_some() || !joint_allowed(self.cfg, self.joint) {
             return Ok(None);
         }
@@ -761,8 +828,16 @@ impl Absorber for FeSolver {
                 joint_now = true;
             }
         }
+        let defer = self.pre.joint.is_none() && self.defer_small(r);
         if self.pre.joint.is_none() {
-            self.ensure_basic(pool)?;
+            self.ensure_basic(defer, pool)?;
+        }
+        if defer && ctx.verbose >= 2 {
+            ctx.log(&format!(
+                "regfast: small block deferred: factor est {:.4}s vs pcg iteration est {:.5}s",
+                small_build_cost(&self.st, &self.ws),
+                jacobi_iter_cost(&self.st, r)
+            ));
         }
         log_phase(ctx, &mut t, "preconditioner");
         let ops = Ops { st: &self.st, ws: &self.ws };
@@ -805,20 +880,26 @@ impl Absorber for FeSolver {
                 cfg: &self.cfg,
                 joint: &mut self.joint,
                 joint_built: false,
+                small_deferred: defer,
+                small_built: false,
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
             exact = out.exact || ss0.iter().all(|&s| s == 0.0);
             let joint_built = sys.joint_built;
+            // Building a deferred small factor restarts PCG; it is not a large-block escalation
+            // (deferral requires that there are no large blocks).
+            let escalated_large = out.escalated && !sys.small_built;
+            self.small_upfront |= sys.small_built;
             if joint_built {
                 joint_now = true;
                 self.large_fresh = true;
-            } else if out.escalated || !sys.can_escalate && can_escalate {
+            } else if escalated_large || !sys.can_escalate && can_escalate {
                 self.escalated = true;
                 self.large_fresh = true;
                 self.base_iters = None;
             }
-            escalated_now = out.escalated || joint_now;
+            escalated_now = escalated_large || joint_now;
             if ctx.verbose >= 2 {
                 ctx.log(&format!("regfast: pcg {} iterations (escalated: {}, joint: {})", out.iterations, escalated_now, self.pre.joint.is_some()));
             }
