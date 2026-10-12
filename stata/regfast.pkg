@@ -1,0 +1,37 @@
+v 3
+d regfast: fast HDFE OLS/IV, PPML and logit (Rust plugin)
+d
+d regfast (OLS and IV/2SLS), ppmlfast (Poisson pseudo-maximum likelihood) and logitfast (logit)
+d estimate models with any number of absorbed high-dimensional fixed effects, heterogeneous
+d slopes, weights and multiway clustering. Syntax, estimates and stored results follow reghdfe,
+d ivreghdfe and ppmlhdfe. The estimation core is a compiled Rust plugin (Linux, macOS, Windows).
+d
+d Author: Leo Liu, auleo.liu@gmail.com
+d License: MIT
+d Distribution-Date: 20261012
+f regfast.ado
+f regfast_p.ado
+f regfast.sthlp
+f ppmlfast.ado
+f ppmlfast_p.ado
+f ppmlfast.sthlp
+f logitfast.ado
+f logitfast_p.ado
+f logitfast.sthlp
+f _rf_footnote.ado
+f _rf_glm.ado
+f _rf_glm_header.ado
+f _rf_glm_replay.ado
+f _rf_header.ado
+f _rf_load.ado
+f _rf_model.ado
+f _rf_parse_absorb.ado
+f _rf_parse_vce.ado
+g LINUX64 regfast.linux64.plugin regfast.plugin
+g LINUX64P regfast.linux64.plugin regfast.plugin
+g MACARM64 regfast.macos-universal.plugin regfast.plugin
+g OSX.ARM64 regfast.macos-universal.plugin regfast.plugin
+g MACINTEL64 regfast.macos-universal.plugin regfast.plugin
+g OSX.X8664 regfast.macos-universal.plugin regfast.plugin
+g WIN64 regfast.win64.plugin regfast.plugin
+h regfast.plugin
