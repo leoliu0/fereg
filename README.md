@@ -80,7 +80,7 @@ m = fereg.feols("y ~ x1 + x2 | firm + year", data=df, vcov={"CRV1": "firm"})
 iv = fereg.feols("y ~ x1 | firm + year | x2 ~ z", data=df)
 p = fereg.fepois("count ~ x1 | firm + year", data=df, vcov="hetero")
 m.summary()
-print(fereg.etable([m, iv, p], type="md"))
+fereg.etable([m, iv, p], type="md")
 m.fixef()
 ```
 

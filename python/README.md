@@ -17,7 +17,7 @@ iv = fereg.feols("y ~ x1 | firm + year | x2 ~ z", data=df)
 p = fereg.fepois("count ~ x1 | firm + year", data=df, vcov="hetero")
 lg = fereg.feglm("default ~ x1 | firm", data=df, family="logit")
 m.summary()
-print(fereg.etable([m, iv, p], type="md"))
+fereg.etable([m, iv, p], type="md")
 m.fixef()
 ```
 
