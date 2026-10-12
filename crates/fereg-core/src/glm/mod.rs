@@ -7,10 +7,12 @@
 //!    back at the end.
 //! 2. Regressors collinear with the fixed effects (Σx̃² / Σx² ≤ min(1e-6, itol/10)) or with each
 //!    other (sweep of X̃'WX̃ with the true weights) are dropped (ppmlhdfe `remove_collinears`).
-//! 3. Poisson `relu` separation (`simplex` is an alias): drop, re-run singletons and the `fe`
-//!    rule ([`Session::drop_obs`]), remap the rows, re-run step 2. When the check cannot certify
-//!    its result, the `mu` rule runs in step 4 as a fallback and the fit reports
-//!    `separation_complete` = 0 with a note.
+//! 3. Poisson `relu` separation (`simplex` is an alias), in rounds ([`Session::glm_separate`]):
+//!    the `fe` rule when prepare did not apply it, then the ReLU check; drop, re-run singletons
+//!    (and the `fe` rule when prepare applied it, [`Session::drop_obs`]), remap the rows, re-run
+//!    step 2, and repeat until a ReLU check finds nothing (ppmlhdfe runs it once). When the
+//!    check cannot certify its result, the `mu` rule runs in step 4 as a fallback and the fit
+//!    reports `separation_complete` = 0 with a note.
 //! 4. IRLS ([`irls::irls`]); with the `mu` rule, separated observations are dropped as in 3 and
 //!    IRLS is re-run from the current μ.
 //! 5. Final VCE on the last IRLS weights (reghdfe5 `reghdfe_solve_ols(..., "vce_asymptotic")`):
@@ -32,6 +34,7 @@ use crate::error::RfError;
 use crate::fe_recovery;
 use crate::ols::{self, STATUS_ABSORBED, STATUS_COLLINEAR, STATUS_OK, missing_if_nonfinite, sub_block};
 use crate::par::{self, CHUNK, Pool};
+use crate::sample::{self, SepRule, TermCodes};
 use crate::session::{DropReport, Session, Term};
 use crate::stats;
 use crate::vcov::{self, ClusterCodes, INVSYM_TOL};
@@ -54,6 +57,17 @@ pub(crate) struct GlmData {
     pub off: Option<Vec<f64>>,
     /// True (user) weights.
     pub tw: Option<Vec<f64>>,
+}
+
+/// Outcome of [`Session::glm_separate`].
+struct SepRounds {
+    /// Separated observations: kept position at entry and certificate value (the ReLU
+    /// prediction, or 1 for the `fe` rule).
+    tagged: Vec<(u32, f64)>,
+    /// Every ReLU round certified its result.
+    complete: bool,
+    /// ReLU iterations over all rounds.
+    iterations: usize,
 }
 
 /// reghdfe `reghdfe_standardize` (fast formula), floored at 1e-3.
@@ -165,9 +179,11 @@ impl Session {
         Ok((res, parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))?))
     }
 
-    /// The Poisson ReLU separation check alone on `rows` (layout `[y, x...]`, row order), after
-    /// the same preparation as [`Session::glm`] (standardization, collinear regressors dropped);
-    /// `s.maxiter` caps the FE solves. Nothing is estimated and the session is not changed.
+    /// The Poisson separation check alone on `rows` (layout `[y, x...]`, row order), after the
+    /// same preparation as [`Session::glm`] (standardization, collinear regressors dropped):
+    /// the rounds of [`Session::glm_separate`]; `s.maxiter` caps the FE solves. Nothing is
+    /// estimated. The separated observations are dropped from the session, which is left on the
+    /// reduced sample; the returned vectors are in kept order over the sample at the call.
     pub fn glm_separation(
         &mut self,
         rows: Vec<f64>,
@@ -181,21 +197,22 @@ impl Session {
         if g.family != Family::Poisson {
             return Err(RfError::InvalidInput("glm: the separation check is only available for Poisson".into()));
         }
-        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| {
-            let (d, _, _) = self.glm_data(rows, lay.nx, offset, g, s.maxiter, pool, ctx)?;
-            let out = separation::relu(self.absorber.as_mut(), &d, s.maxiter, pool, ctx)?;
-            let order = self.absorber.row_order();
-            let sep_f: Vec<f64> = match &out.separated {
-                Some(v) => v.iter().map(|&b| f64::from(u8::from(b))).collect(),
-                None => vec![0.0; d.n],
-            };
-            let separated: Vec<bool> = fe_recovery::to_kept_order(&sep_f, order, pool)?.iter().map(|&v| v > 0.0).collect();
+        let n0 = self.n();
+        par::with_pool(par::threads_for(ctx.threads, n0), |pool| {
+            let (mut d, mut status, _) = self.glm_data(rows, lay.nx, offset, g, s.maxiter, pool, ctx)?;
+            let rounds = self.glm_separate(&mut d, &mut status, g.itol, s.maxiter, pool, ctx)?;
+            let mut separated = vec![false; n0];
+            let mut certificate = vec![0.0; n0];
+            for &(k, z) in &rounds.tagged {
+                separated[k as usize] = true;
+                certificate[k as usize] = z;
+            }
             Ok(SeparationCheck {
-                num_separated: separated.iter().filter(|b| **b).count(),
+                num_separated: rounds.tagged.len(),
                 separated,
-                certificate: fe_recovery::to_kept_order(&out.certificate, order, pool)?,
-                complete: out.complete,
-                iterations: out.iterations,
+                certificate,
+                complete: rounds.complete,
+                iterations: rounds.iterations,
             })
         })?
     }
@@ -272,6 +289,81 @@ impl Session {
             d.k = kk;
         }
         Ok(())
+    }
+
+    /// Rows (row order) that the `fe` rule separates once the `seed` rows are dropped: rows with
+    /// y = 0 in groups of an intercept term whose outcomes are all zero, iterated together with
+    /// singleton removal (when the session drops singletons) to a fixed point. Each such group's
+    /// indicator certifies it on the sample left by the earlier steps; y > 0 rows the iteration
+    /// removes are singletons, not separated, and are left to [`Session::drop_obs`].
+    fn fe_rule_rows(&self, y: &[f64], seed: &[bool], pool: &Pool) -> Vec<bool> {
+        let order = self.row_order();
+        let n = order.len();
+        let mut yk = vec![0.0; n];
+        let mut alive = vec![true; n];
+        for (row, &kk) in order.iter().enumerate() {
+            yk[kk as usize] = y[row];
+            alive[kk as usize] = !seed[row];
+        }
+        let terms: Vec<TermCodes> = self.terms.iter().filter(|t| t.intercept).map(|t| TermCodes { codes: &t.codes, g: t.g }).collect();
+        let fw = (self.weight_kind == WeightKind::Fweight).then_some(self.weights.as_deref()).flatten();
+        sample::drop_singletons(&terms, &mut alive, fw, Some(SepRule { y: &yk, family: Family::Poisson }), self.drop_singletons, pool);
+        order.iter().enumerate().map(|(row, &kk)| !alive[kk as usize] && !seed[row] && y[row] == 0.0).collect()
+    }
+
+    /// Poisson separation before IRLS, in rounds until a ReLU check finds nothing: the `fe` rule
+    /// (when the session did not apply it at prepare: [`Session::fe_rule_rows`]) on the sample
+    /// left by the previous round, then the ReLU check ([`separation::relu`]). ReLU converges
+    /// to some certificate of separation, not necessarily one of maximal support (on a field
+    /// panel without the `fe` rule it left rows of all-zero firm groups in the sample, and which
+    /// ones depended on rounding), so the rows it finds are dropped and the check is repeated
+    /// on the rest; certificates of successive rounds combine into one for all of them. Every
+    /// round drops its rows ([`Session::glm_drop`]) and re-runs the collinearity check.
+    #[allow(clippy::too_many_arguments)]
+    fn glm_separate(
+        &mut self,
+        d: &mut GlmData,
+        status: &mut [u8],
+        itol: f64,
+        inner_maxiter: usize,
+        pool: &Pool,
+        ctx: &Ctx,
+    ) -> Result<SepRounds, RfError> {
+        // Kept position (at entry) of every current row.
+        let mut origin: Vec<f64> = self.row_order().iter().map(|&k| f64::from(k)).collect();
+        let mut out = SepRounds { tagged: Vec::new(), complete: true, iterations: 0 };
+        let mut seed = vec![false; d.n];
+        let mut cert = vec![0.0; d.n];
+        loop {
+            if !self.sep_fe {
+                let fe = self.fe_rule_rows(&d.y, &seed, pool);
+                let nfe = fe.iter().filter(|v| **v).count();
+                if nfe > 0 {
+                    ctx.log(&format!("{{txt}}({nfe} observation{} separated by a fixed effect: all-zero outcomes within the group)", plural(nfe)));
+                }
+                for ((s, c), f) in seed.iter_mut().zip(cert.iter_mut()).zip(fe) {
+                    if f {
+                        *s = true;
+                        *c = 1.0;
+                    }
+                }
+            }
+            if seed.iter().any(|v| *v) {
+                out.tagged.extend((0..d.n).filter(|&i| seed[i]).map(|i| (origin[i] as u32, cert[i])));
+                self.glm_drop(d, &seed, &mut [&mut origin], pool, ctx)?;
+                self.glm_collinear(d, status, itol, inner_maxiter, pool, ctx)?;
+            }
+            let r = separation::relu(self.absorber.as_mut(), d, inner_maxiter, pool, ctx)?;
+            out.iterations += r.iterations;
+            out.complete &= r.complete;
+            match r.separated {
+                Some(sep) => {
+                    seed = sep;
+                    cert = r.certificate;
+                }
+                None => return Ok(out),
+            }
+        }
     }
 
     /// Drops the separated rows (row order) through [`Session::drop_obs`] and remaps `d` and the
@@ -405,13 +497,9 @@ impl Session {
         // runs as a fallback and the fit reports the incomplete check.
         let mut sep_complete = true;
         if g.separation.relu {
-            let out = separation::relu(self.absorber.as_mut(), &d, inner_maxiter, pool, ctx)?;
-            sep_complete = out.complete;
-            if let Some(sep) = out.separated {
-                num_sep += sep.iter().filter(|v| **v).count() as u64;
-                self.glm_drop(&mut d, &sep, &mut [], pool, ctx)?;
-                self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
-            }
+            let rounds = self.glm_separate(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+            sep_complete = rounds.complete;
+            num_sep += rounds.tagged.len() as u64;
         }
 
         // Initial values of μ: fixest's `family$initialize` in fixest mode (Poisson y + 0.1, on
