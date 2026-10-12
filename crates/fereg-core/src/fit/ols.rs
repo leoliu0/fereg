@@ -8,9 +8,10 @@ use rayon::prelude::*;
 
 use super::design::{self, Reg, regress, residual_pass, unit};
 use super::input::Sample;
-use super::state::{State, StateFe, term_refs};
+use super::fixef::{self, FeLevels};
+use super::state::{State, state_terms, term_refs};
 use super::vcov::{self, ClusterInfo, FeInfo, Model};
-use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, IvFirstStage, IvStats, TestStat, WeightsType, dist, fixef};
+use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, IvFirstStage, IvStats, TestStat, WeightsType, dist};
 use crate::absorber::SolveOpts;
 use crate::api::Ctx;
 use crate::error::RfError;
@@ -190,7 +191,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     crate::solve::log_phase(ctx, &mut t, "fit: gather");
     let (sumw, _, ssr_null) = y_stats(input.y, session.kept_index(), session.weights(), pool);
     ctx.check()?;
-    let want_coefs = spec.keep_fixef && has_fe;
+    let want_coefs = (spec.keep_fixef || spec.keep_state) && has_fe;
     let (fe_iterations, coefs) = if has_fe {
         let opts = SolveOpts { tol: spec.fixef_tol, maxiter: spec.fixef_maxiter, want_coefs };
         let info = session.absorber_mut().residualize(&mut rows, r, &opts, None, pool, ctx)?;
@@ -351,7 +352,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         .zip(&input.cluster)
         .map(|(c, dim)| ClusterInfo { codes: &c.codes, g: c.g, names: dim.iter().map(|&f| input.factor_names[f].as_str()).collect() })
         .collect();
-    let refs = || term_refs(&fe_info);
+    let refs = || term_refs(&fe_info, pool);
     let model = Model {
         flavor: spec.flavor,
         n: n_eff,
@@ -508,47 +509,38 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     // Fixed effects (fixest `sumFE`): the FE part of y − Xβ with the original endogenous
     // variables, i.e. of the corrected residual's combo. For IV this equals fixest's
     // y − Ûβ − e₂ with Û the first-stage fitted values including the first-stage FE.
-    let fixef = match &coefs {
-        Some(c) => {
-            let slots = session.absorber().term_values(&c.combine(&e), 0);
-            fixef::fixef_values(input, terms, slots, kept_index, spec.fixef_norm)
-        }
-        None => Vec::new(),
+    let fe_levels = coefs.as_ref().map(|c| FeLevels { slots: session.absorber().term_values(&c.combine(&e), 0), subset: None });
+    let obs = kept_index.to_vec();
+    let fe_sizes: Vec<usize> = terms.iter().map(|t| t.g).collect();
+    let row_order = if spec.keep_state { session.row_order().to_vec() } else { Vec::new() };
+    let weights = session.weights.take();
+    let state_fe = state_terms(std::mem::take(&mut session.terms), input, &fe_sizes);
+    drop(session);
+    let fixef = match &fe_levels {
+        Some(l) if spec.keep_fixef => fixef::fixef_values(&state_fe, &obs, l, spec.fixef_norm, pool)?,
+        _ => Vec::new(),
     };
     crate::solve::log_phase(ctx, &mut t, "fit: outputs");
-    let obs = kept_index.to_vec();
-    let fe_sizes = terms.iter().map(|t| t.g).collect();
-    let state = if spec.keep_state {
-        let row_order = session.row_order().to_vec();
-        let weights = session.weights.take();
-        let fe = std::mem::take(&mut session.terms)
-            .into_iter()
-            .zip(&input.fe)
-            .map(|(t, ft)| StateFe { codes: t.codes, g: t.g, intercept: t.intercept, names: fe_names(ft).into_iter().map(String::from).collect() })
-            .collect();
-        drop(session);
-        Some(super::FitState {
-            inner: State {
-                flavor: spec.flavor,
-                n: n_eff,
-                nparams: np,
-                bread,
-                iid_scale: ssr / (n_eff - 1.0),
-                normal: false,
-                rows,
-                r,
-                design: design_out,
-                resid: e,
-                weights,
-                fweights,
-                row_order,
-                obs: obs.clone(),
-                fe,
-            },
-        })
-    } else {
-        None
-    };
+    let state = spec.keep_state.then(|| super::FitState {
+        inner: State {
+            flavor: spec.flavor,
+            n: n_eff,
+            nparams: np,
+            bread,
+            iid_scale: ssr / (n_eff - 1.0),
+            normal: false,
+            rows,
+            r,
+            design: design_out,
+            resid: e,
+            weights,
+            fweights,
+            row_order,
+            obs: obs.clone(),
+            fe: state_fe,
+            fixef: fe_levels,
+        },
+    });
     Ok(FitOutput {
         nobs: n,
         nobs_origin: input.n,
