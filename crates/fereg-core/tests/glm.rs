@@ -331,7 +331,17 @@ struct Run {
     obs: Vec<usize>,
 }
 
-fn run(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Run, RfError> {
+/// Session, data block, offset and options of spec `g` (everything [`Session::glm`] needs).
+struct Setup {
+    session: Session,
+    rows: Vec<f64>,
+    offset: Option<Vec<f64>>,
+    spec: Spec,
+    opts: GlmOptions,
+    obs: Vec<usize>,
+}
+
+fn setup(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Setup, RfError> {
     let nall = csv.col(g.y).len();
     let obs: Vec<usize> = (g.first_obs..nall).collect();
     let pick = |name: &str| -> Vec<f64> { obs.iter().map(|&i| csv.col(name)[i]).collect() };
@@ -399,7 +409,12 @@ fn run(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Run, RfEr
         guess: g.guess,
         log: false,
     };
-    let res = session.glm(rows, &Layout::ols(g.x.len()), offset, &spec, &opts, &ctx)?;
+    Ok(Setup { session, rows, offset, spec, opts, obs })
+}
+
+fn run(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Run, RfError> {
+    let Setup { mut session, rows, offset, spec, opts, obs } = setup(g, csv, kind, threads)?;
+    let res = session.glm(rows, &Layout::ols(g.x.len()), offset, &spec, &opts, &Ctx::quiet(threads))?;
     Ok(Run { session, res, obs })
 }
 
@@ -953,9 +968,9 @@ fn check_fx(name: &str, kind: AbsorberKind) {
     // Like fixest, `w` comes from the start of the last iteration, whose μ is accurate to about
     // sqrt(glm.tol): 3e-7 relative from the Hessian at the converged estimate on the logits.
     e.vec("inverse Hessian at the estimate", &inv, &slope(&fx.get("cov_iid_conv").unwrap().nums()), 1e-6);
-    // Same starting values and stopping rule as fixest: the same IRLS path, up to one iteration.
+    // Same starting values, step halving and stopping rule as fixest: the same IRLS path.
     let fx_iter = fx.get("iterations").unwrap().num();
-    assert!((parts.iterations as f64 - fx_iter).abs() <= 1.0, "{name}: {} IRLS iterations, fixest {fx_iter}", parts.iterations);
+    assert_eq!(parts.iterations as f64, fx_iter, "{name}: IRLS iterations");
     e.report(&format!("fx_{name} {kind:?} it={}/{fx_iter}", parts.iterations));
 }
 
@@ -1000,4 +1015,41 @@ fn parts_do_not_change_ppmlhdfe_results() {
     assert_eq!(parts.coef, mat(&with.res, "b")[..2]);
     assert_eq!(parts.cons, mat(&with.res, "b")[2]);
     assert!(parts.converged);
+}
+
+/// The separation check alone (feppml `tagsep()`): it flags exactly the observations the fit
+/// drops as separated, with a positive certificate there and 0 elsewhere, and leaves the
+/// session unchanged; the fit reports a complete check.
+#[test]
+fn separation_check_alone_matches_the_fit() {
+    let specs = [
+        poisson("p_problem2", "problem2", "y", &["x1", "x2"], &["i", "j"]),
+        poisson("p_problem5", "problem5", "y", &["x1", "x2"], &["i", "j"]).tol(1e-12),
+        poisson("p_hard3", "hard3", "y", &[], &["id1", "id2"]),
+    ];
+    for g in &specs {
+        let csv = Csv::read(g.data);
+        for &kind in KINDS {
+            let Setup { mut session, rows, offset, spec, opts, .. } = setup(g, &csv, kind, 2).unwrap();
+            let n = session.n();
+            let kept_before = session.kept_index().to_vec();
+            let chk = session.glm_separation(rows, &Layout::ols(g.x.len()), offset, &spec, &opts, &Ctx::quiet(2)).unwrap();
+            assert_eq!(session.n(), n, "{}: session changed", g.fixture);
+            assert!(chk.complete);
+            let fx = fixture(g.fixture);
+            assert_eq!(chk.num_separated as f64, fx.get("scalars").unwrap().get("num_separated").unwrap().num(), "{}", g.fixture);
+            for (s, z) in chk.separated.iter().zip(&chk.certificate) {
+                assert_eq!(*s, *z > 0.0, "{}: certificate", g.fixture);
+            }
+            // The fit drops the flagged observations (and possibly singletons created by that).
+            let fit = run(g, &csv, kind, 2).unwrap();
+            assert_eq!(scalar(&fit.res, "separation_complete"), 1.0);
+            let after: std::collections::HashSet<u32> = fit.session.kept_index().iter().copied().collect();
+            for (k, s) in chk.separated.iter().enumerate() {
+                if *s {
+                    assert!(!after.contains(&kept_before[k]), "{}: flagged row kept by the fit", g.fixture);
+                }
+            }
+        }
+    }
 }

@@ -2,12 +2,15 @@
 //! absorbed fixed effects (plan Phase 6).
 //!
 //! Flow (ppmlhdfe `init_variables`, `init_separation`, `solve`):
-//! 1. y (Poisson) and X are divided by their unweighted sample sd (reghdfe `reghdfe_standardize`,
-//!    floored at 1e-3); results are scaled back at the end.
+//! 1. y (Poisson, when the absorbed space holds the constant) and X are divided by their
+//!    unweighted sample sd (reghdfe `reghdfe_standardize`, floored at 1e-3); results are scaled
+//!    back at the end.
 //! 2. Regressors collinear with the fixed effects (Σx̃² / Σx² ≤ min(1e-6, itol/10)) or with each
 //!    other (sweep of X̃'WX̃ with the true weights) are dropped (ppmlhdfe `remove_collinears`).
 //! 3. Poisson `relu` separation (`simplex` is an alias): drop, re-run singletons and the `fe`
-//!    rule ([`Session::drop_obs`]), remap the rows, re-run step 2.
+//!    rule ([`Session::drop_obs`]), remap the rows, re-run step 2. When the check cannot certify
+//!    its result, the `mu` rule runs in step 4 as a fallback and the fit reports
+//!    `separation_complete` = 0 with a note.
 //! 4. IRLS ([`irls::irls`]); with the `mu` rule, separated observations are dropped as in 3 and
 //!    IRLS is re-run from the current μ.
 //! 5. Final VCE on the last IRLS weights (reghdfe5 `reghdfe_solve_ols(..., "vce_asymptotic")`):
@@ -23,7 +26,7 @@ pub(crate) mod wls;
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
-use crate::api::{Ctx, EstResult, Family, GlmConvention, GlmOptions, GlmParts, Guess, Layout, NamedMat, Spec, Vce, WeightKind};
+use crate::api::{Ctx, EstResult, Family, GlmConvention, GlmOptions, GlmParts, Guess, Layout, NamedMat, SeparationCheck, Spec, Vce, WeightKind};
 use crate::dof;
 use crate::error::RfError;
 use crate::fe_recovery;
@@ -108,20 +111,41 @@ fn spans(a: &Term, b: &Term) -> bool {
         && dof::nested_within(&a.codes, a.g, &b.codes)
 }
 
+/// Input checks shared by the GLM entry points.
+fn validate(se: &Session, rows: &[f64], lay: &Layout, offset: Option<&[f64]>, s: &Spec, g: &GlmOptions) -> Result<(), RfError> {
+    if lay.nendog != 0 || lay.ninst != 0 {
+        return Err(RfError::InvalidInput("glm: layout has endogenous variables or instruments".into()));
+    }
+    if rows.len() != se.n() * lay.ncols() {
+        return Err(RfError::InvalidInput("glm: data block size differs from N·R".into()));
+    }
+    if offset.is_some_and(|o| o.len() != se.n()) {
+        return Err(RfError::InvalidInput("glm: offset length differs from N".into()));
+    }
+    if g.family == Family::Gaussian {
+        return Err(RfError::InvalidInput("glm: family must be poisson or logit".into()));
+    }
+    if g.family == Family::Logit && g.separation.relu {
+        return Err(RfError::InvalidInput("glm: the relu/simplex separation check is only available for Poisson".into()));
+    }
+    if s.want_resid {
+        return Err(RfError::InvalidInput("glm: residuals are not available; use d and predict".into()));
+    }
+    if s.noconstant {
+        return Err(RfError::InvalidInput("glm: noconstant is not allowed".into()));
+    }
+    if !(g.tol > 0.0 && g.tol <= 1.0 && g.itol > 0.0 && g.maxiter > 0) {
+        return Err(RfError::InvalidInput("glm: tolerances must be in (0, 1] and maxiter positive".into()));
+    }
+    Ok(())
+}
+
 impl Session {
     /// GLM on `rows` (N×R row-major in [`Session::row_order`], layout `[y, x...]`); `offset` in row
     /// order. Observations dropped by separation are removed from the session (see
     /// [`Session::keep`]); per-observation outputs refer to the final kept sample. ppmlhdfe /
     /// Stata `logit` conventions ([`GlmConvention::Ppmlhdfe`]).
-    pub fn glm(
-        &mut self,
-        rows: Vec<f64>,
-        lay: &Layout,
-        offset: Option<Vec<f64>>,
-        s: &Spec,
-        g: &GlmOptions,
-        ctx: &Ctx,
-    ) -> Result<EstResult, RfError> {
+    pub fn glm(&mut self, rows: Vec<f64>, lay: &Layout, offset: Option<Vec<f64>>, s: &Spec, g: &GlmOptions, ctx: &Ctx) -> Result<EstResult, RfError> {
         self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, false, ctx).map(|(res, _)| res)
     }
 
@@ -141,6 +165,41 @@ impl Session {
         Ok((res, parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))?))
     }
 
+    /// The Poisson ReLU separation check alone on `rows` (layout `[y, x...]`, row order), after
+    /// the same preparation as [`Session::glm`] (standardization, collinear regressors dropped);
+    /// `s.maxiter` caps the FE solves. Nothing is estimated and the session is not changed.
+    pub fn glm_separation(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        ctx: &Ctx,
+    ) -> Result<SeparationCheck, RfError> {
+        validate(self, &rows, lay, offset.as_deref(), s, g)?;
+        if g.family != Family::Poisson {
+            return Err(RfError::InvalidInput("glm: the separation check is only available for Poisson".into()));
+        }
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| {
+            let (d, _, _) = self.glm_data(rows, lay.nx, offset, g, s.maxiter, pool, ctx)?;
+            let out = separation::relu(self.absorber.as_mut(), &d, s.maxiter, pool, ctx)?;
+            let order = self.absorber.row_order();
+            let sep_f: Vec<f64> = match &out.separated {
+                Some(v) => v.iter().map(|&b| f64::from(u8::from(b))).collect(),
+                None => vec![0.0; d.n],
+            };
+            let separated: Vec<bool> = fe_recovery::to_kept_order(&sep_f, order, pool)?.iter().map(|&v| v > 0.0).collect();
+            Ok(SeparationCheck {
+                num_separated: separated.iter().filter(|b| **b).count(),
+                separated,
+                certificate: fe_recovery::to_kept_order(&out.certificate, order, pool)?,
+                complete: out.complete,
+                iterations: out.iterations,
+            })
+        })?
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn glm_checked(
         &mut self,
@@ -153,30 +212,7 @@ impl Session {
         want_parts: bool,
         ctx: &Ctx,
     ) -> Result<(EstResult, Option<GlmParts>), RfError> {
-        if lay.nendog != 0 || lay.ninst != 0 {
-            return Err(RfError::InvalidInput("glm: layout has endogenous variables or instruments".into()));
-        }
-        if rows.len() != self.n() * lay.ncols() {
-            return Err(RfError::InvalidInput("glm: data block size differs from N·R".into()));
-        }
-        if offset.as_ref().is_some_and(|o| o.len() != self.n()) {
-            return Err(RfError::InvalidInput("glm: offset length differs from N".into()));
-        }
-        if g.family == Family::Gaussian {
-            return Err(RfError::InvalidInput("glm: family must be poisson or logit".into()));
-        }
-        if g.family == Family::Logit && g.separation.relu {
-            return Err(RfError::InvalidInput("glm: the relu/simplex separation check is only available for Poisson".into()));
-        }
-        if s.want_resid {
-            return Err(RfError::InvalidInput("glm: residuals are not available; use d and predict".into()));
-        }
-        if s.noconstant {
-            return Err(RfError::InvalidInput("glm: noconstant is not allowed".into()));
-        }
-        if !(g.tol > 0.0 && g.tol <= 1.0 && g.itol > 0.0 && g.maxiter > 0) {
-            return Err(RfError::InvalidInput("glm: tolerances must be in (0, 1] and maxiter positive".into()));
-        }
+        validate(self, &rows, lay, offset.as_deref(), s, g)?;
         // The iteration log and drop messages are SMCL for the Stata plugin; fixest mode reports
         // through EstResult::notes and the returned counts instead.
         let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
@@ -282,19 +318,20 @@ impl Session {
         Ok(rep)
     }
 
+    /// Splits [y, x…] (row order), validates and standardizes them (y for Poisson, x always),
+    /// and drops regressors collinear with the fixed effects or each other. Returns the working
+    /// data, the status per regressor sent, and sd_y.
     #[allow(clippy::too_many_arguments)]
-    fn glm_in_pool(
+    fn glm_data(
         &mut self,
         rows: Vec<f64>,
         nx: usize,
         offset: Option<Vec<f64>>,
-        s: &Spec,
         g: &GlmOptions,
-        conv: GlmConvention,
-        want_parts: bool,
-        ctx: &Ctx,
+        inner_maxiter: usize,
         pool: &Pool,
-    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
+        ctx: &Ctx,
+    ) -> Result<(GlmData, Vec<u8>, f64), RfError> {
         let fam = g.family;
         let n0 = self.n();
         let r0 = 1 + nx;
@@ -317,7 +354,9 @@ impl Session {
             }
             _ => y.iter_mut().for_each(|v| *v = f64::from(u8::from(*v != 0.0))),
         }
-        let sd_y = if fam == Family::Poisson { standardize_sd(y.iter().copied()) } else { 1.0 };
+        // Dividing y by sd_y shifts η by −ln sd_y, which only a free constant absorbs: without
+        // one in the absorbed space (slope-only terms) y keeps its scale.
+        let sd_y = if fam == Family::Poisson && self.has_intercept() { standardize_sd(y.iter().copied()) } else { 1.0 };
         if sd_y != 1.0 {
             y.iter_mut().for_each(|v| *v /= sd_y);
             let min_pos = y.iter().copied().filter(|v| *v > 0.0).fold(f64::INFINITY, f64::min);
@@ -338,18 +377,41 @@ impl Session {
         let tw = self.weights.as_deref().map(|w| vcov::to_row_order(w, self.row_order(), pool)).transpose()?;
         let mut d = GlmData { family: fam, n: n0, y, k: nx, x, cols: (0..nx).collect(), sd_x, off: offset, tw };
         let mut status = vec![STATUS_OK; nx];
-        let inner_maxiter = s.maxiter;
         self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
         ctx.check()?;
+        Ok((d, status, sd_y))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn glm_in_pool(
+        &mut self,
+        rows: Vec<f64>,
+        nx: usize,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        conv: GlmConvention,
+        want_parts: bool,
+        ctx: &Ctx,
+        pool: &Pool,
+    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
+        let fam = g.family;
+        let inner_maxiter = s.maxiter;
+        let (mut d, mut status, sd_y) = self.glm_data(rows, nx, offset, g, inner_maxiter, pool, ctx)?;
 
         // Separation (relu; `fe` ran at prepare).
         let mut num_sep = 0u64;
-        if g.separation.relu
-            && let Some(sep) = separation::relu(self.absorber.as_mut(), &d, inner_maxiter, pool, ctx)?
-        {
-            num_sep += sep.iter().filter(|v| **v).count() as u64;
-            self.glm_drop(&mut d, &sep, &mut [], pool, ctx)?;
-            self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+        // False when the ReLU check could not certify its result; the IRLS-step `mu` rule then
+        // runs as a fallback and the fit reports the incomplete check.
+        let mut sep_complete = true;
+        if g.separation.relu {
+            let out = separation::relu(self.absorber.as_mut(), &d, inner_maxiter, pool, ctx)?;
+            sep_complete = out.complete;
+            if let Some(sep) = out.separated {
+                num_sep += sep.iter().filter(|v| **v).count() as u64;
+                self.glm_drop(&mut d, &sep, &mut [], pool, ctx)?;
+                self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+            }
         }
 
         // Initial values of μ: fixest's `family$initialize` in fixest mode (Poisson y + 0.1, on
@@ -381,7 +443,7 @@ impl Session {
             exact: map_exact(&self.terms),
             log: g.log,
             sd_y,
-            check_sep: g.separation.mu,
+            check_sep: g.separation.mu || !sep_complete,
             fixest,
         };
         let mut eta = vec![0.0; d.n];
@@ -407,12 +469,9 @@ impl Session {
             ctx.log("{txt}{hline 108}");
             ctx.log("{txt}(legend: {res}p{txt}: exact partial-out   {res}s{txt}: exact solver   {res}h{txt}: step-halving   {res}o{txt}: epsilon below tolerance)");
         }
-        ctx.log(&format!(
-            "{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})",
-            fmt_e(g.tol, 1)
-        ));
+        ctx.log(&format!("{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})", fmt_e(g.tol, 1)));
         ctx.check()?;
-        let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, iter, subiter, conv, want_parts };
+        let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts };
         self.glm_finish(&fin, status, s, g, pool)
     }
 
@@ -444,8 +503,15 @@ impl Session {
     }
 
     /// Final β, VCE, statistics and outputs (ppmlhdfe `GLM::solve` after IRLS).
-    fn glm_finish(&mut self, f: &Finish, mut status: Vec<u8>, s: &Spec, g: &GlmOptions, pool: &Pool) -> Result<(EstResult, Option<GlmParts>), RfError> {
-        let Finish { d, out, mu, eta, nx, sd_y, num_sep, iter, subiter, conv, want_parts } = *f;
+    fn glm_finish(
+        &mut self,
+        f: &Finish,
+        mut status: Vec<u8>,
+        s: &Spec,
+        g: &GlmOptions,
+        pool: &Pool,
+    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
+        let Finish { d, out, mu, eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts } = *f;
         let fam = d.family;
         let n = d.n;
         let k = d.k;
@@ -454,7 +520,8 @@ impl Session {
         let w = &out.w;
         let tw = d.tw.as_deref();
         let fw = self.weight_kind == WeightKind::Fweight;
-        let big_n = if fw { tw.map_or(n as f64, |t| par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += t[rg].iter().sum::<f64>())[0]) } else { n as f64 };
+        let big_n =
+            if fw { tw.map_or(n as f64, |t| par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += t[rg].iter().sum::<f64>())[0]) } else { n as f64 };
         let sumw = par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += w[rg].iter().sum::<f64>())[0];
         let cw = big_n / sumw;
         let wv: Vec<f64> = w.iter().map(|v| v * cw).collect();
@@ -541,6 +608,12 @@ impl Session {
                 g.maxiter,
                 out.deviance * sd_y
             ));
+        }
+        if !sep_complete {
+            notes.push(
+                "warning: the ReLU separation check did not converge; the IRLS-step (mu) rule was applied instead, and separated observations may remain in the sample (e(separation_complete) = 0)"
+                    .to_string(),
+            );
         }
         let mut df_r = big_n - dof.df_a as f64 - df_m;
         let mut n_clust: Option<(f64, Vec<f64>)> = None;
@@ -685,6 +758,7 @@ impl Session {
         scal(&mut res, "ic", iter as f64);
         scal(&mut res, "ic2", subiter as f64);
         scal(&mut res, "num_separated", num_separated as f64);
+        scal(&mut res, "separation_complete", f64::from(u8::from(sep_complete)));
         scal(&mut res, "num_singletons", num_singletons as f64);
         scal(&mut res, "num_fe_separated", self.num_fe_separated as f64);
         scal(&mut res, "N_full", big_n + (num_singletons + num_separated) as f64);
@@ -736,7 +810,16 @@ impl Session {
     /// [`GlmParts`] in kept order on the original scale (see its field docs). `beta` and `dropped`
     /// are over the columns of `d.x` (standardized scale), `e` the working residuals (row order).
     #[allow(clippy::too_many_arguments)]
-    fn glm_parts_out(&self, f: &Finish, beta: &[f64], dropped: &[bool], e: &[f64], status: &[u8], cons: f64, pool: &Pool) -> Result<GlmParts, RfError> {
+    fn glm_parts_out(
+        &self,
+        f: &Finish,
+        beta: &[f64],
+        dropped: &[bool],
+        e: &[f64],
+        status: &[u8],
+        cons: f64,
+        pool: &Pool,
+    ) -> Result<GlmParts, RfError> {
         let Finish { d, out, mu, eta, nx, sd_y, iter, .. } = *f;
         let (n, k) = (d.n, d.k);
         let r = 1 + k;
@@ -815,6 +898,7 @@ struct Finish<'a> {
     nx: usize,
     sd_y: f64,
     num_sep: u64,
+    sep_complete: bool,
     iter: usize,
     subiter: usize,
     conv: GlmConvention,
