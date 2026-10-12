@@ -1,5 +1,5 @@
 //! `fit` Poisson and logit against fixest 0.14.2 (tests/data/fit_fixest_glm.json, written by
-//! gen_fit_fixtures.R with glm.tol = 1e-12).
+//! gen_fit_fixtures.R with glm.tol = 1e-12) and pyfixest 0.60.0 (tests/data/fit_pyfixest_glm.json).
 
 mod fit_common;
 
@@ -7,19 +7,20 @@ use fereg_core::Ctx;
 use fereg_core::fit::{self, Flavor, Model};
 use fit_common::*;
 
-/// Coefficients, deviance and log-likelihoods. Variance matrices use [`RTOL_V`]: they come from
-/// the IRLS weights at the start of the last iteration (as fixest's), and at glm.tol = 1e-12 the
-/// last iteration is decided by deviance changes at rounding level, so fixest may stop one
-/// iteration earlier or later.
+/// The GLM core follows fixest's IRLS path (starting values, step halving, stopping rule), so
+/// every fixest field, the variance matrices included, matches at this tolerance.
 const RTOL: f64 = 1e-8;
-const RTOL_V: f64 = 1e-6;
+/// pyfixest's IRLS takes another path (μ₀ = (y + ȳ)/2, no step halving); its variance matrices
+/// come from the IRLS weights at the start of its last iteration and so carry that iteration's
+/// distance to the optimum (≈1e-6 relative here). Coefficients and deviances use [`RTOL`].
+const RTOL_PY_V: f64 = 5e-6;
 
 #[test]
 fn fixest_glm_cases() {
     let cases = read_json("fit_fixest_glm.json").list();
     assert!(cases.len() >= 18);
     for j in &cases {
-        let (case, out) = check_case(j, Flavor::Fixest, FactorKind::F64, 4, RTOL_V);
+        let (case, out) = check_case(j, Flavor::Fixest, FactorKind::F64, 4, RTOL);
         let e = j.at("expect");
         let names: Vec<String> = out.coef_source.iter().map(|s| case.source_name(s, Flavor::Fixest)).collect();
         check_coef(j.at("name").str(), &out.coef, &names, &e.at("coef").nums(), &e.at("coef_names").strs(), RTOL);
@@ -93,7 +94,7 @@ fn pyfixest_glm_cases() {
     let cases = read_json("fit_pyfixest_glm.json").list();
     assert!(cases.len() >= 9);
     for j in &cases {
-        let (case, out) = check_case(j, Flavor::Pyfixest, FactorKind::F64, 4, RTOL_V);
+        let (case, out) = check_case(j, Flavor::Pyfixest, FactorKind::F64, 4, RTOL_PY_V);
         let e = j.at("expect");
         let name = j.at("name").str();
         let names: Vec<String> = out.coef_source.iter().map(|s| case.source_name(s, Flavor::Pyfixest)).collect();

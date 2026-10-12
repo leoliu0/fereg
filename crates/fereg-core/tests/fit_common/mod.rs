@@ -483,8 +483,13 @@ pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol:
     for (k, ours) in [("eta", &out.eta), ("irls_weights", &out.irls_weights)] {
         let want = e.get(k).map_or(Vec::new(), J::nums);
         if !want.is_empty() {
-            let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-            assert_vec(&what(k), ours.as_ref().unwrap(), &want, rtol, scale);
+            let ours = ours.as_ref().unwrap();
+            assert_eq!(ours.len(), want.len(), "{}: length", what(k));
+            // Separated observations (|η| > 20, μ at a bound) have a diverging η whose value
+            // depends on when IRLS stops; their μ and weights are compared through `fitted`.
+            let (a, b): (Vec<f64>, Vec<f64>) = ours.iter().zip(&want).filter(|(_, w)| k != "eta" || w.abs() <= 20.0).map(|(a, b)| (*a, *b)).unzip();
+            let scale = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            assert_vec(&what(k), &a, &b, rtol, scale);
         }
     }
     let posthoc = case.posthoc();
