@@ -15,3 +15,5 @@ fereg_vcov <- function(state, kind, ssc, factors, factor_names, cluster, nthread
 }
 
 fereg_core_version <- function() .Call(wrap__fereg_core_version)
+
+fereg_fixef <- function(state, nthreads) rust_result(.Call(wrap__fereg_fixef, state, as.integer(nthreads)))

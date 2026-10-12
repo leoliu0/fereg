@@ -218,12 +218,12 @@ predict.fereg <- function(object, newdata, type = c("response", "link"), ...) {
 
 # Sum of the fixed effects (and varying slopes) at the rows of `newdata`.
 fixef_predict <- function(object, newdata, env, n) {
-  if (length(object$fixef_raw) == 0) return(0)
+  if (length(object$fixef_terms) == 0) return(0)
   fe <- fixef.fereg(object)
+  raw <- fixef_raw(object)
   out <- rep(0, n)
-  k <- 0
-  for (f in object$fixef_raw) {
-    k <- k + 1
+  for (k in seq_along(raw)) {
+    f <- raw[[k]]
     t <- object$fixef_terms[[f$term]]
     labels <- fe_labels(lapply(t$vars, function(e) eval_var(e, newdata, env)))
     v <- unname(fe[[k]][match(labels, names(fe[[k]]))])
@@ -231,6 +231,19 @@ fixef_predict <- function(object, newdata, env, n) {
     out <- out + v
   }
   out
+}
+
+# Fixed-effect values per term and slot (core order), computed from the estimation state on
+# first use and cached on the object.
+fixef_raw <- function(object) {
+  cache <- object$fixef_cache
+  if (is.null(cache$raw)) {
+    if (is.null(object$state)) {
+      stop("fereg: fixed-effect values need the estimation state, which was not kept (lean = TRUE)", call. = FALSE)
+    }
+    cache$raw <- fereg_fixef(object$state, getOption("fereg.nthreads", default_threads()))
+  }
+  cache$raw
 }
 
 #' Fixed effects of an estimation
@@ -247,21 +260,22 @@ fixef <- function(object, ...) UseMethod("fixef")
 
 #' @export
 fixef.fereg <- function(object, ...) {
-  raw <- object$fixef_raw
-  if (length(raw) == 0) stop("fereg: the estimation has no fixed effects", call. = FALSE)
+  if (length(object$fixef_terms) == 0) stop("fereg: the estimation has no fixed effects", call. = FALSE)
+  cache <- object$fixef_cache
+  if (!is.null(cache$fixef)) return(cache$fixef)
+  raw <- fixef_raw(object)
   out <- list()
   refs <- integer(0)
-  for (k in seq_along(raw)) {
-    f <- raw[[k]]
+  for (f in raw) {
     t <- object$fixef_terms[[f$term]]
-    vals <- object$fixef_level_values[[k]]
-    ord <- fe_order(vals)
-    v <- stats::setNames(f$values, fe_labels(vals))[ord]
+    vals <- lapply(object$fe_columns[[f$term]], function(v) v[f$first_obs])
+    v <- stats::setNames(f$values, fe_labels(vals))[fe_order(vals)]
     name <- if (is.na(f$slope)) t$label else paste0(t$label, "[[", object$slope_names[f$slope], "]]")
     out[[name]] <- v
     refs[name] <- as.integer(f$references)
   }
-  structure(out, class = c("fereg.fixef", "list"), references = refs)
+  cache$fixef <- structure(out, class = c("fereg.fixef", "list"), references = refs)
+  cache$fixef
 }
 
 #' @export

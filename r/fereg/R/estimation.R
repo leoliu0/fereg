@@ -292,7 +292,7 @@ fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
     model = model, intercept = lin$intercept, vcov = v$type, ssc = ssc_core(ssc_used),
     fixef_rm = args$fixef.rm, collin_tol = args$collin.tol, fixef_tol = args$fixef.tol,
     fixef_maxiter = args$fixef.iter, glm_tol = args$glm.tol, glm_maxiter = args$glm.iter,
-    keep_resid = !args$lean, keep_fixef = TRUE, keep_state = !args$lean
+    keep_resid = !args$lean, keep_fixef = FALSE, keep_state = !args$lean
   )
   out <- fereg_fit(input, spec, args$nthreads)
 
@@ -417,7 +417,12 @@ build_result <- function(out, info) {
     linear.predictors = out$eta,
     irls_weights = out$irls_weights,
     weights = if (!is.null(info$weights)) obs_subset(info$weights, out$obs),
-    fixef_raw = out$fixef,
+    # Fixed-effect values are computed on first use from `state` (fixef(), predict()) and
+    # cached in `fixef_cache`; `fe_columns` holds the FE variables of every term to label them.
+    fe_columns = lapply(fe_terms, function(t) {
+      lapply(t$vars, function(e) info$reg$values[[match(deparse1l(e), info$reg$names)]])
+    }),
+    fixef_cache = new.env(parent = emptyenv()),
     design = list(
       lin_meta = info$lin$meta, y_name = info$y_name, endo_exprs = info$m$endo,
       endo_names = info$endo_names, inst_names = info$inst_names,
@@ -427,13 +432,6 @@ build_result <- function(out, info) {
     state = out$state,
     lean = args$lean
   )
-  # Level labels of the fixed effects, kept as the factor values of each level's first
-  # estimation row (fixef() and predict() turn them into names).
-  res$fixef_level_values <- lapply(out$fixef, function(f) {
-    t <- fe_terms[[f$term]]
-    idx <- vapply(t$vars, function(e) match(deparse1l(e), info$reg$names), 0L)
-    lapply(idx, function(k) info$reg$values[[k]][f$first_obs])
-  })
   if (!is.null(info$weights)) res$model_info$weights <- weights_label(args$weights)
   if (!is.null(info$offset)) res$model_info$offset <- weights_label(args$offset)
   class(res) <- "fereg"

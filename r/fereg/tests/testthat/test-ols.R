@@ -149,3 +149,14 @@ test_that("printing works", {
   expect_output(print(etable(m, fe_feols(y ~ x1, panel))), "Constant")
   expect_match(as.character(etable(m, tex = TRUE)), "tabular")
 })
+
+test_that("fixed effects are computed on demand and cached; lean drops them", {
+  m <- fe_feols(y ~ x1 | id + year, panel)
+  expect_null(m$fixef_cache$fixef)
+  f1 <- fixef(m)
+  expect_identical(fixef(summary(m, vcov = "hetero")), f1)
+  expect_false(is.null(m$fixef_cache$fixef))
+  lean <- fe_feols(y ~ x1 | id + year, panel, lean = TRUE)
+  expect_error(fixef(lean), "lean")
+  expect_null(lean$residuals)
+})
