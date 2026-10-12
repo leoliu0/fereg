@@ -84,7 +84,10 @@ foreach spec in ///
 	"fe1=idcode fe2=year" "fe1 = idcode year" "fe1= idcode year" ///
 	"idcode year, savefe" "idcode year, generate" "fe1=idcode##c.age year, savefe" ///
 	"fe1=idcode##c.(age tenure) fe2=ind_code#c.hours" ///
-	"sid" "sid year" "fe1=sid year##c.age" "idcode   year" {
+	"sid" "sid year" "fe1=sid year##c.age" "idcode   year" ///
+	"ind_code##year" "i.ind_code##i.year" "idcode ind_code##year" "ind_code##year##race" ///
+	"ind_code##year#race" "fe1=ind_code##i.year idcode" "c.age##ind_code" ///
+	"ind_code##year, savefe" {
 	check_absorb `spec'
 }
 
@@ -121,9 +124,10 @@ _rf_parse_absorb idcode#c.L.tenure
 assert "`s(slopevars)'" == "L.tenure" & "`s(absvars)'" == "idcode#c.L.tenure"
 di as text "ok  time-series operators"
 
-* Errors
+* Errors (the ## cases are rejected by ms_parse_absvars too: they expand to duplicated slopes)
 foreach spec in "c.age" "ind_code#c.age#c.age" "ind_code##c.age##c.tenure" "idcode, bogus" ///
-	"idcode##year" "i.(idcode year)" "nosuchvar" "fe1=idcode fe1=year" "c.sid#year" {
+	"ind_code##year##c.age" "ind_code#c.age##year" "ind_code##year#c.age" "c.age##c.tenure" ///
+	"idcode###year" "idcode##" "i.(idcode year)" "nosuchvar" "fe1=idcode fe1=year" "c.sid#year" {
 	capture _rf_parse_absorb `spec'
 	if (!_rc) {
 		di as err `"FAIL absorb(`spec') should have failed"'
@@ -131,6 +135,12 @@ foreach spec in "c.age" "ind_code#c.age#c.age" "ind_code##c.age##c.tenure" "idco
 	}
 	di as text `"ok  absorb(`spec') fails with rc `=_rc'"'
 }
+foreach spec in "ind_code##c.age##c.tenure" "ind_code##year##c.age" "ind_code#c.age##year" ///
+	"ind_code##year#c.age" "c.age##c.tenure" {
+	capture ms_parse_absvars `spec'
+	assert _rc
+}
+di as text "ok  ms_parse_absvars rejects the same ## terms"
 * target exists: error 110, unless replace
 gen fe1 = 1
 capture _rf_parse_absorb fe1=idcode
@@ -148,7 +158,8 @@ di as text "ok  targets and replace"
 * 2) e(absvars), e(extended_absvars) and e(dof_table) rownames from reghdfe on real data
 * ---------------------------------------------------------------------------
 foreach spec in "idcode year" "idcode year##c.age" "ind_code#c.(tenure hours) idcode" ///
-	"fe1=sid year##c.age ind_code#c.(tenure hours), savefe" "ind_code#year occ_code" "i.idc i.year" {
+	"fe1=sid year##c.age ind_code#c.(tenure hours), savefe" "ind_code#year occ_code" "i.idc i.year" ///
+	"ind_code##year" "idcode i.ind_code##i.year" "ind_code##year##race" {
 	capture drop __hdfe*
 	capture drop fe1
 	quietly reghdfe ln_wage ttl_exp, absorb(`spec') tol(1e-6)

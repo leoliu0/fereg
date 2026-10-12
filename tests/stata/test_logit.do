@@ -115,6 +115,9 @@ lcheck "x1 x2" "y2 x1 x2 i.fe1 i.fe2," "y2 x1 x2, absorb(fe1 fe2)"
 rf_assert_close e(num_separated) e(num_separated) 100 0
 * factor-variable regressors
 lcheck "x1 2.c" "y x1 i.c i.fe2 if c <= 2," "y x1 i.c if c <= 2, absorb(fe2)"
+* ## of categorical variables = their interaction alone: logit's i.fe2##i.c dummies span the same space
+lcheck "x1 x2" "y x1 x2 i.fe2##i.c," "y x1 x2, absorb(fe2##c)"
+lcheck "x1 x2" "y x1 x2 i.fe1 i.fe2##i.c, vce(cluster c)" "y x1 x2, absorb(fe1 i.fe2##i.c) vce(cluster c)"
 * odds ratios only change the display
 felogit y x1 x2, absorb(fe1 fe2) or
 di as result "simulated panel passed"
@@ -142,4 +145,13 @@ qui felogit union age grade, absorb(idcode year)
 rcof "noi predict double p0, pr" != 0
 predict double xb0, xb
 predict double s0, stdp
+* estat (e(estat_cmd) = fereg_estat): summarize, vce and ic (df = e(df_m) + 1) as after ppmlhdfe
+qui felogit union age ttl_exp, absorb(idcode year)
+assert "`e(estat_cmd)'" == "fereg_estat"
+estat summarize
+assert rowsof(r(stats)) == 3
+estat ic
+assert el(r(S), 1, 4) == e(df_m) + 1 & reldif(el(r(S), 1, 3), e(ll)) < 1e-12
+estat vce
+rcof "noi estat bogus" == 321
 di as result "test_logit passed"

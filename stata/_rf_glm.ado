@@ -27,6 +27,7 @@ program _rf_glm, eclass
 		noHEader noTABle noFOOTnote
 		TEChnique(string) TRAnsform(string) ACCELeration(string) POOLsize(string)
 		ABSORBER(string)
+		TAGSEP(string) ZVARname(string)
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -41,6 +42,12 @@ program _rf_glm, eclass
 	if (`"`options'"' != "") {
 		di as err `"option `options' not allowed"'
 		exit 198
+	}
+	foreach opt in tagsep zvarname {
+		if (`"``opt''"' != "") {
+			di as err "option `opt'() not supported by `cmd': the plugin does not report which observations the separation check dropped"
+			exit 198
+		}
 	}
 	if ("`noabsorb'" != "" & `"`absorb'"' != "") {
 		di as err "options absorb() and noabsorb are mutually exclusive"
@@ -475,11 +482,13 @@ program _rf_glm, eclass
 	local nsep = scalar(__rf_num_separated)
 	if ("`family'" == "poisson") {
 		local scalars N rank df N_hdfe N_hdfe_extended df_a df_a_initial df_a_redundant df_a_nested ///
-			drop_singletons num_singletons df_m rss rmse N_full ic ic2 converged chi2 r2_p ll_0 deviance ll num_separated
+			drop_singletons num_singletons df_m rss rmse N_full ic ic2 converged chi2 r2_p ll_0 deviance ll num_separated ///
+			separation_complete
 	}
 	else {
 		local scalars N rank ic ic2 converged ll ll_0 df_m chi2 p r2_p deviance ///
-			N_hdfe N_hdfe_extended df_a df_a_initial df_a_redundant df_a_nested drop_singletons num_singletons num_separated N_full
+			N_hdfe N_hdfe_extended df_a df_a_initial df_a_redundant df_a_nested drop_singletons num_singletons num_separated N_full ///
+			separation_complete
 	}
 	foreach s of local scalars {
 		if ("`s'" == "N_hdfe") ereturn scalar N_hdfe = `G'
@@ -507,6 +516,7 @@ program _rf_glm, eclass
 	}
 	ereturn local separation `separation'
 	ereturn local predict `cmd'_p
+	ereturn local estat_cmd fereg_estat
 	ereturn local cmdline `"`cmdline'"'
 	local title = cond("`family'" == "poisson", "HDFE {help `cmd'##description:PPML} regression", "HDFE Logistic regression")
 	ereturn local title "`title'"

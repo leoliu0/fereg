@@ -90,6 +90,11 @@ check ln_wage age ttl_exp tenure, absorb(sid year) vce(cluster sid)
 * interaction absvar
 check ln_wage age ttl_exp tenure, absorb(idcode ind_code#year)
 check ln_wage age ttl_exp tenure, absorb(idcode i.ind_code#i.year) vce(cluster ind_code#year)
+* ## of categorical variables = their interaction alone (reghdfe: the main effects are nested)
+check ln_wage age ttl_exp tenure, absorb(ind_code##year) vce(cluster idcode)
+check ln_wage age ttl_exp tenure, absorb(idcode i.ind_code##i.year)
+check ln_wage age ttl_exp tenure, absorb(idcode ind_code##year##race) vce(cluster idcode year)
+check ln_wage age ttl_exp tenure, absorb(idcode ind_code##year#race) vce(robust)
 * regressor absorbed by the FEs; collinear pair
 gen double x_abs = idcode
 gen double tenure2 = 2 * tenure + 1
@@ -240,5 +245,104 @@ if ("$RF_MOCK" == "") {
 capture fereg ln_wage age, absorb(fe1=idcode fe1=year)
 assert _rc == 198
 di as result "outputs passed"
+
+if ("$RF_MOCK" != "") {
+	di as result "TEST_OLS PASSED"
+	exit
+}
+
+* ---------------------------------------------------------------------------
+* ## of categorical variables at tight tolerances: b reldif <= 1e-10, V <= 1e-8, N, df_a and
+* e(dof_table) (values and names) equal to reghdfe's
+* ---------------------------------------------------------------------------
+webuse nlswork, clear
+foreach a in "ind_code##year" "idcode i.ind_code##i.year" {
+	quietly reghdfe ln_wage age ttl_exp tenure, absorb(`a') vce(cluster idcode) tol(1e-14)
+	matrix bR = e(b)
+	matrix VR = e(V)
+	matrix dR = e(dof_table)
+	local rowsR : rownames e(dof_table)
+	local NR = e(N)
+	local dfaR = e(df_a)
+	local absR `"`e(absvars)'"'
+	local extR `"`e(extended_absvars)'"'
+	quietly fereg ln_wage age ttl_exp tenure, absorb(`a') vce(cluster idcode) tol(1e-14)
+	assert mreldif(e(b), bR) <= 1e-10
+	assert mreldif(e(V), VR) <= 1e-8
+	assert e(N) == `NR' & e(df_a) == `dfaR'
+	assert mreldif(e(dof_table), dR) == 0
+	assert "`: rownames e(dof_table)'" == "`rowsR'"
+	assert `"`e(absvars)'"' == `"`absR'"' & `"`e(extended_absvars)'"' == `"`extR'"'
+	di as text `"ok  absorb(`a'): b reldif "' %8.1e mreldif(e(b), bR) "  V reldif " %8.1e mreldif(e(V), VR) "  dof_table rows: `rowsR'"
+}
+di as result "## of categorical variables passed"
+
+* ---------------------------------------------------------------------------
+* exact fit: a note after the table (display only), absent otherwise
+* ---------------------------------------------------------------------------
+capture program drop rf_log_has
+program rf_log_has, rclass
+	args file text
+	tempname fh
+	file open `fh' using `"`file'"', read text
+	local found 0
+	file read `fh' line
+	while (r(eof) == 0) {
+		if (strpos(`"`macval(line)'"', `"`text'"')) local found 1
+		file read `fh' line
+	}
+	file close `fh'
+	return scalar found = `found'
+end
+clear
+set seed 11
+set obs 5000
+gen long id = ceil(_n / 5)
+gen byte t = mod(_n, 5)
+gen double x1 = rnormal()
+gen double x2 = rnormal()
+gen double y = x1 - x2 + id / 100 + t
+gen double y_noise = y + 1e-3 * rnormal()
+tempfile lg
+log using "`lg'", text name(exactfit) replace
+fereg y x1 x2, absorb(id t) vce(cluster id)
+log close exactfit
+rf_log_has "`lg'" "note: exact fit (rss/tss = "
+assert r(found) == 1
+assert e(rss) <= 1e-20 * e(tss)
+log using "`lg'", text name(exactfit) replace
+fereg
+log close exactfit
+rf_log_has "`lg'" "note: exact fit (rss/tss = "
+assert r(found) == 1
+log using "`lg'", text name(exactfit) replace
+fereg y_noise x1 x2, absorb(id t) vce(cluster id)
+log close exactfit
+rf_log_has "`lg'" "note: exact fit"
+assert r(found) == 0
+di as result "exact-fit note passed"
+
+* ---------------------------------------------------------------------------
+* estat (e(estat_cmd) = fereg_estat): summarize, vce, ic as after reghdfe
+* ---------------------------------------------------------------------------
+webuse nlswork, clear
+quietly reghdfe ln_wage age ttl_exp tenure, absorb(idcode year) vce(cluster idcode) tol(1e-12)
+estat summarize
+matrix sR = r(stats)
+estat ic
+matrix iR = r(S)
+quietly fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(cluster idcode)
+assert "`e(estat_cmd)'" == "fereg_estat"
+estat summarize
+assert mreldif(r(stats), sR) < 1e-12
+estat ic
+assert mreldif(r(S), iR) < 1e-6
+assert el(r(S), 1, 4) == e(df_m) + 1
+estat vce
+estat vce, correlation
+estat summarize age tenure
+assert rowsof(r(stats)) == 2
+rcof "noi estat bogus" == 321
+di as result "estat passed"
 
 di as result "TEST_OLS PASSED"

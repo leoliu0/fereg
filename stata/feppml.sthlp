@@ -196,6 +196,12 @@ The following {cmd:ppmlhdfe} options are not available and stop with an error: {
 {phang2}o {cmd:simplex} separation is an alias of {cmd:relu}: {cmd:feppml} does not implement
 {cmd:ppmlhdfe}'s simplex method (which needs the {cmd:moremata} package). The ReLU method alone detects all
 separated observations; the default {cmd:fe simplex relu} therefore runs {cmd:fe} and {cmd:relu}.{p_end}
+{phang2}o {cmd:feppml}'s ReLU check can find separated observations that {cmd:ppmlhdfe} 2.3.x does not detect.
+{cmd:feppml} then drops them, so {cmd:e(N)}, {cmd:e(num_separated)}, {cmd:e(df)} and {cmd:e(ll)} differ from
+{cmd:ppmlhdfe}'s (observations that become singletons after the drop are also dropped), and the coefficients
+differ slightly. For example, on a firm panel with firm and industry-by-year fixed effects {cmd:feppml} dropped
+20 observations that {cmd:ppmlhdfe} 2.3.0 kept, also with {cmd:separation(fe simplex relu mu)}; an exact
+linear program confirmed that these 20 observations are separated.{p_end}
 {phang2}o {cmd:e(ic)} (IRLS iterations) can differ by a few iterations: {cmd:ppmlhdfe}'s stopping rule also
 looks at the realized accuracy of its iterative solver, whereas {cmd:feppml} uses the requested inner
 tolerance. {cmd:e(ic2)} counts the iterations of {cmd:feppml}'s solver, which differ from {cmd:ppmlhdfe}'s.{p_end}
@@ -209,7 +215,8 @@ a large {opt offset()}. The coefficients are not affected.{p_end}
 other than the first (the one with the most categories) has a weighted mean of zero, and the first absorbs the
 shift. Only their sum (d) is unique.{p_end}
 {phang2}o {cmd:e(title)} links to this help file; {cmd:e(footnote)} is {cmd:_rf_footnote};
-{cmd:e(estat_cmd)} is not set.{p_end}
+{cmd:e(estat_cmd)} is {cmd:fereg_estat} ({cmd:ppmlhdfe}'s is {cmd:reghdfe5_estat}); both provide
+{cmd:estat summarize}, {cmd:estat vce} and {cmd:estat ic} (with e(df_m) + 1 parameters).{p_end}
 {phang2}o String variables are allowed inside fixed-effect and cluster interactions.{p_end}
 
 
@@ -239,6 +246,7 @@ shift. Only their sum (d) is unique.{p_end}
 All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effects are absorbed.
 {opt cooksd}, {opt hat} and {opt likelihood} are not implemented (error 198), as in {cmd:ppmlhdfe}.
 {help test}, {help lincom}, {help nlcom}, {help estimates} and {help margins} work as after {cmd:poisson}.
+{cmd:estat summarize}, {cmd:estat vce} and {cmd:estat ic} work as after {cmd:ppmlhdfe}.
 
 
 {marker examples}{...}
@@ -265,6 +273,9 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {synopt:{cmd:e(N_full)}}number of observations, including dropped singleton and separated observations{p_end}
 {synopt:{cmd:e(num_singletons)}}number of dropped singleton observations (including those separated by the {cmd:fe} rule){p_end}
 {synopt:{cmd:e(num_separated)}}number of observations dropped by the {cmd:relu}/{cmd:mu} separation checks{p_end}
+{synopt:{cmd:e(separation_complete)}}1 if every requested separation check finished; 0 if a check (e.g. ReLU at
+its iteration limit) stopped before certifying its result (a note is printed), so separated observations may
+remain in the sample{p_end}
 {synopt:{cmd:e(drop_singletons)}}1 if singletons were dropped{p_end}
 {synopt:{cmd:e(rank)}}rank of e(V){p_end}
 {synopt:{cmd:e(df)}}residual degrees of freedom{p_end}
@@ -312,6 +323,7 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {synopt:{cmd:e(wtype)}}weight type{p_end}
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
 {synopt:{cmd:e(predict)}}{cmd:feppml_p}{p_end}
+{synopt:{cmd:e(estat_cmd)}}{cmd:fereg_estat}{p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsok)}}predictions allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}

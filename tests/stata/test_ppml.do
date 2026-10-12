@@ -216,7 +216,31 @@ check hours age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)
 check hours age ttl_exp tenure, absorb(idcode year) vce(cluster idcode year) tol(1e-10)
 check union age ttl_exp, absorb(idcode year) vce(cluster idcode) tol(1e-10)
 dcheck hours age ttl_exp tenure, absorb(idcode year) tol(1e-10)
+* ## of categorical variables = their interaction alone (as ppmlhdfe: the main effects are nested)
+check hours age ttl_exp tenure, absorb(idcode ind_code##year) vce(cluster idcode year) tol(1e-10)
+check hours age ttl_exp tenure, absorb(i.ind_code##i.race) tol(1e-10)
+check hours age ttl_exp tenure, absorb(idcode ind_code##year##race) vce(cluster idcode) tol(1e-10)
 di as result "nlswork passed"
+
+* estat (e(estat_cmd) = fereg_estat): Stata's default summarize, vce and ic, as after ppmlhdfe
+quietly ppmlhdfe hours age ttl_exp tenure, absorb(idcode year) tol(1e-10) sep(fe relu)
+estat summarize
+matrix sR = r(stats)
+estat ic
+matrix iR = r(S)
+quietly feppml hours age ttl_exp tenure, absorb(idcode year) tol(1e-10) sep(fe relu)
+assert "`e(estat_cmd)'" == "fereg_estat"
+* e(separation_complete): 1 when the separation checks finished (missing with plugins that predate it)
+assert e(separation_complete) == 1 | missing(e(separation_complete))
+estat summarize
+assert mreldif(r(stats), sR) < 1e-12
+estat ic
+assert mreldif(r(S), iR) < 1e-6
+estat vce
+rcof "noi estat bogus" == 321
+* tagsep() needs per-observation separation output from the plugin: a clear error for now
+rcof "noi feppml hours age, absorb(idcode) tagsep(sep)" == 198
+di as result "estat passed"
 
 * ---------------------------------------------------------------------------
 * simulated gravity panel (exporter#year, importer#year, pair FE; zeros separated by the pair FE)
