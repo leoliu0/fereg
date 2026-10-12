@@ -159,4 +159,7 @@ test_that("fixed effects are computed on demand and cached; lean drops them", {
   lean <- fe_feols(y ~ x1 | id + year, panel, lean = TRUE)
   expect_error(fixef(lean), "lean")
   expect_null(lean$residuals)
+  iv <- fe_feols(y ~ x1 | id | e1 ~ z1 + z2, panel)
+  expect_error(fixef(summary(iv, stage = 1)), "not available for first-stage models")
+  expect_named(fixef(iv), "id")
 })

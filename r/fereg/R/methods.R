@@ -261,6 +261,9 @@ fixef <- function(object, ...) UseMethod("fixef")
 #' @export
 fixef.fereg <- function(object, ...) {
   if (length(object$fixef_terms) == 0) stop("fereg: the estimation has no fixed effects", call. = FALSE)
+  if (isTRUE(object$iv_stage == 1)) {
+    stop("fereg: fixed-effect values are not available for first-stage models; use fixef() on the second stage", call. = FALSE)
+  }
   cache <- object$fixef_cache
   if (!is.null(cache$fixef)) return(cache$fixef)
   raw <- fixef_raw(object)
