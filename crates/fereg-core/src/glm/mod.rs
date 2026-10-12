@@ -23,7 +23,7 @@ pub(crate) mod wls;
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
-use crate::api::{Ctx, EstResult, Family, GlmOptions, Guess, Layout, NamedMat, Spec, Vce, WeightKind};
+use crate::api::{Ctx, EstResult, Family, GlmConvention, GlmOptions, GlmParts, Guess, Layout, NamedMat, Spec, Vce, WeightKind};
 use crate::dof;
 use crate::error::RfError;
 use crate::fe_recovery;
@@ -111,7 +111,8 @@ fn spans(a: &Term, b: &Term) -> bool {
 impl Session {
     /// GLM on `rows` (N×R row-major in [`Session::row_order`], layout `[y, x...]`); `offset` in row
     /// order. Observations dropped by separation are removed from the session (see
-    /// [`Session::keep`]); per-observation outputs refer to the final kept sample.
+    /// [`Session::keep`]); per-observation outputs refer to the final kept sample. ppmlhdfe /
+    /// Stata `logit` conventions ([`GlmConvention::Ppmlhdfe`]).
     pub fn glm(
         &mut self,
         rows: Vec<f64>,
@@ -121,6 +122,37 @@ impl Session {
         g: &GlmOptions,
         ctx: &Ctx,
     ) -> Result<EstResult, RfError> {
+        self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, false, ctx).map(|(res, _)| res)
+    }
+
+    /// [`Session::glm`] under convention `conv`, also returning the per-observation [`GlmParts`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn glm_parts(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        conv: GlmConvention,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, GlmParts), RfError> {
+        let (res, parts) = self.glm_checked(rows, lay, offset, s, g, conv, true, ctx)?;
+        Ok((res, parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn glm_checked(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        conv: GlmConvention,
+        want_parts: bool,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
         if lay.nendog != 0 || lay.ninst != 0 {
             return Err(RfError::InvalidInput("glm: layout has endogenous variables or instruments".into()));
         }
@@ -145,7 +177,11 @@ impl Session {
         if !(g.tol > 0.0 && g.tol <= 1.0 && g.itol > 0.0 && g.maxiter > 0) {
             return Err(RfError::InvalidInput("glm: tolerances must be in (0, 1] and maxiter positive".into()));
         }
-        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, ctx, pool))?
+        // The iteration log and drop messages are SMCL for the Stata plugin; fixest mode reports
+        // through EstResult::notes and the returned counts instead.
+        let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
+        let ctx = if conv == GlmConvention::Fixest { &muted } else { ctx };
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, conv, want_parts, ctx, pool))?
     }
 
     /// ppmlhdfe `remove_collinears` on the current sample, with the true weights.
@@ -254,9 +290,11 @@ impl Session {
         offset: Option<Vec<f64>>,
         s: &Spec,
         g: &GlmOptions,
+        conv: GlmConvention,
+        want_parts: bool,
         ctx: &Ctx,
         pool: &Pool,
-    ) -> Result<EstResult, RfError> {
+    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
         let fam = g.family;
         let n0 = self.n();
         let r0 = 1 + nx;
@@ -314,8 +352,16 @@ impl Session {
             self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
         }
 
-        // Initial values of μ (ppmlhdfe `guess()`; logit: (y + 1/2)/2).
+        // Initial values of μ: fixest's `family$initialize` in fixest mode (Poisson y + 0.1, on
+        // the standardized scale; binomial (w·y + 1/2)/(w + 1) with the prior weights), else
+        // ppmlhdfe `guess()` and, for logit, (y + 1/2)/2.
+        let fixest = conv == GlmConvention::Fixest;
         let mut mu: Vec<f64> = match (fam, g.guess) {
+            (Family::Poisson, _) if fixest => d.y.iter().map(|y| y + 0.1 / sd_y).collect(),
+            (Family::Logit, _) if fixest => {
+                let tw = d.tw.as_deref();
+                d.y.iter().enumerate().map(|(i, y)| tw.map_or((y + 0.5) / 2.0, |t| (t[i] * y + 0.5) / (t[i] + 1.0))).collect()
+            }
             (Family::Logit, _) => d.y.iter().map(|y| (y + 0.5) / 2.0).collect(),
             (_, Guess::Simple) => {
                 let ybar = wmean(&d.y, d.tw.as_deref(), pool);
@@ -336,6 +382,7 @@ impl Session {
             log: g.log,
             sd_y,
             check_sep: g.separation.mu,
+            fixest,
         };
         let mut eta = vec![0.0; d.n];
         let mut out: IrlsOut = irls::irls(self.absorber.as_mut(), &d, &mut mu, &mut eta, &cfg, pool, ctx)?;
@@ -365,7 +412,8 @@ impl Session {
             fmt_e(g.tol, 1)
         ));
         ctx.check()?;
-        self.glm_finish(&d, &out, &mu, &eta, status, nx, sd_y, num_sep, iter, subiter, s, pool)
+        let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, iter, subiter, conv, want_parts };
+        self.glm_finish(&fin, status, s, g, pool)
     }
 
     /// ppmlhdfe `guess(ols)`: OLS of ln(y + ȳ/100) on X and the fixed effects (true weights,
@@ -396,22 +444,8 @@ impl Session {
     }
 
     /// Final β, VCE, statistics and outputs (ppmlhdfe `GLM::solve` after IRLS).
-    #[allow(clippy::too_many_arguments)]
-    fn glm_finish(
-        &mut self,
-        d: &GlmData,
-        out: &IrlsOut,
-        mu: &[f64],
-        eta: &[f64],
-        mut status: Vec<u8>,
-        nx: usize,
-        sd_y: f64,
-        num_sep: u64,
-        iter: usize,
-        subiter: usize,
-        s: &Spec,
-        pool: &Pool,
-    ) -> Result<EstResult, RfError> {
+    fn glm_finish(&mut self, f: &Finish, mut status: Vec<u8>, s: &Spec, g: &GlmOptions, pool: &Pool) -> Result<(EstResult, Option<GlmParts>), RfError> {
+        let Finish { d, out, mu, eta, nx, sd_y, num_sep, iter, subiter, conv, want_parts } = *f;
         let fam = d.family;
         let n = d.n;
         let k = d.k;
@@ -485,10 +519,13 @@ impl Session {
         let msize = k + 1;
         let bread = vcov::inv_ext(&inv_xx, k, &xbar, big_n);
 
-        // VCE on the standardized-x scale.
-        let vce = match (&self.vce, fam, self.weight_kind) {
-            (Vce::Unadjusted, Family::Poisson, _) | (Vce::Unadjusted, _, WeightKind::Pweight) => Vce::Robust,
-            (v, _, _) => v.clone(),
+        // VCE on the standardized-x scale. ppmlhdfe forces robust for Poisson and pweights;
+        // fixest mode keeps the requested VCE (the fit layer computes its own).
+        let vce = match (&self.vce, fam, self.weight_kind, conv) {
+            (Vce::Unadjusted, Family::Poisson, _, GlmConvention::Ppmlhdfe) | (Vce::Unadjusted, _, WeightKind::Pweight, GlmConvention::Ppmlhdfe) => {
+                Vce::Robust
+            }
+            (v, ..) => v.clone(),
         };
         let fill_row = |i: usize, a: &mut [f64]| {
             let row = &block[i * r..(i + 1) * r];
@@ -498,6 +535,13 @@ impl Session {
             a[k] = 1.0;
         };
         let mut notes = Vec::new();
+        if !out.converged {
+            notes.push(format!(
+                "Absence of convergence: maximum number of IRLS iterations reached ({}). Final deviance: {}.",
+                g.maxiter,
+                out.deviance * sd_y
+            ));
+        }
         let mut df_r = big_n - dof.df_a as f64 - df_m;
         let mut n_clust: Option<(f64, Vec<f64>)> = None;
         let mut v_s = match &vce {
@@ -637,7 +681,7 @@ impl Session {
         scal(&mut res, "deviance", out.deviance * sd_y);
         scal(&mut res, "r2_p", 1.0 - ll / ll_0);
         scal(&mut res, "chi2", chi2);
-        scal(&mut res, "converged", 1.0);
+        scal(&mut res, "converged", f64::from(u8::from(out.converged)));
         scal(&mut res, "ic", iter as f64);
         scal(&mut res, "ic2", subiter as f64);
         scal(&mut res, "num_separated", num_separated as f64);
@@ -655,6 +699,7 @@ impl Session {
         scal(&mut res, "df_a_initial", dof.df_a_initial as f64);
         scal(&mut res, "df_a_redundant", dof.df_a_redundant as f64);
         scal(&mut res, "df_a_nested", dof.df_a_nested as f64);
+        let cons = b_out[nx];
         res.matrices.push(NamedMat { name: "b".into(), rows: 1, cols: k_all, data: b_out });
         res.matrices.push(NamedMat { name: "V".into(), rows: k_all, cols: k_all, data: v_out });
         res.matrices.push(NamedMat { name: "dof_table".into(), rows: dof.slots.len(), cols: 5, data: dof.table() });
@@ -684,6 +729,94 @@ impl Session {
                 None => vec![f64::NAN; n],
             });
         }
-        Ok(res)
+        let parts = if want_parts { Some(self.glm_parts_out(f, &beta, &dropped, e, &res.status, cons, pool)?) } else { None };
+        Ok((res, parts))
     }
+
+    /// [`GlmParts`] in kept order on the original scale (see its field docs). `beta` and `dropped`
+    /// are over the columns of `d.x` (standardized scale), `e` the working residuals (row order).
+    #[allow(clippy::too_many_arguments)]
+    fn glm_parts_out(&self, f: &Finish, beta: &[f64], dropped: &[bool], e: &[f64], status: &[u8], cons: f64, pool: &Pool) -> Result<GlmParts, RfError> {
+        let Finish { d, out, mu, eta, nx, sd_y, iter, .. } = *f;
+        let (n, k) = (d.n, d.k);
+        let r = 1 + k;
+        let order = self.absorber.row_order();
+        // y was divided by sd_y (Poisson): μ, the IRLS weights and the deviance scale by sd_y and
+        // η shifts by ln sd_y; x'β, the offset and the working residuals are scale-free.
+        let ln_sd = sd_y.ln();
+        let kept: Vec<usize> = (0..k).filter(|&j| !dropped[j]).collect();
+        let kk = kept.len();
+        let mut coef = vec![f64::NAN; nx];
+        for &j in &kept {
+            coef[d.cols[j]] = beta[j] / d.sd_x[j];
+        }
+        let off = d.off.as_deref();
+        let mut fe_sum = par::alloc_vec(n, 0.0)?;
+        pool.install(|| {
+            fe_sum.par_iter_mut().enumerate().for_each(|(i, v)| {
+                let xb: f64 = beta.iter().zip(&d.x[i * k..(i + 1) * k]).map(|(b, x)| b * x).sum();
+                *v = eta[i] - off.map_or(0.0, |o| o[i]) - xb + ln_sd;
+            })
+        });
+        let scaled = |v: &[f64], a: f64, b: f64| -> Result<Vec<f64>, RfError> {
+            let s: Vec<f64> = v.iter().map(|x| a * x + b).collect();
+            fe_recovery::to_kept_order(&s, order, pool)
+        };
+        // Kept-order row-major xt: kept position p holds solver row inv[p].
+        let mut inv = vec![0u32; n];
+        for (row, &p) in order.iter().enumerate() {
+            inv[p as usize] = row as u32;
+        }
+        let mut xt = par::alloc_vec(n * kk, 0.0)?;
+        if kk > 0 {
+            let block = &out.block;
+            pool.install(|| {
+                xt.par_chunks_mut(kk).zip(inv.par_iter()).for_each(|(o, &row)| {
+                    let src = &block[row as usize * r + 1..(row as usize + 1) * r];
+                    for (v, &j) in o.iter_mut().zip(&kept) {
+                        *v = src[j] * d.sd_x[j];
+                    }
+                })
+            });
+        }
+        let fe = if self.terms.iter().any(|t| t.save) {
+            let coefs = out.coefs.as_ref().ok_or_else(|| RfError::Internal("absorber returned no FE coefficients".into()))?;
+            let c: Vec<f64> = std::iter::once(1.0).chain(beta.iter().map(|b| -b)).collect();
+            fe_recovery::saved_fe(self.absorber.as_ref(), &self.terms, &coefs.combine(&c), -ln_sd)
+        } else {
+            Vec::new()
+        };
+        Ok(GlmParts {
+            coef,
+            status: status.to_vec(),
+            cons,
+            eta: scaled(eta, 1.0, ln_sd)?,
+            mu: scaled(mu, sd_y, 0.0)?,
+            w: scaled(&out.w, sd_y, 0.0)?,
+            k: kk,
+            xt,
+            working_resid: fe_recovery::to_kept_order(e, order, pool)?,
+            fe_sum: fe_recovery::to_kept_order(&fe_sum, order, pool)?,
+            fe,
+            deviance: out.deviance * sd_y,
+            iterations: iter,
+            converged: out.converged,
+        })
+    }
+}
+
+/// Outcome of the IRLS phase, handed to [`Session::glm_finish`].
+#[derive(Clone, Copy)]
+struct Finish<'a> {
+    d: &'a GlmData,
+    out: &'a IrlsOut,
+    mu: &'a [f64],
+    eta: &'a [f64],
+    nx: usize,
+    sd_y: f64,
+    num_sep: u64,
+    iter: usize,
+    subiter: usize,
+    conv: GlmConvention,
+    want_parts: bool,
 }

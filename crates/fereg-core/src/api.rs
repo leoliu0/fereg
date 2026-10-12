@@ -237,6 +237,68 @@ pub struct GlmOptions {
     pub log: bool,
 }
 
+/// Conventions of a GLM fit ([`crate::Session::glm_parts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GlmConvention {
+    /// ppmlhdfe 2.3.3 / Stata `logit` (the Stata plugin): Poisson and pweighted VCE forced to
+    /// robust; stop when ppmlhdfe's eps = |Δdev| / max(min(dev, dev_old), 0.1) < `tol` with the
+    /// inner tolerance at its final value; reaching `maxiter` is error 430.
+    #[default]
+    Ppmlhdfe,
+    /// fixest / pyfixest: the VCE is the session's as requested; fixest's starting values
+    /// (Poisson μ = y + 0.1, logit μ = (w·y + 1/2)/(w + 1)), so `guess` is ignored; stop when
+    /// |Δdev| / (0.1 + |dev|) < `tol` (fixest `glm.tol`, deviance on the original scale) in an
+    /// iteration without step halving whose FE solve was exact or ran at the final inner
+    /// tolerance max(min(`itol`, `tol`/10), 1e-12); the inner tolerance follows eps^{3/2} (eps = relative
+    /// deviance change) instead of ppmlhdfe's schedule. `maxiter` is the IRLS cap (fixest
+    /// `glm.iter`, 25); reaching it is a note in [`EstResult::notes`] with
+    /// [`GlmParts::converged`] = false (scalar `converged` = 0), not an error. Iteration logs are
+    /// not printed (SMCL text). Separation checks run only as set in [`GlmOptions::separation`].
+    Fixest,
+}
+
+/// Per-observation pieces of a GLM fit, for host-side inference (fixest/pyfixest variance,
+/// predict, fixef). Every vector is in **kept order** after the GLM-internal drops (separation):
+/// [`crate::Session::kept_index`] is the final sample. Everything is on the original scale of y
+/// and of the regressors.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GlmParts {
+    /// One coefficient per regressor sent (layout order); NaN when `status` ≠ 0.
+    pub coef: Vec<f64>,
+    /// Per regressor sent: 0 ok, 2 absorbed by the fixed effects, 3 collinear.
+    pub status: Vec<u8>,
+    /// ppmlhdfe constant: regression through the means under the final IRLS weights, so that
+    /// η ≈ x'β + cons + offset when there are no FE terms (it is then the intercept). With FE
+    /// terms it is only a normalization, included in `fe_sum`.
+    pub cons: f64,
+    /// Linear predictor η (offset included), from the final β.
+    pub eta: Vec<f64>,
+    /// Mean μ = g⁻¹(η).
+    pub mu: Vec<f64>,
+    /// IRLS weights of the final iteration: observation weight × μ (Poisson) or × μ(1 − μ)
+    /// (logit), μ taken at the start of that iteration. `xt` and `working_resid` were computed
+    /// under these weights, so inv(xt'·diag(w)·xt) is the inverse Hessian of the slopes (fixest
+    /// `cov.iid`).
+    pub w: Vec<f64>,
+    /// Number of columns of `xt` = regressors with status 0, in layout order.
+    pub k: usize,
+    /// Row-major nobs × `k`: kept regressors residualized on the FE structure under `w` (with no
+    /// FE terms the structure is the constant, so the columns are `w`-demeaned).
+    pub xt: Vec<f64>,
+    /// Working residuals z̃ − x̃'β of the final weighted least squares (fixest
+    /// `working_residuals`); fixest's GLM scores are `working_resid · w · xt`.
+    pub working_resid: Vec<f64>,
+    /// η − offset − x'β per observation: the sum of the fixed effects, constant included.
+    pub fe_sum: Vec<f64>,
+    /// For each saved term (absorb order): the intercept slot (if any), then one slot per slope;
+    /// values per observation. When every term is saved, Σ intercepts + Σ slope·x = `fe_sum`.
+    pub fe: Vec<Vec<f64>>,
+    pub deviance: f64,
+    /// IRLS iterations.
+    pub iterations: usize,
+    pub converged: bool,
+}
+
 /// A named dense matrix (row-major).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NamedMat {

@@ -48,6 +48,8 @@ pub(crate) struct IrlsCfg {
     pub sd_y: f64,
     /// Run the `mu` separation rule.
     pub check_sep: bool,
+    /// fixest stopping rule and cap ([`crate::api::GlmConvention::Fixest`]).
+    pub fixest: bool,
 }
 
 pub(crate) struct IrlsOut {
@@ -69,6 +71,8 @@ pub(crate) struct IrlsOut {
     pub n_sep: usize,
     /// Inner tolerance after the last iteration's update (the next run's `start_tol`).
     pub tol_in: f64,
+    /// False only in fixest mode when `maxiter` was reached first.
+    pub converged: bool,
 }
 
 /// Mata `x :<= lb ... ub` with missing (NaN) bounds treated as +∞ (ftools `inrange`).
@@ -214,7 +218,7 @@ pub(crate) fn irls(
     let n = d.n;
     let k = d.k;
     let r = 1 + k;
-    if fam == Family::Poisson {
+    if fam == Family::Poisson && !c.fixest {
         censor_mu(mu, &d.y);
     }
     for (e, &m) in eta.iter_mut().zip(mu.iter()) {
@@ -343,10 +347,20 @@ pub(crate) fn irls(
         if iter > 1 {
             let denom = dev.min(old_dev).max(0.1);
             eps = delta.abs() / denom;
-            // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations ppmlhdfe
-            // spends tightening tol_in to `highest` also refine β beyond eps < tol (stopping at
-            // eps < tol moves β by ~2e-6 relative on fixture p_problem1).
-            if eps < c.tol && !fast && (tol_in <= 1.1 * c.highest || c.exact) {
+            let converged = if c.fixest {
+                // fixest: |dev − dev_old| / (0.1 + |dev|) on the original deviance scale; an
+                // iteration with step halving never converges (fixest sets dev_evol = Inf). The
+                // iteration's FE solve must have been exact or at the final inner tolerance, so
+                // the reported β is as accurate as a fixest fit at fixef.tol = itol.
+                let crit = if halved { f64::INFINITY } else { ((old_dev - dev) * c.sd_y).abs() / (0.1 + (dev * c.sd_y).abs()) };
+                crit < c.tol && (info.exact || c.exact || tol_in <= 1.1 * c.highest)
+            } else {
+                // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations
+                // ppmlhdfe spends tightening tol_in to `highest` also refine β beyond eps < tol
+                // (stopping at eps < tol moves β by ~2e-6 relative on fixture p_problem1).
+                eps < c.tol && !fast && (tol_in <= 1.1 * c.highest || c.exact)
+            };
+            if converged {
                 ok += 1;
             }
         }
@@ -374,7 +388,7 @@ pub(crate) fn irls(
             ctx.log(&line);
         }
 
-        if ok >= 1 {
+        if ok >= 1 || (c.fixest && iter == c.maxiter) {
             return Ok(IrlsOut {
                 iter,
                 subiter,
@@ -387,16 +401,27 @@ pub(crate) fn irls(
                 separated: sep,
                 n_sep,
                 tol_in,
+                converged: ok >= 1,
             });
         }
 
-        // Tighten the inner tolerance as IRLS converges (use_heuristic_tol = 1).
-        if eps < tol_in {
-            tol_in = (0.1 * tol_in).min(alt_tol).max(c.highest);
-            alt_tol = 10f64.powf(-(1.0 / (0.1 * eps).max(EPS1)).log10().ceil());
-        }
-        if inrange(c.tol, predicted, eps) && inrange(tol_in / c.highest, 1.1, 10.1) {
-            tol_in *= 0.1;
+        if c.fixest {
+            // Inexact Newton: Δdev ∝ ‖Δβ‖², so eps^{1/2} measures the relative step and the next
+            // FE solve is asked for eps^{3/2}, a cube of the step. Measured on the bench DGPs
+            // (fx_simple/fx_difficult, n = 1e5 and 1e6, 2-3 FEs, glm.tol = 1e-8): 6-8 IRLS
+            // iterations, as many as fixest; ppmlhdfe's schedule needs 1-2 more for the same β.
+            if iter > 1 {
+                tol_in = (eps * eps.sqrt()).min(tol_in).max(c.highest);
+            }
+        } else {
+            // Tighten the inner tolerance as IRLS converges (use_heuristic_tol = 1).
+            if eps < tol_in {
+                tol_in = (0.1 * tol_in).min(alt_tol).max(c.highest);
+                alt_tol = 10f64.powf(-(1.0 / (0.1 * eps).max(EPS1)).log10().ceil());
+            }
+            if inrange(c.tol, predicted, eps) && inrange(tol_in / c.highest, 1.1, 10.1) {
+                tol_in *= 0.1;
+            }
         }
     }
 }
