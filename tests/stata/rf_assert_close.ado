@@ -1,4 +1,4 @@
-*! regfast test helper: assert that two numbers agree
+*! fereg test helper: assert that two numbers agree
 * rf_assert_close name a b rtol
 *   passes if a == b (including both missing) or reldif(a, b) = |a-b|/(|b|+1) <= rtol
 *   rtol = 0 requires exact equality

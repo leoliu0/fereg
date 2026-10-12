@@ -1,7 +1,7 @@
 [project]
-name = "regfast-bench"
+name = "fereg-bench"
 version = "0.1.0"
-description = "Benchmark harness for regfast vs reghdfe, xhdfe, fixest and pyfixest"
+description = "Benchmark harness for fereg vs reghdfe, xhdfe, fixest and pyfixest"
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.5.4",

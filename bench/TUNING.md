@@ -1,7 +1,7 @@
 # Tuning log (plan Phase 8.6)
 
 Each entry: the change, the rows it targets, and the measured effect. Timings are wall-clock
-seconds of the estimation command inside `stata-mp` (`timer` around `quietly regfast ...`,
+seconds of the estimation command inside `stata-mp` (`timer` around `quietly fereg ...`,
 data in memory, `set processors T` and `threads(T)`), on the machine of `ENVIRONMENT.md`
 (Ryzen 9 9950X, 16 cores). Ranges are the spread over 5–9 repetitions after one warm-up run.
 Data: `bench/data/fx_simple_<n>.dta` (fixest "simple" DGP; `y x1` unless noted).
@@ -67,7 +67,7 @@ skips the touse read (one of the 5–6 SPI reads per observation).
 
 ### Rejected
 
-Target: 1e5, 3 FEs, T=1 (gate: regfast 0.011 s vs fixest 0.011 s). Profile of the 10.6 ms:
+Target: 1e5, 3 FEs, T=1 (gate: fereg 0.011 s vs fixest 0.011 s). Profile of the 10.6 ms:
 SPI read 2.4, session 1.9 (factorize 0.5, structure 0.7, weights 0.5), estimate 5.5, of which
 the dense small-block preconditioner 4.3 (assembly 3.6 + LDLᵀ of the 444×444 Schur complement
 0.65); the rest is ado code. Times below are `bench_solve --n 1e5 --fe 3` residualize phases.
@@ -120,7 +120,7 @@ resolution:
 
 | Tool | Measurement | Time |
 |---|---|---|
-| regfast | mean of 50 consecutive runs (one timer around the loop) | 10.5–10.7 ms |
+| fereg | mean of 50 consecutive runs (one timer around the loop) | 10.5–10.7 ms |
 | fixest | 50 runs, `Sys.time()` per run | median 11.6 ms, mean 12.9 ms, min 10.3 ms |
 
 With a timer around the `plugin call` in a throwaway copy of `_rf_load` (50 commands), the two
@@ -150,20 +150,20 @@ column; the assembly 8e-10 s per unit of Σ_s d_s², the LDLT `C_FLOP`·m³/3.
 | R=11 | | | not deferred |
 
 The difficult rows pay the bounded cost of the policy (6 Jacobi iterations and a restart).
-Gate rows that changed (1 ms resolution, medians of 3; full regfast grid re-run):
+Gate rows that changed (1 ms resolution, medians of 3; full fereg grid re-run):
 
 | 1e5, 3 FEs | T | Before | After |
 |---|---|---|---|
-| `regfast y x1`, simple | 1 | 11 | 10 (fixest 11: the former FAIL) |
-| `regfast y x1`, simple | 16 | 9 | 8 |
-| `regfast y x1`, difficult | 1 / 16 | 11 / 8 | 12 / 9 |
-| `ppmlfast negbin_y x1`, simple | 1 / 16 | 100 / 52 | 77 / 42 |
-| `logitfast binary_y x1`, simple | 1 / 16 | 83 / 41 | 66 / 32 |
+| `fereg y x1`, simple | 1 | 11 | 10 (fixest 11: the former FAIL) |
+| `fereg y x1`, simple | 16 | 9 | 8 |
+| `fereg y x1`, difficult | 1 / 16 | 11 / 8 | 12 / 9 |
+| `feppml negbin_y x1`, simple | 1 / 16 | 100 / 52 | 77 / 42 |
+| `felogit binary_y x1`, simple | 1 / 16 | 83 / 41 | 66 / 32 |
 
 Without the up-front rule every IRLS solve deferred again: difficult `x1` logit 87 → 134 ms,
 Poisson 95 → 142 ms (T=1). With it (Stata, T=1, difficult 1e5, interleaved means of 20 runs):
-`ppmlfast x1` 82.4–83.2 → 81.7–83.0 ms; with `x1`–`x5`, where only the R=5 collinearity solve
-is deferred, `ppmlfast` 102.2–104.0 → 104.4–106.1 ms and `logitfast` 89.8–92.5 → 91.8–95.1 ms.
+`feppml x1` 82.4–83.2 → 81.7–83.0 ms; with `x1`–`x5`, where only the R=5 collinearity solve
+is deferred, `feppml` 102.2–104.0 → 104.4–106.1 ms and `felogit` 89.8–92.5 → 91.8–95.1 ms.
 
 In Stata, 1e5, 3 FEs, T=1, `y x1` (mean of 200 runs, three interleaved sessions each):
 10.3–10.8 ms before, 9.6–9.7 ms after. Single-run `timer` readings (100 runs): ≤ 9 ms 45%,

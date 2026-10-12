@@ -1,16 +1,16 @@
 /*
-    mockhost.c — a fake Stata host for ABI tests of the regfast plugin on every OS (plan §9.2).
+    mockhost.c — a fake Stata host for ABI tests of the fereg plugin on every OS (plan §9.2).
 
     Implements the SPI 3.0 ST_plugin table over an in-memory 1000-observation dataset with two
     fixed effects (numeric fe1, string fe2), plus scalar/matrix/macro registries, loads the
     plugin with dlopen/LoadLibrary and runs version, selftest, prepare (absorber=dense and
     fast) and ols, comparing against the JSON written by
-        cargo run --release -p regfast-core --example mock_expected
+        cargo run --release -p fereg-core --example mock_expected
     Steps whose core implementation is still a stub are reported as PENDING (not failures).
 
     Build/run (from the repository root):
-        cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
-        target/mockhost stata/regfast.linux64.plugin [target/mock_expected.json]
+        cc -O2 -DSYSTEM=OPUNIX -Icrates/fereg-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
+        target/mockhost stata/fereg.linux64.plugin [target/mock_expected.json]
     Exit status: 0 when nothing FAILed.
 */
 
@@ -40,7 +40,7 @@ static int64_t h(uint64_t i, uint64_t k) {
     return (int64_t)(((i * 2654435761ULL + k * 40503ULL) % 4294967296ULL) % 2001ULL) - 1000;
 }
 
-/* Mirrors mock_data() in crates/regfast-core/examples/mock_expected.rs. */
+/* Mirrors mock_data() in crates/fereg-core/examples/mock_expected.rs. */
 static void make_data(void) {
     for (uint64_t i = 0; i < NOBS; i++) {
         num[V_FE1][i] = i < 990 ? (double)(1 + (i * 7) % 50) : (double)(1000 + i);
@@ -306,7 +306,7 @@ static int close_enough(double a, double b, double rtol) {
     return absd(a - b) <= rtol * s;
 }
 
-/* A stub in regfast-core reports r(9999) with one of these phrases. */
+/* A stub in fereg-core reports r(9999) with one of these phrases. */
 static int is_core_stub(int rc) {
     return rc == 9999 && (strstr(last_err, "not implemented yet") || strstr(last_err, "not built yet"));
 }

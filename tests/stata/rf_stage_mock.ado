@@ -1,6 +1,6 @@
-*! regfast test helper: stage the current reghdfe e() for the mock plugin (tests/stata/mock)
+*! fereg test helper: stage the current reghdfe e() for the mock plugin (tests/stata/mock)
 * rf_stage_mock, indepvars(varlist|_none) [status(numlist)]
-*   __mock_b/__mock_V: e(b)/e(V) restricted to the regressors regfast sends to the plugin
+*   __mock_b/__mock_V: e(b)/e(V) restricted to the regressors fereg sends to the plugin
 *                      (fvexpand'ed terms that are not base/omitted levels, then _cons)
 *   __mock_doft:       e(dof_table)
 *   __mock_<scalar>:   every e() scalar

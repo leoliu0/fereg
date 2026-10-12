@@ -1,42 +1,42 @@
-* test_ppml.do -- ppmlfast vs ppmlhdfe 2.3.3 (plan Phase 6.7)
+* test_ppml.do -- feppml vs ppmlhdfe 2.3.3 (plan Phase 6.7)
 *
-* Datasets: the ppmlhdfe test-suite data ported in crates/regfast-core/tests/data/glm_*.csv
+* Datasets: the ppmlhdfe test-suite data ported in crates/fereg-core/tests/data/glm_*.csv
 *   (MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimarães, and Thomas Zylkin; see
 *   gen_glm_fixtures.do) and inline (test/slopes1-4.do), auto, nlswork and a simulated gravity
 *   panel.
-* Every ppmlhdfe run uses tol(1e-10) or tighter and sep(fe relu) (regfast treats `simplex` as an
+* Every ppmlhdfe run uses tol(1e-10) or tighter and sep(fe relu) (fereg treats `simplex` as an
 * alias of `relu`; ppmlhdfe's simplex presolve needs moremata).
 * Assertions (rf_compare_e): b rtol 1e-7, V rtol 1e-6 (correlation scale), integer e() exact
 * (N, num_separated, num_singletons, df, ...), other e() scalars rtol 1e-6 (ll, deviance, r2_p,
 * chi2, ...), all e() macros equal, e(dof_table) identical, e(sample) identical; d and the sum of
 * saved FEs rtol 1e-6 (scaled by max|d|); every predict option.
 *
-* Run from tests/stata (needs regfast.plugin on the adopath and ppmlhdfe installed):
+* Run from tests/stata (needs fereg.plugin on the adopath and ppmlhdfe installed):
 *   stata-mp -b do test_ppml.do
 version 16
 clear all
 set more off
-capture confirm file "../../stata/ppmlfast.ado"
+capture confirm file "../../stata/feppml.ado"
 if (!_rc) adopath ++ "`c(pwd)'/../../stata"
-which ppmlfast
+which feppml
 which ppmlhdfe
-findfile regfast.plugin
-global RF_DATA "`c(pwd)'/../../crates/regfast-core/tests/data"
+findfile fereg.plugin
+global RF_DATA "`c(pwd)'/../../crates/fereg-core/tests/data"
 
 * e() items that legitimately differ: ic2 counts solver sub-iterations; ic can differ by a few
 * iterations because ppmlhdfe's stopping rule also looks at the realized accuracy of its MAP
-* solver (HDFE.accuracy), which the regfast absorber does not report (it uses the requested inner
-* tolerance, an upper bound); e(title) links to the ppmlfast help file.
+* solver (HDFE.accuracy), which the fereg absorber does not report (it uses the requested inner
+* tolerance, an upper bound); e(title) links to the feppml help file.
 global PX ic ic2
 global PM title
 
-* check <arguments common to ppmlhdfe and ppmlfast> [|| xs(<more excluded scalars>) <rf_compare_e options>]
+* check <arguments common to ppmlhdfe and feppml> [|| xs(<more excluded scalars>) <rf_compare_e options>]
 capture program drop check
 program check
 	SplitSpec `0'
 	quietly ppmlhdfe `spec'
 	estimates store R
-	ppmlfast `spec'
+	feppml `spec'
 	estimates store F
 	rf_compare_e R F, xscalars($PX `xs') xmacros($PM) `cmp'
 end
@@ -70,7 +70,7 @@ program dcheck
 	foreach o in mu xb xbd eta deviance response pearson anscombe scores working {
 		quietly predict double __pR_`o', `o'
 	}
-	ppmlfast `spec' d(__dF)
+	feppml `spec' d(__dF)
 	estimates store F
 	rf_compare_e R F, xscalars($PX `xs') xmacros($PM d) `cmp'
 	cmpvar d __dF __dR `dtol'
@@ -131,7 +131,7 @@ check y x, noa tol(1e-10) || xs(ll deviance r2_p)
 loaddata hard1
 check y, absorb(id1 id2) tol(1e-10)
 * hard2 (keepsingletons) fits the data exactly (deviance 0): _cons is 0 up to rounding, and
-* ppmlhdfe's exact 0 makes _ms_findomitted rename it o._cons while regfast gets -2.2e-16; the
+* ppmlhdfe's exact 0 makes _ms_findomitted rename it o._cons while fereg gets -2.2e-16; the
 * values are checked in tests/glm.rs (p_hard2_keepsing).
 loaddata hard3
 check y, absorb(id1 id2) tol(1e-10)
@@ -188,7 +188,7 @@ dcheck price weight gear length, absorb(turn trunk) tol(1e-12)
 * (O(sqrt(tol)) in eta). That error is ~1e-4 with a single FE (exact partial-out, ppmlhdfe stops
 * after few iterations) and explodes on degenerate fits such as offset(mpg) on price, where
 * ppmlhdfe's mu is ~0 for some observations and its d varies by 1e4 within a turn group (its
-* group first-order conditions fail; ppmlfast's d is exactly constant within groups). The cases
+* group first-order conditions fail; feppml's d is exactly constant within groups). The cases
 * below are well-conditioned two-FE models where ppmlhdfe's d is accurate to ~1e-7.
 dcheck price weight gear length, absorb(turn trunk) offset(m10) tol(1e-12)
 dcheck price weight gear length, absorb(turn trunk) exposure(mpg) tol(1e-12)
@@ -196,13 +196,13 @@ dcheck price weight gear length, noa tol(1e-10)
 
 * savefe: the sum of the saved FEs equals d
 capture drop FE*
-ppmlfast price weight gear, absorb(FE1=turn FE2=foreign) vce(robust) tol(1e-10) keepsing d(dfe)
+feppml price weight gear, absorb(FE1=turn FE2=foreign) vce(robust) tol(1e-10) keepsing d(dfe)
 gen double FEsum = FE1 + FE2
 cmpvar "saved FEs" FEsum dfe 1e-9
 qui ppmlhdfe price weight gear, absorb(FX1=turn FX2=foreign) vce(robust) tol(1e-10) keepsing d(dfx) sep(fe relu)
 cmpvar "d vs ppmlhdfe" dfe dfx 1e-6
 drop FE1 FE2 FEsum dfe FX1 FX2 dfx
-ppmlfast price weight gear, absorb(turn foreign, savefe) tol(1e-10) keepsing
+feppml price weight gear, absorb(turn foreign, savefe) tol(1e-10) keepsing
 confirm double variable __hdfe1__ __hdfe2__
 drop __hdfe*
 di as result "auto passed"
@@ -226,10 +226,10 @@ check trade rta x2, absorb(exp#year imp#year exp#imp) vce(cluster exp#imp) tol(1
 * ppmlhdfe's d here satisfies the FE first-order conditions sum_g(y - mu) = 0 only to ~2e-6 (its
 * d uses the previous IRLS iteration's working variable and the MAP inner tolerance; the error
 * does not shrink with tol()/itol()); it reaches 1.3e-5 at an observation with mu = 0.07.
-* ppmlfast's d satisfies them to ~1e-12, asserted below. predict working = (y - mu)/mu amplifies
+* feppml's d satisfies them to ~1e-12, asserted below. predict working = (y - mu)/mu amplifies
 * the difference at small mu to 7e-6 (relative to its max).
 dcheck trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10) || dtol(1e-5)
-qui ppmlfast trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10) d(dG)
+qui feppml trade rta x2, absorb(exp#year imp#year exp#imp) tol(1e-10) d(dG)
 qui predict double muG, mu
 gen double rG = trade - muG
 foreach g in "exp year" "imp year" "exp imp" {
@@ -276,7 +276,7 @@ end
 check y x, absorb(id1##c.z c) maxiter(100) tol(1e-12)
 * slopes3: within id2 == 3 the intercept and z separate obs 7; obs 8 is then a singleton.
 * ppmlhdfe's V is nonsymmetric by rounding here (residual df 1, near-perfect fit), so Stata zeroes
-* it when posting and its chi2 is missing; ppmlfast posts its symmetric V (about 1e-14).
+* it when posting and its chi2 is missing; feppml posts its symmetric V (about 1e-14).
 clear
 input byte(index id1 id2 x z) double y
 1 1 1 0 -1  3369071263
@@ -291,7 +291,7 @@ end
 check y x, absorb(id1 id2##c.z) maxiter(100) tol(1e-10) keepsing || nov xs(chi2)
 check y x, absorb(id1 id2##c.z) maxiter(100) tol(1e-10) || nov xs(chi2)
 * slopes4: every y == 0 observation is separated, through combinations of i, j and j#c.z.
-* ppmlhdfe 2.3.3 finds 3 of the 4 (its own test of this dataset is disabled), so ppmlfast is
+* ppmlhdfe 2.3.3 finds 3 of the 4 (its own test of this dataset is disabled), so feppml is
 * checked for all four, and against ppmlhdfe on the y > 0 sample.
 clear
 input long y byte(x z i j)
@@ -323,18 +323,18 @@ input long y byte(x z i j)
  819845 0 16 13  8
 5589636 1 16 13  9
 end
-quietly ppmlfast y x, absorb(i j##c.z) maxiter(400) tol(1e-10) keepsing
+quietly feppml y x, absorb(i j##c.z) maxiter(400) tol(1e-10) keepsing
 assert e(num_separated) == 4
 qui count if e(sample) != (y > 0)
 assert r(N) == 0
 check y x if y > 0, absorb(i j##c.z) maxiter(400) tol(1e-10) keepsing
 * (after singletons, 8 observations that the model fits exactly: ppmlhdfe's MAP solves this tiny
 * system to machine precision, so it accepts eps < tol at deviance 2e-8 before tightening the
-* inner tolerance; ppmlfast runs two more iterations to deviance 0, which moves _cons by 2e-6)
+* inner tolerance; feppml runs two more iterations to deviance 0, which moves _cons by 2e-6)
 check y x if y > 0, absorb(i j##c.z) maxiter(400) tol(1e-10) || btol(1e-5)
 matrix b1 = e(b)
 local N1 = e(N)
-quietly ppmlfast y x, absorb(i j##c.z) maxiter(400) tol(1e-10)
+quietly feppml y x, absorb(i j##c.z) maxiter(400) tol(1e-10)
 assert e(num_separated) == 4 & e(N) == `N1'
 assert mreldif(e(b), b1) < 1e-8
 * nlswork: slope terms with and without intercepts, robust / cluster, d() and predict
@@ -350,14 +350,14 @@ di as result "slopes passed"
 * ---------------------------------------------------------------------------
 sysuse auto, clear
 gen double yneg = price - 5000
-rcof "noi ppmlfast yneg weight, absorb(turn)" == 459
-rcof "noi ppmlfast price weight, absorb(turn) exposure(mpg) offset(mpg)" == 198
-rcof "noi ppmlfast price weight, absorb(turn) sep(bogus)" == 198
-qui ppmlfast price weight, absorb(turn) d(dH)
+rcof "noi feppml yneg weight, absorb(turn)" == 459
+rcof "noi feppml price weight, absorb(turn) exposure(mpg) offset(mpg)" == 198
+rcof "noi feppml price weight, absorb(turn) sep(bogus)" == 198
+qui feppml price weight, absorb(turn) d(dH)
 rcof "noi predict double h, hat" == 198
 rcof "noi predict double h, cooksd" == 198
 rcof "noi predict double h, likelihood" == 198
-qui ppmlfast price weight, absorb(turn)
+qui feppml price weight, absorb(turn)
 rcof "noi predict double h, mu" != 0
 predict double h, xb
 

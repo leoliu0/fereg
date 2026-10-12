@@ -1,23 +1,23 @@
-* test_iv.do -- regfast (IV/2SLS) vs ivreghdfe 1.1.4 (plan Phase 5.6)
+* test_iv.do -- fereg (IV/2SLS) vs ivreghdfe 1.1.4 (plan Phase 5.6)
 *
 * Every ivreghdfe run uses tol(1e-12). Assertions (rf_compare_e): b rtol 1e-7, V rtol 1e-6 (correlation
 * scale), integer e() exact, other e() scalars rtol 1e-6 (idstat, cd, cdf, rkf, widstat, j, AR, ...),
 * e() macros equal except command/version bookkeeping, e(dof_table) identical, e(sample) identical;
 * with first/ffirst also e(first) (rtol 1e-6) and every stored first-stage regression.
 *
-* Run from tests/stata (needs regfast.plugin on the adopath and ivreghdfe/ranktest installed):
+* Run from tests/stata (needs fereg.plugin on the adopath and ivreghdfe/ranktest installed):
 *   stata-mp -b do test_iv.do
 version 16
 clear all
 set more off
-capture confirm file "../../stata/regfast.ado"
+capture confirm file "../../stata/fereg.ado"
 if (!_rc) adopath ++ "`c(pwd)'/../../stata"
-which regfast
+which fereg
 which ivreghdfe
-findfile regfast.plugin
+findfile fereg.plugin
 di as text "plugin: `r(fn)'"
 
-* Macros posted only by ivreghdfe/ivreg2 (command bookkeeping, options regfast does not have) or
+* Macros posted only by ivreghdfe/ivreg2 (command bookkeeping, options fereg does not have) or
 * whose content legitimately differs (estimation-store names of the first stages)
 global IV_XMACROS version ivreg2cmd firsteqs
 
@@ -49,7 +49,7 @@ program checkfirst
 	}
 end
 
-* check <arguments common to ivreghdfe and regfast> : estimate both and compare everything
+* check <arguments common to ivreghdfe and fereg> : estimate both and compare everything
 capture program drop check
 program check
 	local spec `"`0'"'
@@ -61,7 +61,7 @@ program check
 	quietly ivreghdfe `spec' tol(1e-12) `=cond(`first', "savefirst", "")'
 	estimates store R
 	local reqs `e(firsteqs)'
-	regfast `spec'
+	fereg `spec'
 	estimates store F
 	local feqs `e(firsteqs)'
 	rf_compare_e R F, xscalars(ic) xmacros($IV_XMACROS)
@@ -134,7 +134,7 @@ foreach vce in "vce(robust)" "vce(cluster idcode year)" {
 	foreach p in xb residuals d xbd dresiduals {
 		quietly predict double pR_`p', `p'
 	}
-	regfast ln_wage age (tenure = union south msp) [aw=w], absorb(idcode year) `vce' residuals(rF)
+	fereg ln_wage age (tenure = union south msp) [aw=w], absorb(idcode year) `vce' residuals(rF)
 	estimates store F
 	rf_compare_e R F, xscalars(ic) xmacros($IV_XMACROS resid)
 	foreach p in xb residuals d xbd dresiduals {
@@ -156,14 +156,14 @@ di as result "residuals/predict passed"
 * Error paths
 * ---------------------------------------------------------------------------
 foreach o in liml gmm2s cue "fuller(1)" "kclass(0.5)" {
-	capture regfast ln_wage age (tenure = union south), absorb(idcode year) `o'
+	capture fereg ln_wage age (tenure = union south), absorb(idcode year) `o'
 	assert _rc == 198
 }
-capture regfast ln_wage age (tenure = union south), absorb(idcode year) vce(cluster idcode year ind_code)
+capture fereg ln_wage age (tenure = union south), absorb(idcode year) vce(cluster idcode year ind_code)
 assert _rc == 198
-capture regfast ln_wage age (tenure hours = union), absorb(idcode year)
+capture fereg ln_wage age (tenure hours = union), absorb(idcode year)
 assert _rc == 481
-capture regfast ln_wage age, absorb(idcode year) first
+capture fereg ln_wage age, absorb(idcode year) first
 assert _rc == 198
 di as result "IV error paths passed"
 

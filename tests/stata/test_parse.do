@@ -1,10 +1,10 @@
-* test_parse.do -- standalone tests of the regfast ado parsers (no plugin needed)
+* test_parse.do -- standalone tests of the fereg ado parsers (no plugin needed)
 * References: ms_parse_absvars / ms_parse_vce (ftools 2.50, used by reghdfe 6.13.1) and reghdfe's own e().
 * Run from tests/stata:  stata-mp -b do test_parse.do
 version 16
 clear all
 set more off
-capture confirm file "../../stata/regfast.ado"
+capture confirm file "../../stata/fereg.ado"
 if (!_rc) adopath ++ "`c(pwd)'/../../stata"
 which _rf_parse_absorb
 which ms_parse_absvars
@@ -38,7 +38,7 @@ program check_absorb
 	local R_hi `s(has_intercept)'
 	local R_any `s(save_any_fe)'
 	local R_all `s(save_all_fe)'
-	* regfast
+	* fereg
 	_rf_parse_absorb `spec'
 	local fail 0
 	if ("`s(G)'" != "`G'") local fail "G: `s(G)' vs `G'"
@@ -107,7 +107,7 @@ assert `"`lab'"' == "[FE] 1.ind_code#1.year#c.age"
 assert "`s(num_slots)'" == "5"
 di as text "ok  factor/slope/target lists"
 
-* regfast extensions (reghdfe rejects strings inside interactions)
+* fereg extensions (reghdfe rejects strings inside interactions)
 _rf_parse_absorb sid#year i.syr
 assert "`s(absvars)'" == "sid#year i.syr" & "`s(extended_absvars)'" == "sid#year syr" & "`s(stringvars)'" == "sid syr"
 assert "`s(dof_rownames)'" == "1.sid#1.year 1.syr"
@@ -115,7 +115,7 @@ _rf_parse_absorb sid#syr##c.age
 assert "`s(absvars)'" == "sid#syr##c.age" & "`s(extended_absvars)'" == "sid#syr sid#syr#c.age"
 di as text "ok  string factors inside interactions"
 
-* Time-series operators are returned unexpanded (resolved by regfast with tsrevar)
+* Time-series operators are returned unexpanded (resolved by fereg with tsrevar)
 xtset idcode year
 _rf_parse_absorb idcode#c.L.tenure
 assert "`s(slopevars)'" == "L.tenure" & "`s(absvars)'" == "idcode#c.L.tenure"
@@ -187,7 +187,7 @@ foreach v in "" "robust" "r" "rob" "ols" "unadjusted" "un" "conventional" "cl id
 	"cluster sid" {
 	check_vce "`v'" ""
 }
-* regfast extension: string variables inside cluster interactions (ms_parse_vce rejects them)
+* fereg extension: string variables inside cluster interactions (ms_parse_vce rejects them)
 _rf_parse_vce, vce(cluster sid#year i.syr)
 assert "`s(clustervars)'" == "sid#year syr" & "`s(base_clustervars)'" == "sid year syr" & "`s(num_clusters)'" == "2"
 check_vce "" pweight

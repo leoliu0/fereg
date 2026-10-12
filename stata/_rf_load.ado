@@ -1,4 +1,4 @@
-*! version 0.1.0  regfast: the only program that calls the compiled plugin
+*! version 0.2.0  fereg: the only program that calls the compiled plugin
 *
 * Usage:
 *   _rf_load                                     load the plugin and check that its version matches
@@ -11,21 +11,21 @@
 * = | ; * - and commas are a syntax error.
 program _rf_load
 	version 16
-	local rf_version 0.1.0
+	local rf_version 0.2.0
 
 	if (`"`0'"' == "") {
 		local _rf_version
 		capture plugin call _rf_plugin, version
 		if (_rc == 199) {
-			di as err "regfast: could not load regfast.plugin; reinstall with"
-			di as err `"  net install regfast, from("https://raw.githubusercontent.com/leoliu0/regfast/gh-pages/stata") replace"'
+			di as err "fereg: could not load fereg.plugin; reinstall with"
+			di as err `"  net install fereg, from("https://raw.githubusercontent.com/leoliu0/fereg/gh-pages/stata") replace"'
 			exit 601
 		}
 		else if (_rc) {
 			exit _rc
 		}
 		if ("`_rf_version'" != "`rf_version'") {
-			di as err "regfast: plugin version `_rf_version' does not match ado version `rf_version'; reinstall"
+			di as err "fereg: plugin version `_rf_version' does not match ado version `rf_version'; reinstall"
 			exit 198
 		}
 		exit
@@ -46,4 +46,4 @@ program _rf_load
 	}
 end
 
-capture program _rf_plugin, plugin using("regfast.plugin")
+capture program _rf_plugin, plugin using("fereg.plugin")

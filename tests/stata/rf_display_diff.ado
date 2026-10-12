@@ -1,5 +1,5 @@
-*! regfast test helper: compare the replay display of two stored estimates line by line
-* rf_display_diff REF TEST [, refcmd(reghdfe) testcmd(regfast) options(replay options)]
+*! fereg test helper: compare the replay display of two stored estimates line by line
+* rf_display_diff REF TEST [, refcmd(reghdfe) testcmd(fereg) options(replay options)]
 *   Replays REF with `refcmd' and TEST with `testcmd' into text logs and requires identical lines
 *   (log header/footer lines with names, paths and times are skipped).
 program rf_display_diff
@@ -8,7 +8,7 @@ program rf_display_diff
 	gettoken ref test : namelist
 	local test `test'
 	if ("`refcmd'" == "") local refcmd reghdfe
-	if ("`testcmd'" == "") local testcmd regfast
+	if ("`testcmd'" == "") local testcmd fereg
 	tempfile fR fT
 	foreach side in R T {
 		local est = cond("`side'" == "R", "`ref'", "`test'")

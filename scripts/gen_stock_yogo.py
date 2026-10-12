@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate crates/regfast-core/src/iv/stock_yogo.rs from ivreg2's Stock-Yogo (2005) tables.
+"""Generate crates/fereg-core/src/iv/stock_yogo.rs from ivreg2's Stock-Yogo (2005) tables.
 
 Source: `s_ivreg210_cdsy()` in ivreg210.ado (lines 618-742 of the version shipped with
 ivreg2/ivreghdfe), the same tables ivreghdfe's `cdsy` reads from livreg2.mlib. Only the 2SLS
@@ -89,7 +89,7 @@ def main():
         )
     out.append("];")
     out.append("")
-    dst = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates", "regfast-core", "src", "iv", "stock_yogo.rs")
+    dst = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates", "fereg-core", "src", "iv", "stock_yogo.rs")
     with open(dst, "w") as f:
         f.write("\n".join(out))
     print(f"wrote {os.path.normpath(dst)}")

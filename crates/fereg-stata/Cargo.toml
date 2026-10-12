@@ -1,0 +1,21 @@
+[package]
+name = "fereg-stata"
+description = "Stata plugin (SPI 3.0) exposing fereg-core to the fereg, feppml and felogit commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "fereg_stata"
+crate-type = ["cdylib"]
+
+[dependencies]
+fereg-core = { path = "../fereg-core" }
+rayon.workspace = true
+faer.workspace = true
+
+[build-dependencies]
+cc = "1"

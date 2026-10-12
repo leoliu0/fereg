@@ -1,13 +1,13 @@
 [workspace]
-members = ["crates/regfast-core", "crates/regfast-stata"]
+members = ["crates/fereg-core", "crates/fereg-stata"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["Leo Liu <auleo.liu@gmail.com>"]
-repository = "https://github.com/leoliu0/regfast"
+repository = "https://github.com/leoliu0/fereg"
 
 [workspace.dependencies]
 rayon = "1.12"

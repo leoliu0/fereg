@@ -7,8 +7,8 @@ burn-in and 3 timed runs (1 when the burn-in exceeds 60 s) and prints one
 (keyed by config, T, tool; later runs replace earlier ones) and the whole CSV is
 rendered into ``RESULTS.md``.
 
-Gate (plan 8.5): PASS iff the regfast median is below the median of every
-competitor that finished; a competitor timeout counts as slower when regfast
+Gate (plan 8.5): PASS iff the fereg median is below the median of every
+competitor that finished; a competitor timeout counts as slower when fereg
 finished. Competitor errors are excluded from the comparison and shown as such.
 
 Examples:
@@ -44,17 +44,17 @@ RAW_DIR = RESULTS_DIR / "raw"
 RESULTS_CSV = RESULTS_DIR / "results.csv"
 RESULTS_MD = HERE / "RESULTS.md"
 
-ALL_TOOLS = ["regfast", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"]
-STATA_TOOLS = {"regfast", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe"}
-# Tools per group (plan 8.4 table); regfast is the candidate in every group.
+ALL_TOOLS = ["fereg", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"]
+STATA_TOOLS = {"fereg", "reghdfe", "ivreghdfe", "ppmlhdfe", "xhdfe"}
+# Tools per group (plan 8.4 table); fereg is the candidate in every group.
 GROUP_TOOLS = {
-    "G1": ["regfast", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G2": ["regfast", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G3": ["regfast", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G4": ["regfast", "ivreghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G5": ["regfast", "ppmlhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G6": ["regfast", "fixest", "pyfixest_map", "pyfixest_lsmr"],
-    "G7": ["regfast", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G1": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G2": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G3": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G4": ["fereg", "ivreghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G5": ["fereg", "ppmlhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G6": ["fereg", "fixest", "pyfixest_map", "pyfixest_lsmr"],
+    "G7": ["fereg", "reghdfe", "xhdfe", "fixest", "pyfixest_map", "pyfixest_lsmr"],
 }
 GROUP_TITLES = {
     "G1": "G1 OLS (fixest DGP)",
@@ -195,8 +195,8 @@ def stata_command(tool: str, c: Config, threads: int) -> str | None:
     x = " ".join(c.xvars)
     iv = f"({' '.join(c.endog)} = {' '.join(c.inst)})" if c.endog else ""
     vce = _stata_vce(tool, c.vcov)
-    if tool == "regfast":
-        cmd = {"ols": "regfast", "iv": "regfast", "ppml": "ppmlfast", "logit": "logitfast"}[c.model]
+    if tool == "fereg":
+        cmd = {"ols": "fereg", "iv": "fereg", "ppml": "feppml", "logit": "felogit"}[c.model]
         return f"{cmd} {c.depvar} {x} {iv}, absorb({absorb}) {vce} threads({threads})"
     if tool == "reghdfe" and c.model == "ols":
         return f"reghdfe {c.depvar} {x}, absorb({absorb}) {vce}"
@@ -398,9 +398,9 @@ def _gap(a: dict, ref: dict) -> float | None:
 
 
 def gate(rows_by_tool: dict[str, dict]) -> tuple[str, str]:
-    """(ratio regfast/best finished competitor, PASS/FAIL/n/a)."""
-    rf = rows_by_tool.get("regfast")
-    comps = {t: r for t, r in rows_by_tool.items() if t != "regfast"}
+    """(ratio fereg/best finished competitor, PASS/FAIL/n/a)."""
+    rf = rows_by_tool.get("fereg")
+    comps = {t: r for t, r in rows_by_tool.items() if t != "fereg"}
     finished = [float(r["median_s"]) for r in comps.values() if r["status"] == "ok"]
     best = min(finished) if finished else None
     if rf is None or not comps:
@@ -414,14 +414,14 @@ def gate(rows_by_tool: dict[str, dict]) -> tuple[str, str]:
 
 def write_report(rows: list[dict]) -> None:
     lines = [
-        "# regfast benchmark results",
+        "# fereg benchmark results",
         "",
         f"Generated {datetime.now().isoformat(timespec='seconds')} by `run.py` from `results/results.csv`.",
         "Times are medians of the timed runs in seconds (`ms` = milliseconds); estimation call only, data in memory.",
-        "`ratio` = regfast / fastest finished competitor. Gate: PASS iff regfast is faster than every competitor that",
-        "finished (a competitor timeout counts as slower); `n/a` = regfast not run. `error`/`timeout`/`unsupported`",
+        "`ratio` = fereg / fastest finished competitor. Gate: PASS iff fereg is faster than every competitor that",
+        "finished (a competitor timeout counts as slower); `n/a` = fereg not run. `error`/`timeout`/`unsupported`",
         "cells are explained in results.csv. Coefficient gap: max relative difference over shared non-constant",
-        "coefficients versus regfast (versus fixest when regfast has no result for the row).",
+        "coefficients versus fereg (versus fixest when fereg has no result for the row).",
         "",
     ]
     by_group: dict[str, dict[tuple[str, str], dict[str, dict]]] = {}
@@ -441,7 +441,7 @@ def write_report(rows: list[dict]) -> None:
             n_fail += verdict == "FAIL"
             lines.append(f"| `{cfg}` | {T} | " + " | ".join(_fmt_t(byt.get(t)) for t in tools)
                          + f" | {ratio} | {verdict} |")
-            ref_tool = "regfast" if byt.get("regfast", {}).get("coefs") else "fixest"
+            ref_tool = "fereg" if byt.get("fereg", {}).get("coefs") else "fixest"
             ref = byt.get(ref_tool, {}).get("coefs")
             if ref:
                 ref_c = json.loads(ref)

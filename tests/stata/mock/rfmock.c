@@ -1,5 +1,5 @@
 /*
- * rfmock.c -- a fake regfast.plugin for ado-level dry runs (tests/stata/test_ado_mock.do).
+ * rfmock.c -- a fake fereg.plugin for ado-level dry runs (tests/stata/test_ado_mock.do).
  *
  * It implements the plugin protocol (cmd=version|prepare|ols) without estimating anything:
  *   prepare  applies the protocol's sample rule (touse = last variable; touse is zeroed for
@@ -44,7 +44,7 @@ static int copy_mat(const char *src, const char *dst) {
   if (!dst) return 0;
   int r = SF_row((char *)src), c = SF_col((char *)src);
   if (r != SF_row((char *)dst) || c != SF_col((char *)dst)) {
-    char m[200]; snprintf(m, 200, "regfast: matrix %s has wrong dimensions (%dx%d vs mock %dx%d)\n", dst, SF_row((char*)dst), SF_col((char*)dst), r, c);
+    char m[200]; snprintf(m, 200, "fereg: matrix %s has wrong dimensions (%dx%d vs mock %dx%d)\n", dst, SF_row((char*)dst), SF_col((char*)dst), r, c);
     SF_error(m); return 503;
   }
   for (int i = 1; i <= r; i++) for (int j = 1; j <= c; j++) { ST_double v; SF_mat_el((char *)src, i, j, &v); SF_mat_store((char *)dst, i, j, v); }
@@ -52,7 +52,7 @@ static int copy_mat(const char *src, const char *dst) {
 }
 STDLL stata_call(int argc, char *argv[]) {
   if (argc < 1) return 198;
-  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.1.0"); return 0; }
+  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.2.0"); return 0; }
   if (!strcmp(argv[0], "prepare")) {
     record("rfmock_prepare", argc, argv);
     int tv = SF_nvars(); double n = 0; ST_double t, z; char s[2048];
@@ -78,7 +78,7 @@ STDLL stata_call(int argc, char *argv[]) {
   if (!strcmp(argv[0], "ols")) {
     record("rfmock_ols", argc, argv);
     const char *tok = key(argc, argv, "token");
-    if (!tok || strcmp(tok, "777")) { SF_error("regfast: stale plugin session; rerun the command\n"); return 198; }
+    if (!tok || strcmp(tok, "777")) { SF_error("fereg: stale plugin session; rerun the command\n"); return 198; }
     int rc;
     if ((rc = copy_mat("__mock_b", key(argc, argv, "b")))) return rc;
     if ((rc = copy_mat("__mock_V", key(argc, argv, "V")))) return rc;

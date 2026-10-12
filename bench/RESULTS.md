@@ -1,17 +1,17 @@
-# regfast benchmark results
+# fereg benchmark results
 
-Generated 2026-10-12T11:21:54 by `run.py` from `results/results.csv`.
+Generated 2026-10-12T15:27:39 by `run.py` from `results/results.csv`.
 Times are medians of the timed runs in seconds (`ms` = milliseconds); estimation call only, data in memory.
-`ratio` = regfast / fastest finished competitor. Gate: PASS iff regfast is faster than every competitor that
-finished (a competitor timeout counts as slower); `n/a` = regfast not run. `error`/`timeout`/`unsupported`
+`ratio` = fereg / fastest finished competitor. Gate: PASS iff fereg is faster than every competitor that
+finished (a competitor timeout counts as slower); `n/a` = fereg not run. `error`/`timeout`/`unsupported`
 cells are explained in results.csv. Coefficient gap: max relative difference over shared non-constant
-coefficients versus regfast (versus fixest when regfast has no result for the row).
+coefficients versus fereg (versus fixest when fereg has no result for the row).
 
 **Gate summary:** 273 PASS, 0 FAIL.
 
 ## G1 OLS (fixest DGP)
 
-| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | 2.0ms | 18.0ms | 9.0ms | 22.0ms | 6.6ms | 7.2ms | 0.30 | PASS |
 | `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | 2.0ms | 19.0ms | 6.0ms | 5.0ms | 6.4ms | 7.2ms | 0.40 | PASS |
@@ -112,108 +112,108 @@ coefficients versus regfast (versus fixest when regfast has no result for the ro
 
 Coefficient gap:
 
-| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 3.8e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 3.1e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.7e-15 | 4.5e-15 | 2.6e-13 | 4.2e-12 | 5.7e-15 |
-| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.8e-15 | 4.5e-15 | 2.6e-13 | 2.1e-13 | 5.7e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.6e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.7e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.3e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.4e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 6.1e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.9e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.5e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.7e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-14 | 8.6e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.0e-14 | 8.5e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.0e-14 | 6.8e-15 | 5.9e-12 | 6.7e-11 | 7.0e-15 |
-| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 6.8e-15 | 5.9e-12 | 1.1e-11 | 7.0e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 8.8e-16 | 1.1e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 1.3e-15 | 6.6e-16 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-13 | 1.3e-15 | 3.3e-10 | 6.7e-08 | 2.9e-15 |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.2e-13 | 1.3e-15 | 3.3e-10 | 6.7e-08 | 3.1e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 3.2e-15 | 3.5e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 2.6e-15 | 3.9e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.4e-14 | 2.9e-15 | 2.9e-14 | 3.2e-15 | 3.7e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.5e-14 | 3.2e-15 | 2.9e-14 | 3.2e-15 | 3.9e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.6e-06 | 7.2e-15 |
-| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.5e-06 | 7.5e-15 |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.0e-14 | 6.6e-16 | 3.0e-14 | 6.6e-16 | 2.2e-16 |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.1e-14 | 6.6e-16 | 3.0e-14 | 2.4e-15 | 1.8e-15 |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.8e-14 | 1.1e-15 | 1.4e-06 | 4.0e-06 | 2.2e-16 |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 7.9e-14 | 1.1e-15 | 1.4e-06 | 3.7e-06 | 2.2e-16 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | regfast |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 4.5e-06 | 3.8e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | regfast |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.0e-14 | 2.5e-15 | 7.3e-14 | 1.5e-15 | 4.0e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.8e-14 | 2.3e-15 | 7.3e-14 | 1.5e-15 | 3.5e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.7e-13 | 2.0e-15 | 4.3e-06 | 1.0e-05 | 3.3e-15 |
-| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.4e-13 | 2.0e-15 | 4.3e-06 | 1.1e-05 | 3.7e-15 |
-| `fx_difficult_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 2.0e-15 | 6.5e-14 | 1.6e-15 | 1.3e-15 |
-| `fx_difficult_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 2.2e-15 | 1.6e-08 | 8.6e-07 | 1.6e-14 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  |  | 4.7e-15 | 1.5e-06 |  | 4.4e-14 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 4.7e-15 | 1.5e-06 |  | 7.4e-14 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.5e-13 | 5.2e-15 | 2.2e-13 | 8.2e-15 | 8.9e-15 |
-| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  | 4.8e-15 | 4.6e-06 |  | 1.1e-13 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 4.4e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.2e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-15 | 1.7e-15 | 6.8e-15 | 1.5e-15 | 2.4e-15 |
-| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-15 | 1.7e-15 | 6.8e-15 | 1.7e-15 | 2.4e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 9.2e-15 | 9.3e-15 | 7.5e-15 | 9.2e-15 | 1.0e-14 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 8.9e-15 | 9.3e-15 | 7.5e-15 | 1.0e-14 | 1.0e-14 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 8.9e-15 | 8.1e-15 | 1.5e-15 | 7.7e-15 | 7.7e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 9.7e-15 | 8.1e-15 | 1.5e-15 | 8.1e-15 | 7.7e-15 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 9.2e-15 | 1.1e-14 | 9.9e-15 | 9.9e-15 | 1.2e-14 |
-| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.1e-14 | 9.9e-15 | 1.1e-14 | 1.2e-14 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 0.0e+00 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 4.4e-16 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.1e-14 | 1.5e-15 | 9.7e-15 | 6.6e-16 | 4.4e-16 |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.5e-15 | 9.7e-15 | 1.1e-15 | 2.2e-16 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-14 | 2.9e-15 | 2.2e-14 | 2.6e-15 | 2.9e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.2e-14 | 2.9e-15 | 2.2e-14 | 2.7e-15 | 2.9e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.7e-14 | 3.9e-15 | 2.5e-14 | 3.9e-15 | 3.2e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.0e-14 | 3.7e-15 | 2.5e-14 | 4.2e-15 | 3.7e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.6e-14 | 2.3e-15 | 2.2e-14 | 2.3e-15 | 2.9e-15 |
-| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 2.5e-14 | 2.8e-15 | 2.2e-14 | 2.5e-15 | 3.1e-15 |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-15 | 1.0e-15 | 2.3e-15 | 1.1e-16 | 1.1e-16 |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 6.4e-15 | 1.0e-15 | 2.3e-15 | 6.7e-16 | 4.4e-16 |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 4.4e-16 | 4.4e-16 |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 0.0e+00 | 1.9e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.8e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | regfast |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.2e-15 | 1.5e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.4e-15 | 1.7e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.3e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 2.4e-15 | 8.7e-14 | 2.2e-15 | 2.9e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 5.3e-14 | 2.0e-15 | 8.7e-14 | 2.2e-15 | 2.7e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.9e-14 | 1.7e-15 | 5.6e-14 | 2.9e-15 | 3.7e-15 |
-| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.7e-14 | 1.6e-15 | 5.6e-14 | 2.3e-15 | 3.4e-15 |
-| `fx_simple_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-13 | 3.2e-15 | 4.7e-14 | 1.1e-15 | 8.9e-16 |
-| `fx_simple_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.6e-13 | 4.9e-15 | 2.0e-14 | 1.2e-15 | 1.2e-15 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | regfast |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | regfast |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 1.0e-14 | 1.1e-14 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 5.5e-15 | 1.1e-14 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.3e-13 | 5.6e-15 | 2.7e-13 | 9.2e-15 | 1.1e-14 |
-| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.1e-13 | 5.5e-15 | 1.7e-13 | 5.4e-15 | 1.1e-14 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 3.8e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 3.1e-15 | 3.5e-15 | 4.6e-15 | 3.8e-15 | 3.8e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.7e-15 | 4.5e-15 | 2.6e-13 | 4.2e-12 | 5.7e-15 |
+| `fx_difficult_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.8e-15 | 4.5e-15 | 2.6e-13 | 2.1e-13 | 5.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 5.6e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 5.3e-15 | 3.7e-15 | 8.9e-16 | 4.7e-15 | 4.4e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 6.1e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.9e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 5.5e-15 | 5.7e-15 | 1.8e-12 | 1.3e-11 | 6.7e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.1e-14 | 8.6e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.0e-14 | 8.5e-15 | 2.0e-15 | 8.5e-15 | 7.8e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.0e-14 | 6.8e-15 | 5.9e-12 | 6.7e-11 | 7.0e-15 |
+| `fx_difficult_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.1e-14 | 6.8e-15 | 5.9e-12 | 1.1e-11 | 7.0e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 8.8e-16 | 1.1e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 6.2e-15 | 8.8e-16 | 7.9e-15 | 1.3e-15 | 6.6e-16 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.2e-13 | 1.3e-15 | 3.3e-10 | 6.7e-08 | 2.9e-15 |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 2.2e-13 | 1.3e-15 | 3.3e-10 | 6.7e-08 | 3.1e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 3.2e-15 | 3.5e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.3e-14 | 2.4e-15 | 2.1e-14 | 2.6e-15 | 3.9e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 2.3e-12 | 3.6e-15 | 1.7e-09 | 7.9e-07 | 7.3e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.4e-14 | 2.9e-15 | 2.9e-14 | 3.2e-15 | 3.7e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.5e-14 | 3.2e-15 | 2.9e-14 | 3.2e-15 | 3.9e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.6e-06 | 7.2e-15 |
+| `fx_difficult_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 2.8e-12 | 3.7e-15 | 3.3e-09 | 1.5e-06 | 7.5e-15 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.0e-14 | 6.6e-16 | 3.0e-14 | 6.6e-16 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.1e-14 | 6.6e-16 | 3.0e-14 | 2.4e-15 | 1.8e-15 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 4.8e-14 | 1.1e-15 | 1.4e-06 | 4.0e-06 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 7.9e-14 | 1.1e-15 | 1.4e-06 | 3.7e-06 | 2.2e-16 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | fereg |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | fereg |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.9e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.8e-14 | 1.7e-15 | 7.3e-14 | 1.3e-15 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | fereg |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 4.5e-06 | 3.8e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | fereg |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.2e-13 | 1.3e-15 | 1.4e-06 | 5.6e-06 | 3.7e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 6.0e-14 | 2.5e-15 | 7.3e-14 | 1.5e-15 | 4.0e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 5.8e-14 | 2.3e-15 | 7.3e-14 | 1.5e-15 | 3.5e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.7e-13 | 2.0e-15 | 4.3e-06 | 1.0e-05 | 3.3e-15 |
+| `fx_difficult_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 4.4e-13 | 2.0e-15 | 4.3e-06 | 1.1e-05 | 3.7e-15 |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 5.7e-14 | 2.0e-15 | 6.5e-14 | 1.6e-15 | 1.3e-15 |
+| `fx_difficult_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  |  | 2.2e-15 | 1.6e-08 | 8.6e-07 | 1.6e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | fereg |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.1e-13 | 4.3e-15 | 1.7e-13 | 8.0e-15 | 8.4e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | fereg |  |  | 4.7e-15 | 1.5e-06 |  | 4.4e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  |  | 4.7e-15 | 1.5e-06 |  | 7.4e-14 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.5e-13 | 5.2e-15 | 2.2e-13 | 8.2e-15 | 8.9e-15 |
+| `fx_difficult_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  |  | 4.8e-15 | 4.6e-06 |  | 1.1e-13 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 4.4e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 2.2e-16 | 2.2e-16 | 3.1e-15 | 4.4e-16 | 6.6e-16 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.3e-15 | 1.7e-15 | 6.8e-15 | 1.5e-15 | 2.4e-15 |
+| `fx_simple_10000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.1e-15 | 1.7e-15 | 6.8e-15 | 1.7e-15 | 2.4e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 6.1e-15 | 6.4e-15 | 1.3e-15 | 6.2e-15 | 6.1e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 9.2e-15 | 9.3e-15 | 7.5e-15 | 9.2e-15 | 1.0e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 8.9e-15 | 9.3e-15 | 7.5e-15 | 1.0e-14 | 1.0e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 8.9e-15 | 8.1e-15 | 1.5e-15 | 7.7e-15 | 7.7e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 9.7e-15 | 8.1e-15 | 1.5e-15 | 8.1e-15 | 7.7e-15 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 9.2e-15 | 1.1e-14 | 9.9e-15 | 9.9e-15 | 1.2e-14 |
+| `fx_simple_10000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.1e-14 | 1.1e-14 | 9.9e-15 | 1.1e-14 | 1.2e-14 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.7e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 0.0e+00 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.6e-14 | 4.4e-16 | 7.7e-15 | 0.0e+00 | 4.4e-16 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.1e-14 | 1.5e-15 | 9.7e-15 | 6.6e-16 | 4.4e-16 |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.1e-14 | 1.5e-15 | 9.7e-15 | 1.1e-15 | 2.2e-16 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.7e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.6e-14 | 2.8e-15 | 2.5e-14 | 3.3e-15 | 3.4e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.3e-14 | 2.9e-15 | 2.2e-14 | 2.6e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.2e-14 | 2.9e-15 | 2.2e-14 | 2.7e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.7e-14 | 3.9e-15 | 2.5e-14 | 3.9e-15 | 3.2e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 2.0e-14 | 3.7e-15 | 2.5e-14 | 4.2e-15 | 3.7e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.6e-14 | 2.3e-15 | 2.2e-14 | 2.3e-15 | 2.9e-15 |
+| `fx_simple_100000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 2.5e-14 | 2.8e-15 | 2.2e-14 | 2.5e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 5.7e-15 | 1.0e-15 | 2.3e-15 | 1.1e-16 | 1.1e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 6.4e-15 | 1.0e-15 | 2.3e-15 | 6.7e-16 | 4.4e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 4.4e-16 | 4.4e-16 |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 4.8e-14 | 6.7e-16 | 7.0e-15 | 0.0e+00 | 1.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | fereg |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 1 | fereg |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 3.1e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 2.7e-14 | 2.0e-15 | 8.7e-14 | 2.4e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | fereg |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.8e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 1 | fereg |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.2e-15 | 1.5e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 5.4e-14 | 8.9e-16 | 5.6e-14 | 2.4e-15 | 1.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 5.3e-14 | 8.9e-16 | 5.6e-14 | 2.0e-15 | 1.3e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 5.7e-14 | 2.4e-15 | 8.7e-14 | 2.2e-15 | 2.9e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 5.3e-14 | 2.0e-15 | 8.7e-14 | 2.2e-15 | 2.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 3.9e-14 | 1.7e-15 | 5.6e-14 | 2.9e-15 | 3.7e-15 |
+| `fx_simple_1000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 3.7e-14 | 1.6e-15 | 5.6e-14 | 2.3e-15 | 3.4e-15 |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.1e-13 | 3.2e-15 | 4.7e-14 | 1.1e-15 | 8.9e-16 |
+| `fx_simple_10000000 y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.6e-13 | 4.9e-15 | 2.0e-14 | 1.2e-15 | 1.2e-15 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=cluster:indiv_id` | 16 | fereg |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.3e-13 | 3.8e-15 | 2.7e-13 | 9.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=cluster:indiv_id` | 16 | fereg |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 1.0e-14 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.3e-13 | 5.1e-15 | 1.7e-13 | 5.5e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.3e-13 | 5.6e-15 | 2.7e-13 | 9.2e-15 | 1.1e-14 |
+| `fx_simple_10000000 y~x1+x2+x3+x4+x5+x6+x7+x8+x9+x10 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.1e-13 | 5.5e-15 | 1.7e-13 | 5.4e-15 | 1.1e-14 |
 
 ## G2 AKM
 
-| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | 0.156 | 6.436 | 0.745 | 0.425 | 6.777 | 0.471 | 0.37 | PASS |
 | `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | 0.235 | 10.744 | 2.224 | 0.829 | 10.356 | 0.949 | 0.28 | PASS |
@@ -269,63 +269,63 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.7e-14 | 2.2e-15 | 4.6e-14 | 7.9e-14 | 1.3e-15 |
-| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.5e-14 | 2.2e-15 | 4.6e-14 | 7.7e-14 | 1.6e-15 |
-| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.1e-14 | 8.9e-16 | 2.6e-14 | 4.1e-14 | 1.6e-15 |
-| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.5e-14 | 8.9e-16 | 2.6e-14 | 2.1e-14 | 1.3e-15 |
-| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 8.3e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 2.2e-16 |
-| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.4e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 1.1e-15 |
-| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.5e-14 | 2.3e-15 | 6.9e-14 | 6.9e-14 | 4.0e-15 |
-| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.2e-15 | 2.3e-15 | 6.9e-14 | 9.8e-14 | 3.4e-15 |
-| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.5e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.4e-15 |
-| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.1e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.1e-15 |
-| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.7e-14 | 1.6e-15 | 1.4e-14 | 9.6e-13 | 3.8e-15 |
-| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 7.3e-14 | 1.6e-15 | 1.4e-14 | 9.8e-13 | 4.9e-15 |
-| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 9.7e-13 | 4.4e-16 | 3.2e-10 |  | 8.9e-16 |
-| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 9.0e-13 | 4.4e-16 | 3.2e-10 |  | 4.4e-16 |
-| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 1.6e-15 | 4.4e-16 |
-| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 2.4e-15 | 1.6e-15 |
-| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.8e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 2.7e-15 |
-| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.9e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 3.3e-15 |
-| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.9e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 5.6e-16 |
-| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.7e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 2.2e-15 |
-| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.0e-15 |
-| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.3e-15 |
-| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.3e-14 | 2.2e-16 | 6.9e-14 | 1.3e-13 | 1.3e-15 |
-| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.5e-14 | 2.2e-16 | 6.9e-14 | 1.3e-14 | 3.1e-15 |
-| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 2.4e-15 | 2.2e-15 |
-| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 8.9e-16 | 1.6e-15 |
-| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.8e-14 | 0.0e+00 | 7.0e-14 | 1.9e-13 | 2.2e-16 |
-| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 3.0e-14 | 0.0e+00 | 7.0e-14 | 2.1e-13 | 1.3e-15 |
-| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 4.7e-14 | 1.4e-15 | 9.1e-13 | 8.4e-13 | 1.2e-15 |
-| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.1e-14 | 1.4e-15 | 9.1e-13 | 9.4e-13 | 2.2e-15 |
-| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.3e-13 | 1.1e-16 | 4.7e-10 |  | 1.4e-15 |
-| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 8.5e-14 | 1.1e-16 | 4.7e-10 |  | 5.6e-16 |
-| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 4.6e-12 | 1.3e-15 | 5.4e-07 |  | 2.2e-15 |
-| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.8e-12 | 1.3e-15 | 5.4e-07 |  | 1.7e-15 |
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 9.3e-15 | 3.4e-15 | 5.6e-12 | 1.2e-10 | 3.6e-15 |
-| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.4e-14 | 3.4e-15 | 5.6e-12 | 1.2e-10 | 3.6e-15 |
-| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.0e-15 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 1.1e-15 |
-| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.6e-16 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 5.6e-16 |
-| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.9e-14 | 6.7e-16 | 2.8e-14 | 8.4e-15 | 2.2e-16 |
-| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 2.0e-14 | 6.7e-16 | 2.8e-14 | 9.8e-15 | 8.9e-16 |
-| `akm_scale_4_10000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 7.8e-14 | 1.1e-14 | 2.1e-13 | 6.7e-16 | 2.1e-15 |
-| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.0e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 8.8e-16 |
-| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.6e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 0.0e+00 |
-| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 5.0e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 1.1e-15 |
-| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 4.9e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 2.4e-15 |
-| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 1.3e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 1.3e-15 |
-| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.5e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 0.0e+00 |
-| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 2.1e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.0e-15 |
-| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 1.2e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.7e-15 |
-| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | regfast |  | 8.2e-15 | 8.8e-16 | 7.1e-12 | 7.7e-11 | 1.1e-15 |
-| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | regfast |  | 5.8e-15 | 8.8e-16 | 7.1e-12 | 6.8e-11 | 6.6e-16 |
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 3.7e-14 | 2.2e-15 | 4.6e-14 | 7.9e-14 | 1.3e-15 |
+| `akm_baseline_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 3.5e-14 | 2.2e-15 | 4.6e-14 | 7.7e-14 | 1.6e-15 |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 5.1e-14 | 8.9e-16 | 2.6e-14 | 4.1e-14 | 1.6e-15 |
+| `akm_freeze_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 4.5e-14 | 8.9e-16 | 2.6e-14 | 2.1e-14 | 1.3e-15 |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 8.3e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 2.2e-16 |
+| `akm_freeze_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 7.4e-14 | 6.7e-16 | 2.7e-15 | 7.1e-13 | 1.1e-15 |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 1.5e-14 | 2.3e-15 | 6.9e-14 | 6.9e-14 | 4.0e-15 |
+| `akm_freeze_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 7.2e-15 | 2.3e-15 | 6.9e-14 | 9.8e-14 | 3.4e-15 |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.5e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.4e-15 |
+| `akm_freeze_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 3.1e-14 | 0.0e+00 | 7.4e-14 | 2.0e-13 | 2.1e-15 |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 5.7e-14 | 1.6e-15 | 1.4e-14 | 9.6e-13 | 3.8e-15 |
+| `akm_freeze_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 7.3e-14 | 1.6e-15 | 1.4e-14 | 9.8e-13 | 4.9e-15 |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 9.7e-13 | 4.4e-16 | 3.2e-10 |  | 8.9e-16 |
+| `akm_freeze_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 9.0e-13 | 4.4e-16 | 3.2e-10 |  | 4.4e-16 |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 1.6e-15 | 4.4e-16 |
+| `akm_interaction_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 3.3e-14 | 2.2e-16 | 4.4e-16 | 2.4e-15 | 1.6e-15 |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.8e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 2.7e-15 |
+| `akm_interaction_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 2.9e-14 | 1.4e-15 | 1.1e-13 | 4.3e-12 | 3.3e-15 |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 3.9e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 5.6e-16 |
+| `akm_interaction_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 4.7e-14 | 5.6e-16 | 3.5e-13 | 1.2e-12 | 2.2e-15 |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.0e-15 |
+| `akm_interaction_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 1.1e-12 | 1.1e-16 | 2.4e-08 |  | 2.3e-15 |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.3e-14 | 2.2e-16 | 6.9e-14 | 1.3e-13 | 1.3e-15 |
+| `akm_mobility_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 2.5e-14 | 2.2e-16 | 6.9e-14 | 1.3e-14 | 3.1e-15 |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 2.4e-15 | 2.2e-15 |
+| `akm_mobility_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 3.4e-14 | 1.6e-15 | 2.0e-14 | 8.9e-16 | 1.6e-15 |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.8e-14 | 0.0e+00 | 7.0e-14 | 1.9e-13 | 2.2e-16 |
+| `akm_mobility_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 3.0e-14 | 0.0e+00 | 7.0e-14 | 2.1e-13 | 1.3e-15 |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 4.7e-14 | 1.4e-15 | 9.1e-13 | 8.4e-13 | 1.2e-15 |
+| `akm_mobility_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 2.1e-14 | 1.4e-15 | 9.1e-13 | 9.4e-13 | 2.2e-15 |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 1.3e-13 | 1.1e-16 | 4.7e-10 |  | 1.4e-15 |
+| `akm_mobility_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 8.5e-14 | 1.1e-16 | 4.7e-10 |  | 5.6e-16 |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 4.6e-12 | 1.3e-15 | 5.4e-07 |  | 2.2e-15 |
+| `akm_mobility_6_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 4.8e-12 | 1.3e-15 | 5.4e-07 |  | 1.7e-15 |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 9.3e-15 | 3.4e-15 | 5.6e-12 | 1.2e-10 | 3.6e-15 |
+| `akm_scale_1_10000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 2.4e-14 | 3.4e-15 | 5.6e-12 | 1.2e-10 | 3.6e-15 |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 1.0e-15 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 1.1e-15 |
+| `akm_scale_2_100000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 5.6e-16 | 1.1e-15 | 3.1e-13 | 1.1e-11 | 5.6e-16 |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.9e-14 | 6.7e-16 | 2.8e-14 | 8.4e-15 | 2.2e-16 |
+| `akm_scale_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 2.0e-14 | 6.7e-16 | 2.8e-14 | 9.8e-15 | 8.9e-16 |
+| `akm_scale_4_10000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 7.8e-14 | 1.1e-14 | 2.1e-13 | 6.7e-16 | 2.1e-15 |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 5.0e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 8.8e-16 |
+| `akm_sorting_1_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 5.6e-14 | 8.8e-16 | 8.8e-16 | 1.0e-14 | 0.0e+00 |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 5.0e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 1.1e-15 |
+| `akm_sorting_2_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 4.9e-14 | 2.2e-16 | 2.0e-13 | 2.2e-13 | 2.4e-15 |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 1.3e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 1.3e-15 |
+| `akm_sorting_3_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 1.5e-14 | 0.0e+00 | 3.0e-14 | 1.1e-13 | 0.0e+00 |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 2.1e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.0e-15 |
+| `akm_sorting_4_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 1.2e-14 | 1.3e-15 | 1.0e-11 | 8.2e-11 | 2.7e-15 |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 16 | fereg |  | 8.2e-15 | 8.8e-16 | 7.1e-12 | 7.7e-11 | 1.1e-15 |
+| `akm_sorting_5_1000000 y~x1 fe=indiv_id+firm_id+year vcov=iid` | 1 | fereg |  | 5.8e-15 | 8.8e-16 | 7.1e-12 | 6.8e-11 | 6.6e-16 |
 
 ## G3 AKM with occupation FE
 
-| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | 0.135 | 7.966 | 1.310 | 0.696 | 4.653 | 0.695 | 0.19 | PASS |
 | `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | 0.251 | 9.852 | 2.337 | 1.243 | 6.924 | 1.276 | 0.20 | PASS |
@@ -348,30 +348,30 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.8e-15 | 1.1e-15 | 2.2e-14 | 1.3e-14 | 1.7e-14 |
-| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 6.4e-15 | 1.1e-15 | 2.2e-14 | 2.4e-14 | 1.6e-14 |
-| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 4.5e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.8e-14 |
-| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 4.3e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.6e-14 |
-| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 5.8e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.2e-14 |
-| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 7.2e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.1e-14 |
-| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 3.4e-14 | 3.3e-16 | 3.0e-13 | 1.4e-13 | 2.1e-14 |
-| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 2.8e-14 | 3.3e-16 | 3.0e-13 | 1.2e-13 | 2.2e-14 |
-| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.5e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
-| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 2.2e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
-| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 5.9e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.1e-15 |
-| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 5.5e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.3e-15 |
-| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 1.2e-14 | 1.1e-15 | 1.6e-14 | 6.9e-14 | 7.3e-15 |
-| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 1.1e-14 | 1.1e-15 | 1.6e-14 | 7.1e-14 | 7.5e-15 |
-| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 3.2e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 1.3e-14 |
-| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 5.3e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 6.8e-15 |
-| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | regfast |  | 7.3e-14 | 1.1e-15 | 2.2e-08 | 1.6e-10 | 1.4e-13 |
-| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | regfast |  | 8.1e-14 | 1.1e-15 | 2.2e-08 | 4.7e-10 | 1.6e-13 |
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 1.8e-15 | 1.1e-15 | 2.2e-14 | 1.3e-14 | 1.7e-14 |
+| `akmocc_baseline_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 6.4e-15 | 1.1e-15 | 2.2e-14 | 2.4e-14 | 1.6e-14 |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 4.5e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.8e-14 |
+| `akmocc_occlambda_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 4.3e-14 | 1.3e-15 | 4.6e-14 | 9.4e-14 | 2.6e-14 |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 5.8e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.2e-14 |
+| `akmocc_occlambda_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 7.2e-15 | 3.3e-16 | 3.0e-14 | 2.7e-13 | 2.1e-14 |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 3.4e-14 | 3.3e-16 | 3.0e-13 | 1.4e-13 | 2.1e-14 |
+| `akmocc_occlambda_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 2.8e-14 | 3.3e-16 | 3.0e-13 | 1.2e-13 | 2.2e-14 |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 1.5e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
+| `akmocc_occlambda_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 2.2e-14 | 1.8e-15 | 1.7e-09 | 6.1e-12 | 5.4e-14 |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 5.9e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.1e-15 |
+| `akmocc_occsize_1_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 5.5e-14 | 1.6e-15 | 6.4e-15 | 1.2e-13 | 3.3e-15 |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 1.2e-14 | 1.1e-15 | 1.6e-14 | 6.9e-14 | 7.3e-15 |
+| `akmocc_occsize_2_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 1.1e-14 | 1.1e-15 | 1.6e-14 | 7.1e-14 | 7.5e-15 |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 3.2e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 1.3e-14 |
+| `akmocc_occsize_3_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 5.3e-15 | 6.7e-16 | 1.7e-12 | 1.2e-11 | 6.8e-15 |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 16 | fereg |  | 7.3e-14 | 1.1e-15 | 2.2e-08 | 1.6e-10 | 1.4e-13 |
+| `akmocc_occsize_4_1000000 y~x1 fe=indiv_id+firm_id+year+occ_id vcov=iid` | 1 | fereg |  | 8.1e-14 | 1.1e-15 | 2.2e-08 | 4.7e-10 | 1.6e-13 |
 
 ## G4 IV/2SLS
 
-| config | T | regfast | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | 9.0ms | 0.205 | 33.0ms | 20.0ms | 54.4ms | 59.0ms | 0.45 | PASS |
 | `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | 12.0ms | 0.286 | 36.0ms | 26.0ms | 57.4ms | 65.8ms | 0.46 | PASS |
@@ -396,32 +396,32 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | ivreghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.4e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
-| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 6.6e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
-| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 6.2e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.4e-15 |
-| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 6.7e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.4e-15 |
-| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.6e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
-| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 6.7e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
-| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 2.6e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 8.9e-16 |
-| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 3.3e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 6.7e-16 |
-| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-15 | 4.4e-15 | 3.5e-13 | 6.0e-15 | 6.9e-15 |
-| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 4.5e-14 | 2.4e-06 |  | 2.1e-14 |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.3e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.3e-15 |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.0e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.2e-15 |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 3.4e-16 | 6.7e-16 | 5.5e-15 | 1.6e-15 | 1.5e-15 |
-| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 2.2e-16 | 6.7e-16 | 5.5e-15 | 1.1e-15 | 1.8e-15 |
-| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 2.2e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.3e-15 |
-| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.3e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.4e-15 |
-| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 8.9e-16 | 8.9e-16 | 5.8e-14 | 1.4e-15 | 1.0e-15 |
-| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 6.7e-16 | 8.9e-16 | 5.8e-14 | 1.6e-15 | 8.9e-16 |
-| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-15 | 5.7e-15 | 1.7e-13 | 2.9e-15 | 5.6e-16 |
-| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 2.4e-15 | 1.4e-14 | 2.4e-13 | 6.7e-16 | 2.7e-15 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 4.4e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 6.6e-16 | 3.7e-15 | 6.4e-15 | 1.3e-15 | 4.4e-16 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 6.2e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.4e-15 |
+| `fx_difficult_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 6.7e-14 | 5.5e-12 | 2.2e-10 | 1.2e-07 | 2.4e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 5.6e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 6.7e-16 | 8.2e-15 | 7.0e-14 | 1.6e-15 | 1.9e-15 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 2.6e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 8.9e-16 |
+| `fx_difficult_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 3.3e-13 | 4.4e-16 | 9.0e-06 | 1.4e-05 | 6.7e-16 |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.4e-15 | 4.4e-15 | 3.5e-13 | 6.0e-15 | 6.9e-15 |
+| `fx_difficult_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  |  | 4.5e-14 | 2.4e-06 |  | 2.1e-14 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 3.3e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.3e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 3.0e-15 | 3.6e-15 | 2.4e-14 | 2.8e-15 | 2.2e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 3.4e-16 | 6.7e-16 | 5.5e-15 | 1.6e-15 | 1.5e-15 |
+| `fx_simple_100000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 2.2e-16 | 6.7e-16 | 5.5e-15 | 1.1e-15 | 1.8e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 2.2e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.3e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 3.3e-16 | 3.7e-15 | 4.0e-15 | 4.0e-15 | 3.4e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 8.9e-16 | 8.9e-16 | 5.8e-14 | 1.4e-15 | 1.0e-15 |
+| `fx_simple_1000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 6.7e-16 | 8.9e-16 | 5.8e-14 | 1.6e-15 | 8.9e-16 |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.4e-15 | 5.7e-15 | 1.7e-13 | 2.9e-15 | 5.6e-16 |
+| `fx_simple_10000000 y_iv~x1+(xe=z1+z2) fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 2.4e-15 | 1.4e-14 | 2.4e-13 | 6.7e-16 | 2.7e-15 |
 
 ## G5 PPML
 
-| config | T | regfast | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | 26.0ms | 0.604 | 52.0ms | 0.138 | 0.322 | 0.50 | PASS |
 | `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | 47.0ms | 0.852 | 64.0ms | 0.140 | 0.501 | 0.73 | PASS |
@@ -466,52 +466,52 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | ppmlhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|
-| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.1e-15 | 6.7e-16 | 1.7e-15 | 6.2e-13 |
-| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.2e-15 | 6.7e-16 | 4.5e-15 | 4.2e-13 |
-| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.8e-13 | 5.4e-12 |  | 5.4e-13 |
-| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 8.2e-14 | 5.4e-12 | 7.9e-08 | 5.4e-13 |
-| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-14 | 1.4e-14 | 2.7e-13 | 1.5e-12 |
-| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 1.4e-14 | 1.4e-14 | 2.6e-13 | 1.5e-12 |
-| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.6e-13 | 1.2e-09 |  | 1.3e-12 |
-| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 7.7e-14 | 1.2e-09 |  | 1.3e-12 |
-| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.9e-14 | 7.8e-16 | 1.1e-16 | 3.7e-13 |
-| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.8e-14 | 7.8e-16 | 0.0e+00 | 3.7e-13 |
-| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
-| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
-| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.9e-14 | 4.4e-14 | 2.0e-13 | 2.5e-12 |
-| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 5.8e-14 | 4.4e-14 | 1.1e-13 | 2.6e-12 |
-| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 5.6e-05 |  | 1.9e-12 |
-| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  |  | 5.6e-05 |  | 1.9e-12 |
-| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.7e-13 | 1.2e-14 | 1.3e-15 | 3.7e-13 |
-| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  | 6.6e-06 |  | 3.6e-12 |
-| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-13 | 2.6e-13 | 4.6e-14 | 2.1e-12 |
-| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  |  |  |  | 1.9e-11 |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.9e-15 | 4.1e-15 | 6.2e-15 | 1.0e-12 |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 3.5e-15 | 4.1e-15 | 3.0e-15 | 1.0e-12 |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.8e-15 | 7.1e-15 | 8.6e-14 | 1.3e-12 |
-| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 4.4e-16 | 7.1e-15 | 1.3e-13 | 1.3e-12 |
-| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 1.4e-14 | 1.8e-14 | 9.0e-14 | 3.5e-12 |
-| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 1.3e-14 | 1.8e-14 | 9.2e-14 | 3.8e-12 |
-| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 7.5e-15 | 1.4e-13 | 5.0e-13 | 2.1e-12 |
-| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 8.1e-15 | 1.4e-13 | 5.0e-13 | 2.0e-12 |
-| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.3e-13 |
-| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.2e-13 |
-| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 3.0e-14 | 2.2e-14 | 1.5e-13 | 7.9e-13 |
-| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 2.9e-14 | 2.2e-14 | 1.2e-13 | 8.0e-13 |
-| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 4.6e-14 | 8.1e-14 | 2.5e-14 | 2.8e-12 |
-| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | regfast |  | 4.6e-14 | 8.1e-14 | 3.0e-14 | 2.8e-12 |
-| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 4.7e-14 | 2.1e-13 | 1.7e-13 | 1.8e-12 |
-| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | regfast |  | 4.7e-14 | 2.1e-13 | 1.8e-13 | 1.8e-12 |
-| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 3.6e-14 | 6.1e-14 | 6.2e-15 | 4.6e-13 |
-| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 3.9e-14 | 1.1e-11 | 3.2e-15 | 3.4e-12 |
-| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | regfast |  | 5.1e-14 | 1.5e-13 | 5.5e-13 | 9.1e-13 |
-| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | regfast |  | 1.5e-13 | 2.0e-12 |  | 9.6e-12 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 4.1e-15 | 6.7e-16 | 1.7e-15 | 6.2e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 3.2e-15 | 6.7e-16 | 4.5e-15 | 4.2e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 1.8e-13 | 5.4e-12 |  | 5.4e-13 |
+| `fx_difficult_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 8.2e-14 | 5.4e-12 | 7.9e-08 | 5.4e-13 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.4e-14 | 1.4e-14 | 2.7e-13 | 1.5e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 1.4e-14 | 1.4e-14 | 2.6e-13 | 1.5e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 1.6e-13 | 1.2e-09 |  | 1.3e-12 |
+| `fx_difficult_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 7.7e-14 | 1.2e-09 |  | 1.3e-12 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 3.9e-14 | 7.8e-16 | 1.1e-16 | 3.7e-13 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 3.8e-14 | 7.8e-16 | 0.0e+00 | 3.7e-13 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 1.7e-09 | 1.5e-06 |  | 1.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 5.9e-14 | 4.4e-14 | 2.0e-13 | 2.5e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 5.8e-14 | 4.4e-14 | 1.1e-13 | 2.6e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  |  | 5.6e-05 |  | 1.9e-12 |
+| `fx_difficult_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  |  | 5.6e-05 |  | 1.9e-12 |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.7e-13 | 1.2e-14 | 1.3e-15 | 3.7e-13 |
+| `fx_difficult_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  |  | 6.6e-06 |  | 3.6e-12 |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.4e-13 | 2.6e-13 | 4.6e-14 | 2.1e-12 |
+| `fx_difficult_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  |  |  |  | 1.9e-11 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 3.9e-15 | 4.1e-15 | 6.2e-15 | 1.0e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 3.5e-15 | 4.1e-15 | 3.0e-15 | 1.0e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 1.8e-15 | 7.1e-15 | 8.6e-14 | 1.3e-12 |
+| `fx_simple_100000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 4.4e-16 | 7.1e-15 | 1.3e-13 | 1.3e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 1.4e-14 | 1.8e-14 | 9.0e-14 | 3.5e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 1.3e-14 | 1.8e-14 | 9.2e-14 | 3.8e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 7.5e-15 | 1.4e-13 | 5.0e-13 | 2.1e-12 |
+| `fx_simple_100000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 8.1e-15 | 1.4e-13 | 5.0e-13 | 2.0e-12 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.3e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 4.4e-16 | 3.3e-15 | 2.2e-16 | 4.2e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 3.0e-14 | 2.2e-14 | 1.5e-13 | 7.9e-13 |
+| `fx_simple_1000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 2.9e-14 | 2.2e-14 | 1.2e-13 | 8.0e-13 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 4.6e-14 | 8.1e-14 | 2.5e-14 | 2.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 1 | fereg |  | 4.6e-14 | 8.1e-14 | 3.0e-14 | 2.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 4.7e-14 | 2.1e-13 | 1.7e-13 | 1.8e-12 |
+| `fx_simple_1000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 1 | fereg |  | 4.7e-14 | 2.1e-13 | 1.8e-13 | 1.8e-12 |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 3.6e-14 | 6.1e-14 | 6.2e-15 | 4.6e-13 |
+| `fx_simple_10000000 negbin_y~x1 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 3.9e-14 | 1.1e-11 | 3.2e-15 | 3.4e-12 |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=hetero` | 16 | fereg |  | 5.1e-14 | 1.5e-13 | 5.5e-13 | 9.1e-13 |
+| `fx_simple_10000000 negbin_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=hetero` | 16 | fereg |  | 1.5e-13 | 2.0e-12 |  | 9.6e-12 |
 
 ## G6 Logit
 
-| config | T | regfast | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---|
 | `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | 20.0ms | 38.0ms | 0.135 | 0.283 | 0.53 | PASS |
 | `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | 42.0ms | 48.0ms | 0.144 | 0.386 | 0.88 | PASS |
@@ -556,52 +556,52 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|
-| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
-| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
-| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
-| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
-| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.6e-11 | 2.4e-14 | 3.8e-13 |
-| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.6e-11 | 2.5e-14 | 3.8e-13 |
-| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
-| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
-| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.8e-09 | 8.1e-15 | 6.9e-14 |
-| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.8e-09 | 8.5e-15 | 6.8e-14 |
-| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 5.9e-08 |  | 1.1e-13 |
-| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 5.9e-08 |  | 1.2e-13 |
-| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 7.7e-12 | 1.2e-14 | 5.0e-14 |
-| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 7.7e-12 | 1.7e-14 | 5.1e-14 |
-| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 4.1e-07 |  | 6.8e-13 |
-| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 4.1e-07 |  | 6.9e-13 |
-| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.1e-09 | 7.1e-15 | 7.5e-14 |
-| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.2e-06 |  | 4.2e-13 |
-| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.9e-11 | 1.3e-14 | 6.6e-14 |
-| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  |  |  | 1.5e-09 |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.1e-09 | 1.2e-14 | 1.8e-14 |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.1e-09 | 1.2e-14 | 1.9e-14 |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-11 | 1.7e-14 | 4.1e-14 |
-| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-11 | 1.6e-14 | 4.1e-14 |
-| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.5e-11 | 1.6e-14 | 3.7e-14 |
-| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.5e-11 | 1.5e-14 | 3.7e-14 |
-| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.3e-09 | 3.8e-15 | 3.0e-13 |
-| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 1.3e-09 | 5.3e-15 | 3.1e-13 |
-| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 1.4e-09 | 6.6e-15 | 5.7e-14 |
-| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 1.4e-09 | 6.4e-15 | 5.6e-14 |
-| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.5e-10 | 9.7e-15 | 7.9e-14 |
-| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.5e-10 | 9.3e-15 | 8.2e-14 |
-| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.9e-12 | 9.1e-15 | 6.7e-14 |
-| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | regfast |  | 2.9e-12 | 2.9e-14 | 6.6e-14 |
-| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
-| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | regfast |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
-| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 5.3e-13 | 6.1e-15 | 5.1e-14 |
-| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 1.8e-08 | 8.5e-15 | 1.9e-13 |
-| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | regfast |  | 2.4e-08 | 1.7e-14 | 3.0e-14 |
-| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | regfast |  | 2.1e-13 | 9.4e-09 | 9.2e-09 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.0e-08 | 1.4e-14 | 3.5e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
+| `fx_difficult_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 8.9e-10 | 4.0e-14 | 8.4e-14 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.6e-11 | 2.4e-14 | 3.8e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.6e-11 | 2.5e-14 | 3.8e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
+| `fx_difficult_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 3.0e-09 | 7.2e-13 | 2.2e-13 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.8e-09 | 8.1e-15 | 6.9e-14 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 2.8e-09 | 8.5e-15 | 6.8e-14 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 5.9e-08 |  | 1.1e-13 |
+| `fx_difficult_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 5.9e-08 |  | 1.2e-13 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 7.7e-12 | 1.2e-14 | 5.0e-14 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 7.7e-12 | 1.7e-14 | 5.1e-14 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 4.1e-07 |  | 6.8e-13 |
+| `fx_difficult_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 4.1e-07 |  | 6.9e-13 |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.1e-09 | 7.1e-15 | 7.5e-14 |
+| `fx_difficult_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.2e-06 |  | 4.2e-13 |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.9e-11 | 1.3e-14 | 6.6e-14 |
+| `fx_difficult_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  |  |  | 1.5e-09 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.1e-09 | 1.2e-14 | 1.8e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.1e-09 | 1.2e-14 | 1.9e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 3.0e-11 | 1.7e-14 | 4.1e-14 |
+| `fx_simple_100000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 3.0e-11 | 1.6e-14 | 4.1e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.5e-11 | 1.6e-14 | 3.7e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.5e-11 | 1.5e-14 | 3.7e-14 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.3e-09 | 3.8e-15 | 3.0e-13 |
+| `fx_simple_100000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 1.3e-09 | 5.3e-15 | 3.1e-13 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 1.4e-09 | 6.6e-15 | 5.7e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 1.4e-09 | 6.4e-15 | 5.6e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 3.5e-10 | 9.7e-15 | 7.9e-14 |
+| `fx_simple_1000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 3.5e-10 | 9.3e-15 | 8.2e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.9e-12 | 9.1e-15 | 6.7e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 1 | fereg |  | 2.9e-12 | 2.9e-14 | 6.6e-14 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
+| `fx_simple_1000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 1 | fereg |  | 3.0e-08 | 1.9e-11 | 1.8e-11 |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 5.3e-13 | 6.1e-15 | 5.1e-14 |
+| `fx_simple_10000000 binary_y~x1 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 1.8e-08 | 8.5e-15 | 1.9e-13 |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year vcov=iid` | 16 | fereg |  | 2.4e-08 | 1.7e-14 | 3.0e-14 |
+| `fx_simple_10000000 binary_y~x1+x2+x3+x4+x5 fe=indiv_id+year+firm_id vcov=iid` | 16 | fereg |  | 2.1e-13 | 9.4e-09 | 9.2e-09 |
 
 ## G7 Heterogeneous slopes
 
-| config | T | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
+| config | T | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr | ratio | gate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | 22.0ms | 1.040 | 3.445 | 0.148 | unsupported | unsupported | 0.15 | PASS |
 | `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | 29.0ms | 1.126 | 10.112 | 0.269 | unsupported | unsupported | 0.11 | PASS |
@@ -614,13 +614,13 @@ Coefficient gap:
 
 Coefficient gap:
 
-| config | T | vs | regfast | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
+| config | T | vs | fereg | reghdfe | xhdfe | fixest | pyfixest_map | pyfixest_lsmr |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
-| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 2.1e-14 | 3.8e-12 | 4.9e-07 |  |  |
-| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 1.7e-14 | 3.8e-12 | 4.9e-07 |  |  |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 4.6e-15 | 4.4e-16 | 8.8e-15 |  |  |
-| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 3.7e-15 | 4.4e-16 | 8.8e-15 |  |  |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | regfast |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |
-| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | regfast |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | fereg |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
+| `fx_difficult_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | fereg |  | 3.3e-13 | 4.0e-15 | 4.3e-11 |  |  |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | fereg |  | 2.1e-14 | 3.8e-12 | 4.9e-07 |  |  |
+| `fx_difficult_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | fereg |  | 1.7e-14 | 3.8e-12 | 4.9e-07 |  |  |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | fereg |  | 4.6e-15 | 4.4e-16 | 8.8e-15 |  |  |
+| `fx_simple_100000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | fereg |  | 3.7e-15 | 4.4e-16 | 8.8e-15 |  |  |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 16 | fereg |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |
+| `fx_simple_1000000 y~x1 fe=indiv_id+year+firm_id[x2] vcov=iid` | 1 | fereg |  | 4.4e-14 | 3.3e-16 | 2.5e-14 |  |  |

@@ -306,6 +306,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fereg-core"
+version = "0.2.0"
+dependencies = [
+ "approx-chol",
+ "faer",
+ "rayon",
+]
+
+[[package]]
+name = "fereg-stata"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "faer",
+ "fereg-core",
+ "rayon",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,25 +1018,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "regfast-core"
-version = "0.1.0"
-dependencies = [
- "approx-chol",
- "faer",
- "rayon",
-]
-
-[[package]]
-name = "regfast-stata"
-version = "0.1.0"
-dependencies = [
- "cc",
- "faer",
- "rayon",
- "regfast-core",
-]
 
 [[package]]
 name = "rustversion"

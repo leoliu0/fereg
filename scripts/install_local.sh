@@ -6,8 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 stata="${STATA:-stata-mp}"
-if [[ ! -f stata/regfast.plugin ]]; then
-  echo "install_local.sh: stata/regfast.plugin missing; run scripts/build_plugin.sh" >&2
+if [[ ! -f stata/fereg.plugin ]]; then
+  echo "install_local.sh: stata/fereg.plugin missing; run scripts/build_plugin.sh" >&2
   exit 1
 fi
 
@@ -24,6 +24,6 @@ fi
 mkdir -p "$dir"
 
 shopt -s nullglob
-files=(stata/*.ado stata/*.sthlp stata/regfast.plugin)
+files=(stata/*.ado stata/*.sthlp stata/fereg.plugin)
 cp "${files[@]}" "$dir"
 echo "installed ${#files[@]} files into $dir"

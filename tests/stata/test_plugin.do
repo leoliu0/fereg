@@ -1,7 +1,7 @@
 * test_plugin.do — plugin ABI/protocol tests (cmd=version, selftest, prepare, ols plumbing).
 * Run from tests/stata after scripts/build_plugin.sh:   stata-mp -b do test_plugin.do
 * Needs reghdfe 6.13.1 and ppmlhdfe 2.3.3 (sample/singleton parity).
-* Steps that depend on estimators still being stubs in regfast-core print "PENDING:".
+* Steps that depend on estimators still being stubs in fereg-core print "PENDING:".
 *
 * Break key: batch mode (stata-mp -b) cannot deliver Break (SIGINT terminates a batch or
 * non-terminal Stata), so it is not exercised here. Verified manually in console Stata on a
@@ -15,7 +15,7 @@ set more off
 set seed 12345
 
 capture program drop _rf_plugin
-program _rf_plugin, plugin using("../../stata/regfast.plugin")
+program _rf_plugin, plugin using("../../stata/fereg.plugin")
 
 * Expected selftest checksum: sum over obs (ascending) and vars (left to right) of j*v_j, missing -> 0.
 mata:
@@ -48,7 +48,7 @@ end
 
 * ---------------------------------------------------------------- version
 plugin call _rf_plugin, version
-assert "`_rf_version'" == "0.1.0"
+assert "`_rf_version'" == "0.2.0"
 di as txt "version: `_rf_version'"
 
 * ---------------------------------------------------------------- selftest
@@ -184,7 +184,7 @@ matrix V = J(3, 3, .)
 gen double res = .
 capture noisily plugin call _rf_plugin price weight length touse res, ols "token=`_rf_token'" "nx=2" "nout=1" "resid=1" "b=b" "V=V" "tol=1e-12"
 if _rc == 9999 {
-    di as txt "PENDING: cmd=ols (Session::ols is still a stub in regfast-core)"
+    di as txt "PENDING: cmd=ols (Session::ols is still a stub in fereg-core)"
 }
 else {
     assert _rc == 0
@@ -221,7 +221,7 @@ di as txt "1e7 prepare (string cluster factor, 1e6 levels): " %6.2f r(t1) " s, t
 replace touse = 1
 capture noisily plugin call _rf_plugin id touse, prepare "nfac=1" "factype=n" "absorb=1|1|-|0" "verbose=2"
 if _rc == 9999 {
-    di as txt "PENDING: prepare with the fast absorber (solve::build is still a stub in regfast-core)"
+    di as txt "PENDING: prepare with the fast absorber (solve::build is still a stub in fereg-core)"
 }
 else {
     assert _rc == 0

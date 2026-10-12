@@ -1,4 +1,4 @@
-*! regfast test helper: compare two stored estimation results
+*! fereg test helper: compare two stored estimation results
 * rf_compare_e REF TEST [, btol(#) vtol(#) stol(#) xscalars(names) xmacros(names) nosample nodoftable nov]
 *
 *   b:          names identical; |b_T - b_R| <= btol * (|b_R| + se_R)

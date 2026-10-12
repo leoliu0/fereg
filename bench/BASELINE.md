@@ -18,7 +18,7 @@
 
 ## Streaming bandwidth
 
-Measured 2026-10-12 with `cargo run --release -p regfast-core --example stream_probe <threads> 4`
+Measured 2026-10-12 with `cargo run --release -p fereg-core --example stream_probe <threads> 4`
 (best-of parallel sum of a 4 GiB f64 array; machine otherwise idle):
 
 | Threads | Read bandwidth |
@@ -31,7 +31,7 @@ The roofline budgets use **43.9 GB/s** (16 threads).
 
 ## Roofline check (plan V-8), 2026-10-12
 
-`regfast y x1, absorb(indiv_id year firm_id) threads(16) verbose(2)` on `fx_simple_10000000`
+`fereg y x1, absorb(indiv_id year firm_id) threads(16) verbose(2)` on `fx_simple_10000000`
 (after one warm-up run; commit `a22557b`). D2 budget of the solver call, as in
 `examples/bench_solve.rs`: n = M = 10⁷ cells, Q − 1 = 2, R = 2, 9 PCG iterations;
 1.5 × (n·R·24 + 2·M·(Q−1)·4) / bw + 9 × 1.5 × M·((Q−1)·4 + R·16) / bw = 0.022 + 9 × 0.0137 = **0.145 s**.

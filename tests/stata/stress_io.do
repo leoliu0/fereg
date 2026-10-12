@@ -15,7 +15,7 @@ set more off
 set seed 20261011
 
 capture program drop _rf_plugin
-program _rf_plugin, plugin using("../../stata/regfast.plugin")
+program _rf_plugin, plugin using("../../stata/fereg.plugin")
 
 * ---------------------------------------------------------------- part 1
 set obs 20000000

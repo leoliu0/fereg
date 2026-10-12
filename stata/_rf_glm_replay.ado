@@ -1,4 +1,4 @@
-*! version 0.1.0  regfast: display (or quiet r(table)) of ppmlfast and logitfast results
+*! version 0.2.0  fereg: display (or quiet r(table)) of feppml and felogit results
 program _rf_glm_replay, rclass
 	version 16
 	syntax [, EForm IRr OR noHEader noTABle noFOOTnote *]

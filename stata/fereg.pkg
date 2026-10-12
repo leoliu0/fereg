@@ -1,0 +1,37 @@
+v 3
+d fereg: fast HDFE OLS/IV, PPML and logit (Rust plugin)
+d
+d fereg (OLS and IV/2SLS), feppml (Poisson pseudo-maximum likelihood) and felogit (logit)
+d estimate models with any number of absorbed high-dimensional fixed effects, heterogeneous
+d slopes, weights and multiway clustering. Syntax, estimates and stored results follow reghdfe,
+d ivreghdfe and ppmlhdfe. The estimation core is a compiled Rust plugin (Linux, macOS, Windows).
+d
+d Author: Leo Liu, auleo.liu@gmail.com
+d License: MIT
+d Distribution-Date: 20261011
+f fereg.ado
+f fereg_p.ado
+f fereg.sthlp
+f feppml.ado
+f feppml_p.ado
+f feppml.sthlp
+f felogit.ado
+f felogit_p.ado
+f felogit.sthlp
+f _rf_footnote.ado
+f _rf_glm.ado
+f _rf_glm_header.ado
+f _rf_glm_replay.ado
+f _rf_header.ado
+f _rf_load.ado
+f _rf_model.ado
+f _rf_parse_absorb.ado
+f _rf_parse_vce.ado
+g LINUX64 fereg.linux64.plugin fereg.plugin
+g LINUX64P fereg.linux64.plugin fereg.plugin
+g MACARM64 fereg.macos-universal.plugin fereg.plugin
+g OSX.ARM64 fereg.macos-universal.plugin fereg.plugin
+g MACINTEL64 fereg.macos-universal.plugin fereg.plugin
+g OSX.X8664 fereg.macos-universal.plugin fereg.plugin
+g WIN64 fereg.win64.plugin fereg.plugin
+h fereg.plugin

@@ -1,11 +1,11 @@
-*! version 0.1.0  regfast: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
+*! version 0.2.0  fereg: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
 *
 * Syntax:  _rf_parse_absorb [absvars] [, SAVEfe Generate REPLACE]
 *
 * absvar  := [target=] term
 * term    := x | i.x | x#y[#z...] | x#c.z | x##c.z | x##c.(z w ...) | x#y##c.z ...
 * Factors (x, y, ...) may be numeric or string variables (strings are not allowed by reghdfe inside
-* interactions; regfast allows them). Slope variables (c.z) must be numeric. Time-series operators
+* interactions; fereg allows them). Slope variables (c.z) must be numeric. Time-series operators
 * (L.x, c.L.z) are accepted and returned unexpanded; the caller resolves them with -tsrevar-.
 *
 * Returns (s() names follow ms_parse_absvars where they exist):

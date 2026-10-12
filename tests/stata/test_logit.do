@@ -1,25 +1,25 @@
-* test_logit.do -- logitfast vs Stata's logit with explicit FE dummies (plan Phase 6.7)
+* test_logit.do -- felogit vs Stata's logit with explicit FE dummies (plan Phase 6.7)
 *
-* logitfast y x, absorb(fe1 fe2) is plain MLE, so its slope coefficients equal those of
+* felogit y x, absorb(fe1 fe2) is plain MLE, so its slope coefficients equal those of
 * logit y x i.fe1 i.fe2. Compared: the slope block of b (rtol 1e-7) and V (rtol 1e-6, correlation
 * scale), N, ll, ll_0, r2_p, e(sample) and the predicted probabilities (predict pr with d()).
-* Data: the simulated separation-free panel of crates/regfast-core/tests/data/glm_logit.csv
+* Data: the simulated separation-free panel of crates/fereg-core/tests/data/glm_logit.csv
 * (n = 3000, plus a variant with two all-zero fe1 groups) and nlswork (idcode <= 300).
 *
-* Run from tests/stata (needs regfast.plugin on the adopath):
+* Run from tests/stata (needs fereg.plugin on the adopath):
 *   stata-mp -b do test_logit.do
 version 16
 clear all
 set more off
-capture confirm file "../../stata/logitfast.ado"
+capture confirm file "../../stata/felogit.ado"
 if (!_rc) adopath ++ "`c(pwd)'/../../stata"
-which logitfast
-findfile regfast.plugin
-global RF_DATA "`c(pwd)'/../../crates/regfast-core/tests/data"
+which felogit
+findfile fereg.plugin
+global RF_DATA "`c(pwd)'/../../crates/fereg-core/tests/data"
 * rf_compare_bv() (Mata) is defined in rf_compare_e.ado
 quietly run rf_compare_e.ado
 
-* lcheck "<slope names>" "<logit arguments>" "<logitfast arguments>" ["<omitted names>"]
+* lcheck "<slope names>" "<logit arguments>" "<felogit arguments>" ["<omitted names>"]
 * (omitted names: coefficients both commands must report as omitted, o.<name>)
 capture program drop lcheck
 program lcheck
@@ -35,9 +35,9 @@ program lcheck
 	local r2_p = e(r2_p)
 	qui gen byte `sR' = e(sample)
 	qui predict double `pR' if e(sample), pr
-	logitfast `fspec' d(`dF') tol(1e-12)
+	felogit `fspec' d(`dF') tol(1e-12)
 	mata: rf_pick("`bF'", "`VF'", "`names'")
-	CheckOmitted logitfast "`omitted'"
+	CheckOmitted felogit "`omitted'"
 	rf_assert_close e(N) e(N) `N' 0
 	rf_assert_close e(ll) e(ll) `ll' 1e-9
 	rf_assert_close e(ll_0) e(ll_0) `ll_0' 1e-9
@@ -110,18 +110,18 @@ lcheck "x1 x2" "y x1 x2 i.fe1 i.fe2 [pw=pw]," "y x1 x2 [pw=pw], absorb(fe1 fe2)"
 lcheck "x1 x2" "y x1 x2 i.fe1," "y x1 x2, absorb(fe1)"
 lcheck "x1 x2 _cons" "y x1 x2," "y x1 x2, noabsorb"
 lcheck "x1 x2 _cons" "y x1 x2, vce(robust)" "y x1 x2, noabsorb vce(robust)"
-* two all-zero fe1 groups: logit drops them ("predicts failure perfectly"), logitfast's fe rule too
+* two all-zero fe1 groups: logit drops them ("predicts failure perfectly"), felogit's fe rule too
 lcheck "x1 x2" "y2 x1 x2 i.fe1 i.fe2," "y2 x1 x2, absorb(fe1 fe2)"
 rf_assert_close e(num_separated) e(num_separated) 100 0
 * factor-variable regressors
 lcheck "x1 2.c" "y x1 i.c i.fe2 if c <= 2," "y x1 i.c if c <= 2, absorb(fe2)"
 * odds ratios only change the display
-logitfast y x1 x2, absorb(fe1 fe2) or
+felogit y x1 x2, absorb(fe1 fe2) or
 di as result "simulated panel passed"
 
 * ---------------------------------------------------------------------------
 * nlswork (plan V-3): union on age (and ttl_exp) and grade, idcode and year FEs. grade is
-* constant within idcode, so logitfast omits it (o.grade), as does logit when grade follows the
+* constant within idcode, so felogit omits it (o.grade), as does logit when grade follows the
 * FE dummies (_rmcoll keeps the earlier dummies); only the estimable slopes are compared.
 * ---------------------------------------------------------------------------
 webuse nlswork, clear
@@ -137,8 +137,8 @@ di as result "nlswork passed"
 * ---------------------------------------------------------------------------
 * errors and predict
 * ---------------------------------------------------------------------------
-rcof "noi logitfast union age grade, absorb(idcode) sep(relu)" == 198
-qui logitfast union age grade, absorb(idcode year)
+rcof "noi felogit union age grade, absorb(idcode) sep(relu)" == 198
+qui felogit union age grade, absorb(idcode year)
 rcof "noi predict double p0, pr" != 0
 predict double xb0, xb
 predict double s0, stdp

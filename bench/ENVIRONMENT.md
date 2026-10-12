@@ -33,7 +33,7 @@ Recorded 2026-10-11 (plan Phase 0.3). Every version below was read from the inst
 | Stata (all commands) | `set processors T` | `stata-mp -b do job.do`. `timer` wraps `quietly <cmd>`, so display time is included. Data come from `use <vars> using <name>.dta`. |
 | reghdfe, ppmlhdfe, ivreghdfe | Stata MP only | Defaults: tol 1e-8; reghdfe `iterate()` default; ppmlhdfe `vce(robust)`; ivreghdfe `robust`. |
 | xhdfe | `numthreads(T)` plus `OMP_NUM_THREADS=T` | Checked: `e(threads_used)` = 16 for `numthreads(16)`. |
-| regfast / ppmlfast / logitfast | `threads(T)` | Commands are built by `run.py`. They are installed later by `scripts/install_local.sh`; until then they fail with r(199). |
+| fereg / feppml / felogit | `threads(T)` | Commands are built by `run.py`. They are installed later by `scripts/install_local.sh`; until then they fail with r(199). |
 | fixest | `setFixest_nthreads(T)`, `nthreads = T`, `setDTthreads(T)` | Data loaded with `data.table::fread`. Timed with `system.time()[["elapsed"]]`, which has 1 ms resolution. |
 | pyfixest MAP | `RAYON_NUM_THREADS=T`, set before import | `demeaner=pf.MapDemeaner()`: fixef_tol 1e-6, fixef_maxiter 10000, Rust backend. |
 | pyfixest LSMR | same | `demeaner=pf.LsmrDemeaner()`: `within` backend (CPU, float64), additive-Schwarz preconditioner, atol = btol = 1e-8, fixef_maxiter 1000. |

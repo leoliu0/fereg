@@ -39,30 +39,30 @@ jobs:
         run: scripts/build_plugin.sh
 
       - name: Expected mock-host results
-        run: cargo run --release -p regfast-core --example mock_expected
+        run: cargo run --release -p fereg-core --example mock_expected
 
       - name: Exported symbols (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          nm -D --defined-only stata/regfast.plugin | awk '{print $3}' | grep -v '^$' | sort > target/exports.txt
+          nm -D --defined-only stata/fereg.plugin | awk '{print $3}' | grep -v '^$' | sort > target/exports.txt
           cat target/exports.txt
           grep -qx pginit target/exports.txt
           grep -qx stata_call target/exports.txt
           test "$(wc -l < target/exports.txt)" -eq 2
 
-      - name: regfast.pkg lists every ado and help file (Linux)
+      - name: fereg.pkg lists every ado and help file (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          diff <(cd stata && ls *.ado *.sthlp | sort) <(awk '$1 == "f" {print $2}' stata/regfast.pkg | sort)
+          diff <(cd stata && ls *.ado *.sthlp | sort) <(awk '$1 == "f" {print $2}' stata/fereg.pkg | sort)
 
       - name: Mock host (Linux, macOS)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          cc -O2 -DSYSTEM=OPUNIX -Icrates/regfast-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
-          target/mockhost stata/regfast.plugin
+          cc -O2 -DSYSTEM=OPUNIX -Icrates/fereg-stata/c tests/mockhost/mockhost.c -ldl -o target/mockhost
+          target/mockhost stata/fereg.plugin
 
       - name: MSVC environment (Windows)
         if: runner.os == 'Windows'
@@ -72,5 +72,5 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          cl /nologo /O2 /DSYSTEM=STWIN32 /Icrates\regfast-stata\c tests\mockhost\mockhost.c /Fe:target\mockhost.exe
-          target\mockhost.exe stata\regfast.plugin
+          cl /nologo /O2 /DSYSTEM=STWIN32 /Icrates\fereg-stata\c tests\mockhost\mockhost.c /Fe:target\mockhost.exe
+          target\mockhost.exe stata\fereg.plugin

@@ -1,12 +1,12 @@
-# regfast
+# fereg
 
 Fast high-dimensional fixed-effects estimation for Stata, powered by a Rust core.
 
 | Command | Estimator | Mirrors |
 |---|---|---|
-| `regfast` | OLS and IV/2SLS with any number of absorbed fixed effects | `reghdfe` 6.13.1 / `ivreghdfe` 1.1.4 |
-| `ppmlfast` | Poisson pseudo-maximum likelihood | `ppmlhdfe` 2.3.3 |
-| `logitfast` | Logit maximum likelihood | `logit y x i.fe1 i.fe2 ...` |
+| `fereg` | OLS and IV/2SLS with any number of absorbed fixed effects | `reghdfe` 6.13.1 / `ivreghdfe` 1.1.4 |
+| `feppml` | Poisson pseudo-maximum likelihood | `ppmlhdfe` 2.3.3 |
+| `felogit` | Logit maximum likelihood | `logit y x i.fe1 i.fe2 ...` |
 
 All three support weights, robust and multi-way clustered standard errors, residuals and
 `predict`, saved fixed effects, and heterogeneous slopes (`absorb(firm##c.x)`).
@@ -22,7 +22,7 @@ job did not finish within its 900 s limit. The data are the fixest/pyfixest benc
 panels of individuals × 10 years with firms assigned at random ("simple") or cyclically by row
 ("difficult", a fixed-effect graph that is hard for iterative solvers).
 
-| Model | regfast | Stata incumbent | fixest (R) | fastest other |
+| Model | fereg | Stata incumbent | fixest (R) | fastest other |
 |---|---:|---:|---:|---:|
 | OLS `y x1`, 2 FEs | 0.15 | 11.7 (reghdfe) | 0.51 | 0.87 (xhdfe) |
 | OLS `y x1`, 3 FEs | 0.29 | 31.4 (reghdfe) | 1.27 | 1.93 (xhdfe) |
@@ -32,7 +32,7 @@ panels of individuals × 10 years with firms assigned at random ("simple") or cy
 | Poisson PML, 3 FEs, robust | 3.15 | 235.6 (ppmlhdfe) | 43.1 | 202.8 (pyfixest LSMR) |
 | Logit, 3 FEs | 2.27 | — | 8.84 | 26.7 (pyfixest) |
 
-Across the whole benchmark grid, regfast is faster than every competitor that finished in all
+Across the whole benchmark grid, fereg is faster than every competitor that finished in all
 273 rows (configuration × thread count). The grid covers OLS (iid and clustered), IV, Poisson,
 logit, heterogeneous slopes and AKM worker–firm designs, n = 10⁴–10⁷, at 16 threads and, up to
 10⁶, 1 thread. Machine: Ryzen 9 9950X (16 cores),
@@ -44,7 +44,7 @@ pyfixest 0.60.0. Full tables: [`bench/RESULTS.md`](bench/RESULTS.md); method:
 ## Install (Stata 16+)
 
 ```stata
-net install regfast, from("https://raw.githubusercontent.com/leoliu0/regfast/gh-pages/stata") replace
+net install fereg, from("https://raw.githubusercontent.com/leoliu0/fereg/gh-pages/stata") replace
 ```
 
 Binaries are provided for Linux (x86-64), macOS (Apple Silicon and Intel) and Windows (x86-64).

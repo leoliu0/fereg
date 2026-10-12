@@ -1,25 +1,25 @@
-* test_ols.do -- regfast (OLS) vs reghdfe 6.13.1 (plan Phase 4.7)
+* test_ols.do -- fereg (OLS) vs reghdfe 6.13.1 (plan Phase 4.7)
 *
 * Every reghdfe run uses tol(1e-12). Assertions (rf_compare_e): b rtol 1e-7, V rtol 1e-6 (correlation
 * scale), integer e() exact, other e() scalars rtol 1e-6, all e() macros equal (except cmd, cmdline,
 * predict, footnote, estat_cmd), e(dof_table) identical, e(sample) identical, omitted names identical.
 *
-* Run from tests/stata (needs regfast.plugin on the adopath and reghdfe installed):
+* Run from tests/stata (needs fereg.plugin on the adopath and reghdfe installed):
 *   stata-mp -b do test_ols.do
 * Dry run against the mock plugin (checks this file and the ado, not the numbers):
 *   mock/build.sh, then in Stata: global RF_MOCK 1, adopath ++ mock, do test_ols.do
 version 16
 clear all
 set more off
-capture confirm file "../../stata/regfast.ado"
+capture confirm file "../../stata/fereg.ado"
 if (!_rc) adopath ++ "`c(pwd)'/../../stata"
 if ("$RF_MOCK" != "") adopath ++ "`c(pwd)'/mock"
-which regfast
+which fereg
 which reghdfe
-findfile regfast.plugin
+findfile fereg.plugin
 di as text "plugin: `r(fn)'"
 
-* check <arguments common to reghdfe and regfast> : estimate both and compare everything
+* check <arguments common to reghdfe and fereg> : estimate both and compare everything
 capture program drop check
 program check
 	local spec `"`0'"'
@@ -32,7 +32,7 @@ program check
 		if ("`indepvars'" == "") local indepvars _none
 		rf_stage_mock, indepvars(`indepvars')
 	}
-	regfast `spec'
+	fereg `spec'
 	estimates store F
 	* (the mock plugin does not drop singletons, so e(sample) is only compared with the real plugin)
 	rf_compare_e R F, xscalars(ic) `=cond("$RF_MOCK" != "", "nosample", "")'
@@ -127,7 +127,7 @@ quietly reghdfe ln_wage age ttl_exp, absorb(fR1=idcode##c.year fR2=ind_code#c.te
 estimates store R
 quietly predict double dR, d
 if ("$RF_MOCK" != "") rf_stage_mock, indepvars(age ttl_exp)
-regfast ln_wage age ttl_exp, absorb(fF1=idcode##c.year fF2=ind_code#c.tenure fF3=occ_code) resid(rF)
+fereg ln_wage age ttl_exp, absorb(fF1=idcode##c.year fF2=ind_code#c.tenure fF3=occ_code) resid(rF)
 estimates store F
 rf_compare_e R F, xscalars(ic) xmacros(resid) `=cond("$RF_MOCK" != "", "nosample", "")'
 quietly predict double dF, d
@@ -181,7 +181,7 @@ foreach o in xb stdp residuals d xbd dresiduals score {
 	quietly predict double pR_`o', `o'
 }
 if ("$RF_MOCK" != "") rf_stage_mock, indepvars(age ttl_exp tenure)
-regfast ln_wage age ttl_exp tenure, absorb(feF1=idcode feF2=year feF3=occ_code) resid(rF) groupvar(gF)
+fereg ln_wage age ttl_exp tenure, absorb(feF1=idcode feF2=year feF3=occ_code) resid(rF) groupvar(gF)
 estimates store F
 rf_compare_e R F, xscalars(ic) xmacros(resid) `=cond("$RF_MOCK" != "", "nosample", "")'
 assert "`e(resid)'" == "rF"
@@ -227,17 +227,17 @@ if ("$RF_MOCK" != "") {
 	quietly reghdfe ln_wage age ttl_exp tenure, absorb(idcode year) tol(1e-12)
 	rf_stage_mock, indepvars(age ttl_exp tenure)
 }
-regfast ln_wage age ttl_exp tenure, absorb(idcode year, savefe) residuals
+fereg ln_wage age ttl_exp tenure, absorb(idcode year, savefe) residuals
 confirm variable _reghdfe_resid __hdfe1__ __hdfe2__
 assert "`e(resid)'" == "_reghdfe_resid"
 assert `"`: variable label __hdfe2__'"' == "[FE] 1.year"
-regfast ln_wage age ttl_exp tenure, absorb(idcode year, savefe) residuals
+fereg ln_wage age ttl_exp tenure, absorb(idcode year, savefe) residuals
 predict double xbd_check, xbd
 if ("$RF_MOCK" == "") {
 	qui count if e(sample) & reldif(xbd_check, ln_wage - _reghdfe_resid) > 1e-10
 	assert r(N) == 0
 }
-capture regfast ln_wage age, absorb(fe1=idcode fe1=year)
+capture fereg ln_wage age, absorb(fe1=idcode fe1=year)
 assert _rc == 198
 di as result "outputs passed"
 

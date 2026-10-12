@@ -1,0 +1,16 @@
+[package]
+name = "fereg-core"
+description = "High-dimensional fixed-effects OLS, IV, Poisson and logit estimation (exact FE elimination + preconditioned CG)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["econometrics", "fixed-effects", "regression", "reghdfe", "statistics"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+rayon.workspace = true
+faer.workspace = true
+approx-chol.workspace = true

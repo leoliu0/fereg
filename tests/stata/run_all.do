@@ -1,4 +1,4 @@
-* run_all.do -- regfast Stata test suite (needs regfast.plugin on the adopath and reghdfe/ftools installed)
+* run_all.do -- fereg Stata test suite (needs fereg.plugin on the adopath and reghdfe/ftools installed)
 * Run from tests/stata:  stata-mp -b do run_all.do   -> last line of run_all.log: ALL TESTS PASSED
 * (test_ado_mock.do is a separate dry run against a fake plugin and is not part of this suite)
 version 16
