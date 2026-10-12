@@ -7,13 +7,13 @@
 use rayon::prelude::*;
 
 use crate::absorber::Absorber;
-use crate::api::{Ctx, Family, FactorValues, Prep, Vce, WeightKind};
+use crate::api::{AbsorbTerm, Ctx, Family, FactorValues, Prep, Vce, WeightKind};
 use crate::error::RfError;
 use crate::factor::{self, Codes};
 use crate::gather;
 use crate::par::{self, Pool};
 use crate::reference::DenseAbsorber;
-use crate::sample::{self, SepRule, TermCodes};
+use crate::sample::{self, DropCounts, SepRule, TermCodes};
 
 /// One absorbed term restricted to the kept sample.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +129,14 @@ impl Session {
             }
         }
         par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| gather::gather_rows(self.row_order(), cols, pool))?
+    }
+
+    /// Input-order columns (length [`Session::n_input`]) → row-major block in
+    /// [`Session::row_order`], in one pass through the composed index maps (inside `pool`).
+    pub(crate) fn gather_input(&self, cols: &[gather::Col], pool: &Pool) -> Result<Vec<f64>, RfError> {
+        debug_assert!(cols.iter().all(|c| !matches!(c, gather::Col::Values(v) if v.len() != self.n_input)));
+        let kept = (self.n() < self.n_input).then_some(self.kept_index.as_slice());
+        gather::gather_input(self.row_order(), kept, cols, pool)
     }
 
     /// Kept-order row-major block (R columns) → row-major block in [`Session::row_order`].
@@ -343,18 +351,18 @@ fn sorted_set(v: &[usize]) -> Vec<usize> {
     s
 }
 
-fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Result<Session, RfError> {
-    let mut t = std::time::Instant::now();
-    let mut codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
-    crate::solve::log_phase(ctx, &mut t, "factorize");
-    ctx.check()?;
-    let cluster_dims: &[Vec<usize>] = match &p.vce {
-        Vce::Cluster(dims) => dims,
-        _ => &[],
-    };
-    // Remaining uses of every factor: a single-factor term takes the codes on their last use.
+/// Codes of every absorb term and cluster dimension from the per-factor codes (interactions are
+/// combined; a single-factor term takes the factor's codes on their last use). Returns the term
+/// codes and, per cluster dimension, its sorted factor set with its codes.
+#[allow(clippy::type_complexity)]
+pub(crate) fn term_and_cluster_codes(
+    mut codes: Vec<Codes>,
+    terms: &[&[usize]],
+    cluster_dims: &[Vec<usize>],
+    pool: &Pool,
+) -> Result<(Vec<Codes>, Vec<(Vec<usize>, Codes)>), RfError> {
     let mut uses = vec![0usize; codes.len()];
-    for fs in p.absorb.iter().map(|t| &t.factors).chain(cluster_dims) {
+    for fs in terms.iter().copied().chain(cluster_dims.iter().map(Vec::as_slice)) {
         fs.iter().for_each(|&f| uses[f] += 1);
     }
     let mut interact = |fs: &[usize]| -> Result<Codes, RfError> {
@@ -365,10 +373,22 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
         fs.iter().for_each(|&f| uses[f] -= 1);
         Ok(c)
     };
-    let term_codes: Vec<Codes> = p.absorb.iter().map(|t| interact(&t.factors)).collect::<Result<_, _>>()?;
-    let cluster_codes: Vec<(Vec<usize>, Codes)> =
-        cluster_dims.iter().map(|d| Ok((sorted_set(d), interact(d)?))).collect::<Result<_, RfError>>()?;
-    drop(codes);
+    let term_codes: Vec<Codes> = terms.iter().map(|t| interact(t)).collect::<Result<_, _>>()?;
+    let cluster_codes = cluster_dims.iter().map(|d| Ok((sorted_set(d), interact(d)?))).collect::<Result<_, RfError>>()?;
+    Ok((term_codes, cluster_codes))
+}
+
+fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Result<Session, RfError> {
+    let mut t = std::time::Instant::now();
+    let codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
+    crate::solve::log_phase(ctx, &mut t, "factorize");
+    ctx.check()?;
+    let cluster_dims: &[Vec<usize>] = match &p.vce {
+        Vce::Cluster(dims) => dims,
+        _ => &[],
+    };
+    let term_factors: Vec<&[usize]> = p.absorb.iter().map(|t| t.factors.as_slice()).collect();
+    let (term_codes, cluster_codes) = term_and_cluster_codes(codes, &term_factors, cluster_dims, pool)?;
     ctx.check()?;
 
     let mut alive = vec![true; p.n];
@@ -377,64 +397,111 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
     let sep = p.sep_fe.then(|| SepRule { y: p.y_for_sep.expect("validated"), family: p.family });
     let counts = sample::drop_singletons(&tc, &mut alive, fw, sep, p.drop_singletons, pool);
     crate::solve::log_phase(ctx, &mut t, "singletons");
-    // Every drop is counted, so nothing was dropped when both counts are zero.
-    let dropped = counts.singletons + counts.fe_separated > 0;
-    let kept_index = kept_indices(&alive, dropped, pool)?;
-    if kept_index.len() < 2 {
-        return Err(RfError::TooFewObs);
-    }
-    ctx.check()?;
-
-    // Nothing dropped: the codes are moved as they are (dense codes stay dense).
-    let restrict = |c: Codes| if dropped { factor::restrict(&c, &kept_index, pool) } else { Ok(c) };
-    let take = |v: &[f64]| if dropped { gather_kept(v, &kept_index, pool) } else { Ok(v.to_vec()) };
-    let terms: Vec<Term> = p
-        .absorb
-        .iter()
-        .zip(term_codes)
-        .map(|(t, c)| {
-            let c = restrict(c)?;
-            Ok(Term {
-                factors: sorted_set(&t.factors),
-                codes: c.codes,
-                g: c.n as usize,
-                intercept: t.intercept,
-                slopes: t.slopes.iter().map(|&s| take(p.slope_vars[s])).collect::<Result<_, _>>()?,
-                slope_vars: t.slopes.clone(),
-                save: t.save,
-            })
-        })
-        .collect::<Result<_, RfError>>()?;
-    let clusters: Vec<ClusterDim> = cluster_codes
-        .into_iter()
-        .map(|(factors, c)| {
-            let c = restrict(c)?;
-            Ok(ClusterDim { factors, codes: c.codes, g: c.n as usize })
-        })
-        .collect::<Result<_, RfError>>()?;
-    let weights = p.weights.map(take).transpose()?;
-    let y_sep = p.y_for_sep.map(take).transpose()?;
-    let n = kept_index.len();
-    crate::solve::log_phase(ctx, &mut t, "compact");
-    let absorber = build_absorber(kind, &terms, weights.as_deref(), n, pool, ctx)?;
-    Ok(Session {
+    let parts = Parts {
         n_input: p.n,
-        keep: alive,
-        kept_index,
-        terms,
-        clusters,
-        vce: p.vce.clone(),
+        alive,
+        // Every drop is counted, so nothing was dropped when both counts are zero.
+        dropped: counts.singletons + counts.fe_separated > 0,
+        absorb: &p.absorb,
+        term_codes,
+        cluster_codes,
+        slope_vars: &p.slope_vars,
+        weights: p.weights,
         weight_kind: p.weight_kind,
-        weights,
-        y_sep,
+        vce: p.vce.clone(),
+        y_sep: p.y_for_sep,
         family: p.family,
         drop_singletons: p.drop_singletons,
         sep_fe: p.sep_fe,
-        num_singletons: counts.singletons,
-        num_fe_separated: counts.fe_separated,
-        kind,
-        absorber,
-    })
+        counts,
+    };
+    Session::from_parts(parts, kind, pool, ctx)
+}
+
+/// A session's inputs once its sample is fixed: term and cluster codes over the input
+/// observations, the keep mask, and the per-observation inputs (input order).
+pub(crate) struct Parts<'a> {
+    pub n_input: usize,
+    pub alive: Vec<bool>,
+    /// Some input observation is not alive.
+    pub dropped: bool,
+    pub absorb: &'a [AbsorbTerm],
+    pub term_codes: Vec<Codes>,
+    pub cluster_codes: Vec<(Vec<usize>, Codes)>,
+    pub slope_vars: &'a [&'a [f64]],
+    pub weights: Option<&'a [f64]>,
+    pub weight_kind: WeightKind,
+    pub vce: Vce,
+    pub y_sep: Option<&'a [f64]>,
+    pub family: Family,
+    pub drop_singletons: bool,
+    pub sep_fe: bool,
+    pub counts: DropCounts,
+}
+
+impl Session {
+    /// Compacts `parts` to the alive observations and builds the absorber (inside `pool`).
+    /// Codes must be dense when nothing was dropped.
+    pub(crate) fn from_parts(parts: Parts, kind: AbsorberKind, pool: &Pool, ctx: &Ctx) -> Result<Session, RfError> {
+        let mut t = std::time::Instant::now();
+        let Parts { n_input, alive, dropped, absorb, term_codes, cluster_codes, slope_vars, weights, weight_kind, vce, y_sep, family, drop_singletons, sep_fe, counts } =
+            parts;
+        let kept_index = kept_indices(&alive, dropped, pool)?;
+        if kept_index.len() < 2 {
+            return Err(RfError::TooFewObs);
+        }
+        ctx.check()?;
+
+        // Nothing dropped: the codes are moved as they are (dense codes stay dense).
+        let restrict = |c: Codes| if dropped { factor::restrict(&c, &kept_index, pool) } else { Ok(c) };
+        let take = |v: &[f64]| if dropped { gather_kept(v, &kept_index, pool) } else { Ok(v.to_vec()) };
+        let terms: Vec<Term> = absorb
+            .iter()
+            .zip(term_codes)
+            .map(|(t, c)| {
+                let c = restrict(c)?;
+                Ok(Term {
+                    factors: sorted_set(&t.factors),
+                    codes: c.codes,
+                    g: c.n as usize,
+                    intercept: t.intercept,
+                    slopes: t.slopes.iter().map(|&s| take(slope_vars[s])).collect::<Result<_, _>>()?,
+                    slope_vars: t.slopes.clone(),
+                    save: t.save,
+                })
+            })
+            .collect::<Result<_, RfError>>()?;
+        let clusters: Vec<ClusterDim> = cluster_codes
+            .into_iter()
+            .map(|(factors, c)| {
+                let c = restrict(c)?;
+                Ok(ClusterDim { factors, codes: c.codes, g: c.n as usize })
+            })
+            .collect::<Result<_, RfError>>()?;
+        let weights = weights.map(take).transpose()?;
+        let y_sep = y_sep.map(take).transpose()?;
+        let n = kept_index.len();
+        crate::solve::log_phase(ctx, &mut t, "compact");
+        let absorber = build_absorber(kind, &terms, weights.as_deref(), n, pool, ctx)?;
+        Ok(Session {
+            n_input,
+            keep: alive,
+            kept_index,
+            terms,
+            clusters,
+            vce,
+            weight_kind,
+            weights,
+            y_sep,
+            family,
+            drop_singletons,
+            sep_fe,
+            num_singletons: counts.singletons,
+            num_fe_separated: counts.fe_separated,
+            kind,
+            absorber,
+        })
+    }
 }
 
 fn build_absorber(

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rayon::prelude::*;
 
 use crate::api::FactorValues;
+use crate::fit::FactorCol;
 use crate::error::RfError;
 use crate::par::{CHUNK, Pool, alloc_uninit, alloc_vec, assume_init, chunk_range, map_chunks};
 
@@ -297,6 +298,64 @@ pub fn restrict(codes: &Codes, kept: &[u32], pool: &Pool) -> Result<Codes, RfErr
         pool.install(|| out.par_chunks_mut(CHUNK).for_each(|o| o.iter_mut().for_each(|c| *c = new_id[*c as usize])));
     }
     Ok(Codes { codes: out, n: next })
+}
+
+/// Encodes a host factor column of the `fit` layer over all its rows. Missing entries (non-finite
+/// values, the integer NA sentinels, out-of-range codes) share one extra level; callers drop
+/// those rows and [`restrict`] the codes to the estimation sample. Without missing entries the
+/// codes are dense: numeric levels in ascending order, pre-coded levels in the host's order
+/// (unused levels removed).
+pub fn factorize_col(col: &FactorCol, pool: &Pool) -> Result<Codes, RfError> {
+    match *col {
+        FactorCol::F64(x) => {
+            let finite = |v: f64| v.is_finite();
+            if pool.install(|| x.par_chunks(CHUNK).all(|c| c.iter().all(|&v| finite(v)))) {
+                return factorize_num(x, pool);
+            }
+            let parts = map_chunks(pool, x.len(), CHUNK, |_, r| {
+                x[r].iter().filter(|v| v.is_finite()).fold((f64::INFINITY, f64::NEG_INFINITY, true), |(lo, hi, int), &v| {
+                    (lo.min(v), hi.max(v), int && v == v.trunc() && v.abs() < 9.0e15)
+                })
+            });
+            let (lo, hi, int) = parts.iter().fold((f64::INFINITY, f64::NEG_INFINITY, true), |a, b| (a.0.min(b.0), a.1.max(b.1), a.2 && b.2));
+            if lo > hi {
+                return direct_table(x.len(), 1, |_| 0, pool);
+            }
+            if int && hi - lo < table_limit(x.len()) as f64 {
+                let slot = |i: usize| if x[i].is_finite() { (x[i] - lo) as i64 as usize + 1 } else { 0 };
+                return direct_table(x.len(), (hi - lo) as usize + 2, slot, pool);
+            }
+            // Key 0 is the NaN bit pattern with every bit set, never the key of a finite value.
+            let keys: Vec<u64> = pool.install(|| x.par_iter().map(|&v| if v.is_finite() { f64_key(v) } else { 0 }).collect());
+            sort_encode(&keys, pool)
+        }
+        FactorCol::I32(x) => factorize_int(x.len(), |i| (x[i] != i32::MIN).then(|| i64::from(x[i])), pool),
+        FactorCol::I64(x) => factorize_int(x.len(), |i| (x[i] != i64::MIN).then_some(x[i]), pool),
+        FactorCol::Codes { codes, nlevels, base } => {
+            let slot = |i: usize| {
+                let l = i64::from(codes[i]) - i64::from(base);
+                if (0..i64::from(nlevels)).contains(&l) { l as usize + 1 } else { 0 }
+            };
+            direct_table(codes.len(), nlevels as usize + 1, slot, pool)
+        }
+    }
+}
+
+/// [`factorize_col`] for integer values (`None` = missing): a direct table over the value range
+/// when it is small, else sorted order-preserving keys (missing = key 0, which no value maps to
+/// because the i64 sentinel `i64::MIN` is itself missing).
+fn factorize_int(n: usize, value: impl Fn(usize) -> Option<i64> + Sync, pool: &Pool) -> Result<Codes, RfError> {
+    let parts = map_chunks(pool, n, CHUNK, |_, r| r.filter_map(&value).fold((i64::MAX, i64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v))));
+    let (lo, hi) = parts.iter().fold((i64::MAX, i64::MIN), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+    if lo > hi {
+        return direct_table(n, 1, |_| 0, pool);
+    }
+    let range = i128::from(hi) - i128::from(lo);
+    if range < i128::from(table_limit(n)) {
+        return direct_table(n, range as usize + 2, |i| value(i).map_or(0, |v| (v - lo) as usize + 1), pool);
+    }
+    let keys: Vec<u64> = pool.install(|| (0..n).into_par_iter().with_min_len(4096).map(|i| value(i).map_or(0, |v| (v ^ i64::MIN) as u64)).collect());
+    sort_encode(&keys, pool)
 }
 
 /// Restricts `codes` to the observations with `keep[i]` and renumbers the surviving levels

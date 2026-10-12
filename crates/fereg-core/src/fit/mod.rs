@@ -11,8 +11,13 @@
 //! reghdfe / ppmlhdfe conventions live in `ols`, `iv` and `glm`.
 
 use crate::api::{Ctx, RfError, Separation};
+use crate::par;
 
 pub mod dist;
+mod fixef;
+mod input;
+mod ols;
+mod vcov;
 
 /// A categorical column over the input rows.
 #[derive(Clone, Copy, Debug)]
@@ -458,6 +463,15 @@ impl FitState {
 
 /// Estimates one model.
 pub fn fit(input: &FitInput, spec: &FitSpec, ctx: &Ctx) -> Result<FitOutput, RfError> {
-    let _ = (input, spec, ctx);
-    Err(RfError::Internal("fit::fit is not implemented yet".into()))
+    input::validate(input, spec)?;
+    if !input.endog.is_empty() || !input.inst.is_empty() {
+        return Err(RfError::InvalidInput("IV estimation is not available yet".into()));
+    }
+    if spec.model != Model::Ols {
+        return Err(RfError::InvalidInput("Poisson and logit estimation are not available yet".into()));
+    }
+    par::with_pool(par::threads_for(ctx.threads, input.n), |pool| {
+        let sample = input::build(input, spec, ctx, pool)?;
+        ols::ols(input, spec, sample, ctx, pool)
+    })?
 }

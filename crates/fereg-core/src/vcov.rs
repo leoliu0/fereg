@@ -300,6 +300,19 @@ pub(crate) fn multiway_meat(
     pool: &Pool,
     row: impl Fn(usize, &mut [f64]) -> f64 + Sync,
 ) -> Result<Vec<f64>, RfError> {
+    multiway_meat_scaled(dims, row_order, m, pool, |_| 1.0, row)
+}
+
+/// [`multiway_meat`] with every subset meat multiplied by `scale(G_S)`, G_S the number of
+/// clusters of the subset's intersection (fixest `ssc(G.df = "conventional")`: G/(G−1)).
+pub(crate) fn multiway_meat_scaled(
+    dims: &[ClusterCodes],
+    row_order: &[u32],
+    m: usize,
+    pool: &Pool,
+    scale: impl Fn(usize) -> f64,
+    row: impl Fn(usize, &mut [f64]) -> f64 + Sync,
+) -> Result<Vec<f64>, RfError> {
     let q = dims.len();
     let mut meat = vec![0.0; m * m];
     let owned: Vec<Codes> = dims.iter().map(|d| Codes { codes: d.codes.to_vec(), n: d.g as u32 }).collect();
@@ -316,8 +329,9 @@ pub(crate) fn multiway_meat(
             };
             let row_codes = to_row_order(kept_codes, row_order, pool)?;
             let part = cluster_meat(&row_codes, g, m, pool, &row);
+            let f = sign * scale(g);
             for (a, v) in meat.iter_mut().zip(&part) {
-                *a += sign * v;
+                *a += f * v;
             }
         }
     }
