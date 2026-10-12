@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: absorbed degrees-of-freedom table (adapted from reghdfe_footnote.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
+*! version 0.3.0  fereg: absorbed degrees-of-freedom table (adapted from reghdfe_footnote.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
 program _rf_footnote
 	version 16
 	syntax [, width(int 13)]

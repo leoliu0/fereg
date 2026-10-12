@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
+*! version 0.3.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror reghdfe 6.13.1 (Sergio Correia).
 program define fereg, eclass
 	version 16
@@ -82,7 +82,7 @@ end
 
 
 program Estimate, eclass
-	local rf_version 0.2.1
+	local rf_version 0.3.0
 	local cmdline `"fereg `0'"'
 
 // --------------------------------------------------------------------------

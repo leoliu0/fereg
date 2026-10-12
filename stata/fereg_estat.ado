@@ -1,4 +1,4 @@
-*! version 0.2.1  fereg: estat after fereg, feppml and felogit (e(estat_cmd))
+*! version 0.3.0  fereg: estat after fereg, feppml and felogit (e(estat_cmd))
 *! Mirrors reghdfe_estat (reghdfe 6.13.1), which is also what estat runs after ppmlhdfe 2.3.3
 *! (its e(estat_cmd) is reghdfe5_estat, the same program): summarize, vce, and ic with
 *! df = e(df_m) + 1. Unlike reghdfe_estat, estat summarize passes its varlist and options on.

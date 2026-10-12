@@ -1,4 +1,4 @@
-*! version 0.2.1  felogit: logit (maximum likelihood) with high-dimensional fixed effects (Rust plugin)
+*! version 0.3.0  felogit: logit (maximum likelihood) with high-dimensional fixed effects (Rust plugin)
 *! Coefficients equal those of -logit y x i.fe1 i.fe2-; layout and options follow feppml.
 program define felogit, eclass
 	version 16
