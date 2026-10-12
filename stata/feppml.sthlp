@@ -151,10 +151,14 @@ The number of separated observations is reported in the output and in {cmd:e(num
 
 {phang}
 {opt tagsep(newvar)} runs the separation check instead of the regression, as {cmd:ppmlhdfe}'s
-{opt tagsep()}: {cmd:separation()} is replaced by {cmd:relu} alone (the {cmd:fe} rule is not applied, so
-observations in fixed-effect groups whose outcome is always zero are found and tagged by ReLU; singletons are
-still dropped), and {it:newvar} (byte) is 1 for separated observations and 0 for the other observations of
-the sample, missing elsewhere. Nothing is estimated and no {cmd:e()} results are posted. An existing variable
+{opt tagsep()} does, and ignores {cmd:separation()}. After singletons are dropped, observations in
+fixed-effect groups whose outcome is always zero and the observations found by ReLU are removed, and the
+check is repeated on the rest until ReLU finds nothing more. {it:newvar} (byte) is 1 for separated
+observations, 0 for the other observations of the sample after the initial singleton drop, and missing
+elsewhere, including those singletons. Observations that become singletons once separated observations are
+removed are coded by whether they are separated: 1 if the outcome is zero (a zero-outcome singleton is
+separated by its own fixed effect), 0 otherwise; the regression would drop both. Nothing is estimated and
+no {cmd:e()} results are posted. An existing variable
 named {it:newvar} is replaced (as {cmd:ppmlhdfe} does), unless the model uses it. A warning is printed if the
 check stopped before certifying its result.
 

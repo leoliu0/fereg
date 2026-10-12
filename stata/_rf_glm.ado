@@ -131,8 +131,8 @@ program _rf_glm, eclass
 	if (`: list posof "relu" in separation' | `: list posof "simplex" in separation') local glmsep relu
 	if (`: list posof "mu" in separation') local glmsep = cond("`glmsep'" == "", "mu", "`glmsep',mu")
 	if ("`glmsep'" == "") local glmsep none
-	* tagsep(): as ppmlhdfe, separation() is overridden by relu alone (the fe rule is not applied;
-	* singletons are still dropped) and nothing is estimated
+	* tagsep(): as ppmlhdfe, separation() is overridden by relu and nothing is estimated. Prepare
+	* drops singletons only (sep_fe 0); the core's separation rounds apply the fe rule themselves.
 	if (`is_tagsep') {
 		di as text "{bf: (identifying separated observations instead of running regressions)}"
 		local separation relu
