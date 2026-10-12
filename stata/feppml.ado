@@ -1,9 +1,9 @@
-*! version 0.1.0  ppmlfast: Poisson pseudo-maximum likelihood with high-dimensional fixed effects (Rust plugin)
+*! version 0.2.0  feppml: Poisson pseudo-maximum likelihood with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror ppmlhdfe 2.3.3 (Correia, Guimarães, Zylkin).
-program define ppmlfast, eclass
+program define feppml, eclass
 	version 16
 	if replay() {
-		if (`"`e(cmd)'"' != "ppmlfast") error 301
+		if (`"`e(cmd)'"' != "feppml") error 301
 		_rf_glm_replay `0'
 		exit
 	}

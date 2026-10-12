@@ -1,9 +1,9 @@
-*! version 0.1.0  logitfast: logit (maximum likelihood) with high-dimensional fixed effects (Rust plugin)
-*! Coefficients equal those of -logit y x i.fe1 i.fe2-; layout and options follow ppmlfast.
-program define logitfast, eclass
+*! version 0.2.0  felogit: logit (maximum likelihood) with high-dimensional fixed effects (Rust plugin)
+*! Coefficients equal those of -logit y x i.fe1 i.fe2-; layout and options follow feppml.
+program define felogit, eclass
 	version 16
 	if replay() {
-		if (`"`e(cmd)'"' != "logitfast") error 301
+		if (`"`e(cmd)'"' != "felogit") error 301
 		_rf_glm_replay `0'
 		exit
 	}

@@ -1,35 +1,35 @@
 {smcl}
-{* *! version 0.1.0}{...}
+{* *! version 0.2.0}{...}
 {vieweralsosee "[R] logit" "help logit"}{...}
-{vieweralsosee "regfast" "help regfast"}{...}
-{vieweralsosee "ppmlfast" "help ppmlfast"}{...}
-{viewerjumpto "Syntax" "logitfast##syntax"}{...}
-{viewerjumpto "Description" "logitfast##description"}{...}
-{viewerjumpto "Options" "logitfast##options"}{...}
-{viewerjumpto "Accepted but ignored, and unsupported options" "logitfast##ignored"}{...}
-{viewerjumpto "Differences from logit with dummies" "logitfast##differences"}{...}
-{viewerjumpto "Postestimation" "logitfast##postestimation"}{...}
-{viewerjumpto "Examples" "logitfast##examples"}{...}
-{viewerjumpto "Stored results" "logitfast##results"}{...}
-{viewerjumpto "Author" "logitfast##author"}{...}
+{vieweralsosee "fereg" "help fereg"}{...}
+{vieweralsosee "feppml" "help feppml"}{...}
+{viewerjumpto "Syntax" "felogit##syntax"}{...}
+{viewerjumpto "Description" "felogit##description"}{...}
+{viewerjumpto "Options" "felogit##options"}{...}
+{viewerjumpto "Accepted but ignored, and unsupported options" "felogit##ignored"}{...}
+{viewerjumpto "Differences from logit with dummies" "felogit##differences"}{...}
+{viewerjumpto "Postestimation" "felogit##postestimation"}{...}
+{viewerjumpto "Examples" "felogit##examples"}{...}
+{viewerjumpto "Stored results" "felogit##results"}{...}
+{viewerjumpto "Author" "felogit##author"}{...}
 {title:Title}
 
 {p2colset 5 18 20 2}{...}
-{p2col :{cmd:logitfast} {hline 2}}Logit regression with multiple high-dimensional fixed effects (compiled plugin){p_end}
+{p2col :{cmd:felogit} {hline 2}}Logit regression with multiple high-dimensional fixed effects (compiled plugin){p_end}
 {p2colreset}{...}
 
 
 {marker syntax}{...}
 {title:Syntax}
 
-{p 8 15 2}{cmd:logitfast}
+{p 8 15 2}{cmd:felogit}
 {depvar} [{indepvars}]
 {ifin} {weight}
-[{cmd:,} {opth a:bsorb(regfast##absorb:absvars)} {help logitfast##options_table:options}]
+[{cmd:,} {opth a:bsorb(fereg##absorb:absvars)} {help felogit##options_table:options}]
 {p_end}
 
 {pstd}
-{cmd:logitfast} {it:y x}{cmd:, absorb(}{it:fe1 fe2}{cmd:)} gives the same slope coefficients, standard errors and
+{cmd:felogit} {it:y x}{cmd:, absorb(}{it:fe1 fe2}{cmd:)} gives the same slope coefficients, standard errors and
 log likelihood as {cmd:logit} {it:y x} {cmd:i.}{it:fe1} {cmd:i.}{it:fe2}, without creating the dummies.
 As with {cmd:logit}, a nonzero, nonmissing {it:depvar} counts as a success.
 {it:indepvars} may contain factor variables and time-series operators; see {help fvvarlist} and {help tsvarlist}.
@@ -40,14 +40,14 @@ As with {cmd:logit}, a nonzero, nonmissing {it:depvar} counts as a success.
 {synopthdr}
 {synoptline}
 {syntab:Fixed effects}
-{synopt :{opth a:bsorb(regfast##absorb:absvars)}}categorical variables (and interactions) to absorb; same syntax as {help regfast##absorb:regfast}{p_end}
+{synopt :{opth a:bsorb(fereg##absorb:absvars)}}categorical variables (and interactions) to absorb; same syntax as {help fereg##absorb:fereg}{p_end}
 {synopt :{cmdab:a:bsorb(}{it:...}{cmd:,} {cmdab:save:fe)}}save every fixed effect as {it:__hdfe#__}{p_end}
 {synopt :{opt noa:bsorb}}absorb only the constant (same as omitting {opt absorb()}){p_end}
-{synopt :{opth d(newvar)}}save the sum of the fixed effects; required by {help logitfast##postestimation:predict} {opt pr}, {opt xbd}, {opt d} and {opt score}{p_end}
-{synopt :{opt d}}save the sum of the fixed effects in {it:_logitfast_d} (overwritten if it exists){p_end}
+{synopt :{opth d(newvar)}}save the sum of the fixed effects; required by {help felogit##postestimation:predict} {opt pr}, {opt xbd}, {opt d} and {opt score}{p_end}
+{synopt :{opt d}}save the sum of the fixed effects in {it:_felogit_d} (overwritten if it exists){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(logitfast##vce:vcetype)}}{opt oim} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(felogit##vce:vcetype)}}{opt oim} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups{p_end}
@@ -77,14 +77,14 @@ As with {cmd:logit}, a nonzero, nonmissing {it:depvar} counts as a success.
 {title:Description}
 
 {pstd}
-{cmd:logitfast} fits logit models by maximum likelihood with any number of absorbed fixed effects. The estimator
+{cmd:felogit} fits logit models by maximum likelihood with any number of absorbed fixed effects. The estimator
 is the plain (unconditional) MLE of the logit model with one dummy per fixed-effect category, without any
 incidental-parameter bias correction: its slope coefficients equal those of {cmd:logit} with explicit dummies
 (and of {cmd:fixest::feglm(family = "logit")}).
 
 {pstd}
 The model is fitted by iteratively reweighted least squares, with step halving when the deviance increases. Each
-step partials out the fixed effects with the compiled solver of {help regfast} (warm-started across iterations),
+step partials out the fixed effects with the compiled solver of {help fereg} (warm-started across iterations),
 following the algorithm of {cmd:ppmlhdfe} (Correia, Guimarães and Zylkin, 2020). Fixed-effect groups whose outcome
 is always 0 or always 1 are dropped first, since their fixed effect is infinite. Results are bit-for-bit
 identical for any number of threads.
@@ -96,13 +96,13 @@ identical for any number of threads.
 {dlgtab:Fixed effects}
 
 {phang}
-{opt absorb(absvars)} lists the fixed effects; the syntax is that of {help regfast##absorb:regfast}.
-Without {opt absorb()} (or with {opt noabsorb}) {cmd:logitfast} is a plain logit.
+{opt absorb(absvars)} lists the fixed effects; the syntax is that of {help fereg##absorb:fereg}.
+Without {opt absorb()} (or with {opt noabsorb}) {cmd:felogit} is a plain logit.
 
 {phang}
 {opt d(newvar)} saves the sum of the fixed effects on the logit (index) scale, with weighted mean zero (weights:
 the final IRLS weights w*p*(1-p)); the constant {cmd:_cons} carries the mean. Hence the predicted probability is
-invlogit(xb + d), where xb includes {cmd:_cons} and the offset. {opt d} without a name uses {it:_logitfast_d}.
+invlogit(xb + d), where xb includes {cmd:_cons} and the offset. {opt d} without a name uses {it:_felogit_d}.
 Saved fixed effects ({it:target}{cmd:=} or {cmd:savefe}) add up to d.
 
 {marker vce}{...}
@@ -124,7 +124,7 @@ clustering. {cmd:pweight}s imply {cmd:vce(robust)}. These are the conventions of
 {opt separation(list)}: {cmd:fe} (the default; also {cmd:default}) drops, iteratively together with singletons,
 fixed-effect groups whose outcome is always 0 or always 1. {cmd:mu} additionally drops observations whose fitted
 probability reaches 0 (with y = 0) or 1 (with y = 1) during IRLS. {cmd:all} means {cmd:fe mu}; {cmd:none} disables
-both. The {cmd:relu} and {cmd:simplex} methods of {help ppmlfast} are Poisson-only and not allowed here.
+both. The {cmd:relu} and {cmd:simplex} methods of {help feppml} are Poisson-only and not allowed here.
 
 {dlgtab:Optimization and performance}
 
@@ -134,12 +134,12 @@ both. The {cmd:relu} and {cmd:simplex} methods of {help ppmlfast} are Poisson-on
 final tolerance {opt itolerance()}. {opt maxiterations(#)} caps the IRLS iterations (error 430 when reached).
 
 {phang}
-{opt threads(#)}, {opt serialio} and {opt verbose(#)} are as in {help regfast}.
+{opt threads(#)}, {opt serialio} and {opt verbose(#)} are as in {help fereg}.
 
 {dlgtab:Reporting}
 
 {phang}
-{opt or} reports odds ratios, exp(b). Typing {cmd:logitfast} without arguments replays the results and accepts
+{opt or} reports odds ratios, exp(b). Typing {cmd:felogit} without arguments replays the results and accepts
 the reporting options.
 
 
@@ -148,7 +148,7 @@ the reporting options.
 
 {pstd}
 Solver-tuning options are accepted and ignored with a note: {opt technique()}, {opt transform()},
-{opt acceleration()} and {opt poolsize()}. The {cmd:ppmlfast} options {opt exposure()}, {opt eform}, {opt irr}
+{opt acceleration()} and {opt poolsize()}. The {cmd:feppml} options {opt exposure()}, {opt eform}, {opt irr}
 and {opt guess()} are not allowed. {cmd:logit}'s {opt asis} is not available: perfect predictors are always
 dropped by the {cmd:fe} rule. {cmd:aweight}s and {cmd:iweight}s are not allowed.
 
@@ -199,9 +199,9 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {title:Examples}
 
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
-{phang2}{cmd:. logitfast union age ttl_exp, absorb(idcode year)}{p_end}
-{phang2}{cmd:. logitfast union age ttl_exp, absorb(idcode year) vce(cluster idcode) or}{p_end}
-{phang2}{cmd:. logitfast union age ttl_exp, absorb(idcode year) d(dsum)}{p_end}
+{phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year)}{p_end}
+{phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year) vce(cluster idcode) or}{p_end}
+{phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year) d(dsum)}{p_end}
 {phang2}{cmd:. predict double phat, pr}{p_end}
 
 
@@ -209,7 +209,7 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {title:Stored results}
 
 {pstd}
-{cmd:logitfast} stores the following in {cmd:e()}:
+{cmd:felogit} stores the following in {cmd:e()}:
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Scalars}{p_end}
@@ -241,7 +241,7 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
-{synopt:{cmd:e(cmd)}}{cmd:logitfast}{p_end}
+{synopt:{cmd:e(cmd)}}{cmd:felogit}{p_end}
 {synopt:{cmd:e(cmdline)}}command as typed{p_end}
 {synopt:{cmd:e(depvar)}}name of the dependent variable{p_end}
 {synopt:{cmd:e(indepvars)}}names of the estimated regressors, plus {cmd:_cons}{p_end}
@@ -261,7 +261,7 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {synopt:{cmd:e(d)}}name of the variable saved by {opt d()}{p_end}
 {synopt:{cmd:e(wtype)}}weight type{p_end}
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
-{synopt:{cmd:e(predict)}}{cmd:logitfast_p}{p_end}
+{synopt:{cmd:e(predict)}}{cmd:felogit_p}{p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsok)}}predictions allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
@@ -282,10 +282,10 @@ most categories) has a weighted mean of zero. Only their sum (d) is unique.{p_en
 {title:Author}
 
 {pstd}Leo Liu{break}
-{browse "https://github.com/leoliu0/regfast":github.com/leoliu0/regfast}{p_end}
+{browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}
-The IRLS algorithm, separation checks and displays of {cmd:logitfast} follow {cmd:ppmlhdfe} by Sergio Correia,
+The IRLS algorithm, separation checks and displays of {cmd:felogit} follow {cmd:ppmlhdfe} by Sergio Correia,
 Paulo Guimarães and Thomas Zylkin (MIT license):{p_end}
 
 {phang}Correia, S., P. Guimarães, and T. Zylkin. 2020. Fast Poisson estimation with high-dimensional fixed effects.

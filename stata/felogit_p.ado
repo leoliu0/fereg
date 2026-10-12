@@ -1,7 +1,7 @@
-*! version 0.1.0  logitfast: predict
-program define logitfast_p
+*! version 0.2.0  felogit: predict
+program define felogit_p
 	version 16
-	_assert "`e(cmd)'" == "logitfast"
+	_assert "`e(cmd)'" == "felogit"
 	_assert "`e(depvar)'" != ""
 
 	* Intercept -scores- (margins sends var* wildcards)
@@ -23,7 +23,7 @@ program define logitfast_p
 
 	* Every option except xb and stdp needs the sum of fixed effects
 	if !inlist("`opt'", "xb", "stdp") & ("`e(absvars)'" != "_cons") {
-		_assert `"`e(d)'"' != "", msg("predict `opt' requires the -d- option of logitfast")
+		_assert `"`e(d)'"' != "", msg("predict `opt' requires the -d- option of felogit")
 		conf double var `e(d)', exact
 	}
 

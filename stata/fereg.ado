@@ -1,9 +1,9 @@
-*! version 0.1.0  regfast: fast linear regression with high-dimensional fixed effects (Rust plugin)
+*! version 0.2.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror reghdfe 6.13.1 (Sergio Correia).
-program define regfast, eclass
+program define fereg, eclass
 	version 16
 	if replay() {
-		if (`"`e(cmd)'"' != "regfast") error 301
+		if (`"`e(cmd)'"' != "fereg") error 301
 		Replay `0'
 		exit
 	}
@@ -69,8 +69,8 @@ end
 
 
 program Estimate, eclass
-	local rf_version 0.1.0
-	local cmdline `"regfast `0'"'
+	local rf_version 0.2.0
+	local cmdline `"fereg `0'"'
 
 // --------------------------------------------------------------------------
 // Syntax
@@ -100,14 +100,14 @@ program Estimate, eclass
 	foreach opt in individual_id group_id aggregation {
 		if (`"``opt''"' != "") {
 			local optname = cond("`opt'" == "aggregation", "aggregation", subinstr("`opt'", "_id", "", 1))
-			di as err "regfast: `optname'() not supported"
+			di as err "fereg: `optname'() not supported"
 			exit 198
 		}
 	}
 	foreach opt in technique transform acceleration poolsize preconditioner {
-		if (`"``opt''"' != "") di as text "(regfast: option `opt'() ignored)"
+		if (`"``opt''"' != "") di as text "(fereg: option `opt'() ignored)"
 	}
-	if ("`compact'" != "") di as text "(regfast: option compact ignored)"
+	if ("`compact'" != "") di as text "(fereg: option compact ignored)"
 
 	_get_diopts diopts options, `options'
 	if (`"`options'"' != "") {
@@ -142,7 +142,7 @@ program Estimate, eclass
 // --------------------------------------------------------------------------
 	* Instrumental-variable syntax: depvar [exog] (endog = inst) [exog]
 	if ("`liml'`gmm2s'`cue'" != "" | `"`fuller'`kclass'"' != "") {
-		di as err "regfast: only 2SLS is supported"
+		di as err "fereg: only 2SLS is supported"
 		exit 198
 	}
 	local model ols
@@ -398,11 +398,11 @@ program Estimate, eclass
 		local nendog : word count `endog_revars'
 		local ninst : word count `inst_revars'
 		if (`nendog' == 0 | `ninst' == 0) {
-			di as err "regfast: endogenous regressors and excluded instruments must not be empty or omitted"
+			di as err "fereg: endogenous regressors and excluded instruments must not be empty or omitted"
 			exit 198
 		}
 		if (`num_clusters' > 2) {
-			di as err "regfast: IV supports at most two cluster variables"
+			di as err "fereg: IV supports at most two cluster variables"
 			exit 198
 		}
 	}
@@ -500,7 +500,7 @@ program Estimate, eclass
 		if (`: word count `status'' != `nsent') {
 			if ("`outvars'" != "") capture drop `outvars'
 			DropFirstMats `fsb' `fsV' `fss' `nendog'
-			di as err "regfast: internal error: plugin returned `: word count `status'' status codes for `nsent' variables"
+			di as err "fereg: internal error: plugin returned `: word count `status'' status codes for `nsent' variables"
 			exit 9999
 		}
 		* Stock-Yogo critical values (row 1: L1 and K1; row 2: L1 and one endogenous regressor)
@@ -536,7 +536,7 @@ program Estimate, eclass
 		local k1 : word count `endog1'
 		if (`verbose' > -1) {
 			local ic = scalar(__rf_ic)
-			di as text "(regfast converged in `ic' iteration" cond(`ic' == 1, "", "s") ")"
+			di as text "(fereg converged in `ic' iteration" cond(`ic' == 1, "", "s") ")"
 			local tolfmt = string(`collinear_tol', "%3.1e")
 			forval j = 1/`nsent' {
 				local st : word `j' of `status'
@@ -564,7 +564,7 @@ program Estimate, eclass
 			local vcestr robust two-way cluster
 		}
 
-		* First-stage regressions: posted and stored as _regfast_<endog> before the main results
+		* First-stage regressions: posted and stored as _fereg_<endog> before the main results
 		local firsteqs
 		if ("`first'" != "") {
 			local zfull `inst_full' `fullvarlist'
@@ -589,7 +589,7 @@ program Estimate, eclass
 				ereturn scalar df_r = `fdf'
 				ereturn scalar df_m = `fdfm'
 				ereturn scalar k_eq = `k1'
-				ereturn local cmd regfast
+				ereturn local cmd fereg
 				ereturn local model first
 				ereturn local depvar `en'
 				ereturn local title "First-stage regression: `en'"
@@ -608,7 +608,7 @@ program Estimate, eclass
 						PostScalar N_clust2
 					}
 				}
-				local eqname = substr("_regfast_" + subinstr("`en'", ".", "_", .), 1, 27)
+				local eqname = substr("_fereg_" + subinstr("`en'", ".", "_", .), 1, 27)
 				capture estimates store `eqname', title("First-stage regression: `en'")
 				if (_rc) di as text "Unable to store first-stage regression of `en'."
 				else local firsteqs `firsteqs' `eqname'
@@ -664,10 +664,10 @@ program Estimate, eclass
 				local `grp'0 ``grp'0' `v'
 			}
 		}
-		ereturn local cmd regfast
+		ereturn local cmd fereg
 		ereturn local cmdline `"`cmdline'"'
 		ereturn local model iv
-		ereturn local predict regfast_p
+		ereturn local predict fereg_p
 		ereturn local footnote _rf_footnote
 		ereturn local title "IV (2SLS) estimation"
 		ereturn local title2 "Absorbing `G' HDFE group`=cond(`G' == 1, "", "s")'"
@@ -779,14 +779,14 @@ program Estimate, eclass
 	local status `_rf_status'
 	if (`: word count `status'' != `nx') {
 		if ("`outvars'" != "") capture drop `outvars'
-		di as err "regfast: internal error: plugin returned `: word count `status'' status codes for `nx' regressors"
+		di as err "fereg: internal error: plugin returned `: word count `status'' status codes for `nx' regressors"
 		exit 9999
 	}
 
 	* Messages that reference variable names (the plugin cannot see them)
 	if (`verbose' > -1) {
 		local ic = scalar(__rf_ic)
-		di as text "(regfast converged in `ic' iteration" cond(`ic' == 1, "", "s") ")"
+		di as text "(fereg converged in `ic' iteration" cond(`ic' == 1, "", "s") ")"
 		local tolfmt = string(`collinear_tol', "%3.1e")
 		capture confirm scalar __rf_y_absorbed
 		if (!_rc) {
@@ -877,10 +877,10 @@ program Estimate, eclass
 	ereturn scalar N_full = scalar(__rf_N_full)
 
 	* Macros
-	ereturn local cmd regfast
+	ereturn local cmd fereg
 	ereturn local cmdline `"`cmdline'"'
 	ereturn local model `model'
-	ereturn local predict regfast_p
+	ereturn local predict fereg_p
 	ereturn local footnote _rf_footnote
 	ereturn local marginsnotok "Residuals SCore"
 	ereturn local depvar `depvar'
@@ -994,25 +994,25 @@ program ParseIV, sclass
 	local p1 = strpos(`"`s'"', "(")
 	local p2 = strpos(`"`s'"', ")")
 	if (`p1' == 0 | `p2' < `p1') {
-		di as err "regfast: instrumental-variable syntax is depvar [exogvars] (endogvars = instruments)"
+		di as err "fereg: instrumental-variable syntax is depvar [exogvars] (endogvars = instruments)"
 		exit 198
 	}
 	local before = substr(`"`s'"', 1, `p1' - 1)
 	local inside = substr(`"`s'"', `p1' + 1, `p2' - `p1' - 1)
 	local after = substr(`"`s'"', `p2' + 1, .)
 	if (strpos(`"`after'"', "(") | strpos(`"`after'"', ")") | strpos(`"`before'"', "=")) {
-		di as err "regfast: only one (endogvars = instruments) group is allowed"
+		di as err "fereg: only one (endogvars = instruments) group is allowed"
 		exit 198
 	}
 	local eq = strpos(`"`inside'"', "=")
 	if (`eq' == 0 | strpos(substr(`"`inside'"', `eq' + 1, .), "=")) {
-		di as err "regfast: instrumental-variable syntax is depvar [exogvars] (endogvars = instruments)"
+		di as err "fereg: instrumental-variable syntax is depvar [exogvars] (endogvars = instruments)"
 		exit 198
 	}
 	local endog = strtrim(substr(`"`inside'"', 1, `eq' - 1))
 	local inst = strtrim(substr(`"`inside'"', `eq' + 1, .))
 	if (`"`endog'"' == "" | `"`inst'"' == "") {
-		di as err "regfast: both endogenous variables and excluded instruments are required"
+		di as err "fereg: both endogenous variables and excluded instruments are required"
 		exit 198
 	}
 	sreturn local lhs `before' `after'

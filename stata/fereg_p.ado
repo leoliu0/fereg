@@ -1,10 +1,10 @@
-*! version 0.1.0  regfast: predict after regfast (mirrors reghdfe_p of reghdfe 6.13.1)
-program define regfast_p, rclass
+*! version 0.2.0  fereg: predict after fereg (mirrors reghdfe_p of reghdfe 6.13.1)
+program define fereg_p, rclass
 	version 16
 	* Note: we IGNORE typlist and generate the newvar as double
 	* Note: e(resid) is missing outside of e(sample), so we don't need to condition on e(sample)
 
-	if ("`e(cmd)'" != "regfast") error 301
+	if ("`e(cmd)'" != "fereg") error 301
 
 	* -score- is the same as -residuals- (needed by -margins- and -suest-)
 	cap syntax anything [if] [in], SCore
@@ -27,10 +27,10 @@ program define regfast_p, rclass
 
 	local fixed_effects "`e(absvars)'"
 
-	* Except for xb and stdp, we need the residuals saved by regfast
+	* Except for xb and stdp, we need the residuals saved by fereg
 	if ("`xb'" == "" & "`stdp'" == "") {
 		if ("`e(resid)'" == "") {
-			di as err "you must add the {bf:resid} option to regfast before running this prediction"
+			di as err "you must add the {bf:resid} option to fereg before running this prediction"
 			exit 198
 		}
 		confirm numeric variable `e(resid)', exact

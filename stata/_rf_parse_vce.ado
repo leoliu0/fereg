@@ -1,4 +1,4 @@
-*! version 0.1.0  regfast: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
+*! version 0.2.0  fereg: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
 * Returns:
 *   s(vcetype)          unadjusted | robust | cluster
 *   s(num_clusters)     number of cluster dimensions
@@ -23,7 +23,7 @@ program _rf_parse_vce, sclass
 	if ("`vcetype'"=="conventional") local vcetype unadjusted
 
 	if ("`vcetype'" == "dkraay") {
-		di as err "regfast: vce(dkraay) not supported"
+		di as err "fereg: vce(dkraay) not supported"
 		exit 198
 	}
 

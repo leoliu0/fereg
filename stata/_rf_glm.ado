@@ -1,11 +1,11 @@
-*! version 0.1.0  regfast: estimation engine shared by ppmlfast (Poisson) and logitfast (logit)
-*! Syntax, messages and e() of ppmlfast mirror ppmlhdfe 2.3.3 (Correia, Guimarães, Zylkin).
+*! version 0.2.0  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
+*! Syntax, messages and e() of feppml mirror ppmlhdfe 2.3.3 (Correia, Guimarães, Zylkin).
 *
-* Usage (from ppmlfast.ado / logitfast.ado):  _rf_glm poisson|logit <command arguments>
+* Usage (from feppml.ado / felogit.ado):  _rf_glm poisson|logit <command arguments>
 program _rf_glm, eclass
 	version 16
 	gettoken family 0 : 0
-	local cmd = cond("`family'" == "poisson", "ppmlfast", "logitfast")
+	local cmd = cond("`family'" == "poisson", "feppml", "felogit")
 	local cmdline `"`cmd' `0'"'
 	ereturn clear
 
@@ -53,13 +53,13 @@ program _rf_glm, eclass
 	if ("`family'" == "logit") {
 		foreach opt in exposure eform irr guess {
 			if (`"``opt''"' != "") {
-				di as err "option `opt'() not allowed with logitfast"
+				di as err "option `opt'() not allowed with felogit"
 				exit 198
 			}
 		}
 	}
 	else if ("`or'" != "") {
-		di as err "option or not allowed with ppmlfast (use eform or irr)"
+		di as err "option or not allowed with feppml (use eform or irr)"
 		exit 198
 	}
 	if !(`tolerance' > 0 & `tolerance' <= 1) {
@@ -123,7 +123,7 @@ program _rf_glm, eclass
 			di as err "d() syntax error"
 			exit 198
 		}
-		local d = cond("`family'" == "poisson", "_ppmlhdfe_d", "_logitfast_d")
+		local d = cond("`family'" == "poisson", "_ppmlhdfe_d", "_felogit_d")
 		capture drop `d' // destructive, as ppmlhdfe
 	}
 	else if ("`d'" != "") {
@@ -197,7 +197,7 @@ program _rf_glm, eclass
 // --------------------------------------------------------------------------
 	* touse: if + in + weight. Missing values of the plain model variables (the dependent
 	* variable first), the absorbed factors, the slopes and the cluster variables exclude an
-	* observation in the plugin at -prepare- (protocol), as in regfast.ado. With exposure() or
+	* observation in the plugin at -prepare- (protocol), as in fereg.ado. With exposure() or
 	* offset() the model and cluster variables are marked out here first, since the exposure
 	* check runs over that sample.
 	if ("`exposure'`offset'" != "") {
@@ -565,7 +565,7 @@ program PostScalar, eclass
 end
 
 
-* 2.rep78 -> 2bn.rep78 ; 2.rep78#1b.foreign -> 2bn.rep78#1bn.foreign (as ms_expand_varlist; same as regfast.ado)
+* 2.rep78 -> 2bn.rep78 ; 2.rep78#1b.foreign -> 2bn.rep78#1bn.foreign (as ms_expand_varlist; same as fereg.ado)
 program AddBN
 	local part `0'
 	local re "^([0-9]+)b?([.LFSD])"

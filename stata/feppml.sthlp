@@ -1,36 +1,36 @@
 {smcl}
-{* *! version 0.1.0}{...}
+{* *! version 0.2.0}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
-{vieweralsosee "regfast" "help regfast"}{...}
-{vieweralsosee "logitfast" "help logitfast"}{...}
+{vieweralsosee "fereg" "help fereg"}{...}
+{vieweralsosee "felogit" "help felogit"}{...}
 {vieweralsosee "[R] poisson" "help poisson"}{...}
-{viewerjumpto "Syntax" "ppmlfast##syntax"}{...}
-{viewerjumpto "Description" "ppmlfast##description"}{...}
-{viewerjumpto "Options" "ppmlfast##options"}{...}
-{viewerjumpto "Accepted but ignored, and unsupported options" "ppmlfast##ignored"}{...}
-{viewerjumpto "Differences from ppmlhdfe" "ppmlfast##differences"}{...}
-{viewerjumpto "Postestimation" "ppmlfast##postestimation"}{...}
-{viewerjumpto "Examples" "ppmlfast##examples"}{...}
-{viewerjumpto "Stored results" "ppmlfast##results"}{...}
-{viewerjumpto "Author" "ppmlfast##author"}{...}
+{viewerjumpto "Syntax" "feppml##syntax"}{...}
+{viewerjumpto "Description" "feppml##description"}{...}
+{viewerjumpto "Options" "feppml##options"}{...}
+{viewerjumpto "Accepted but ignored, and unsupported options" "feppml##ignored"}{...}
+{viewerjumpto "Differences from ppmlhdfe" "feppml##differences"}{...}
+{viewerjumpto "Postestimation" "feppml##postestimation"}{...}
+{viewerjumpto "Examples" "feppml##examples"}{...}
+{viewerjumpto "Stored results" "feppml##results"}{...}
+{viewerjumpto "Author" "feppml##author"}{...}
 {title:Title}
 
 {p2colset 5 17 19 2}{...}
-{p2col :{cmd:ppmlfast} {hline 2}}Poisson pseudo-maximum likelihood with multiple high-dimensional fixed effects (compiled plugin){p_end}
+{p2col :{cmd:feppml} {hline 2}}Poisson pseudo-maximum likelihood with multiple high-dimensional fixed effects (compiled plugin){p_end}
 {p2colreset}{...}
 
 
 {marker syntax}{...}
 {title:Syntax}
 
-{p 8 15 2}{cmd:ppmlfast}
+{p 8 15 2}{cmd:feppml}
 {depvar} [{indepvars}]
 {ifin} {weight}
-[{cmd:,} {opth a:bsorb(regfast##absorb:absvars)} {help ppmlfast##options_table:options}]
+[{cmd:,} {opth a:bsorb(fereg##absorb:absvars)} {help feppml##options_table:options}]
 {p_end}
 
 {pstd}
-{cmd:ppmlfast} is a drop-in replacement for {help ppmlhdfe} 2.3.3: same syntax, same defaults, same
+{cmd:feppml} is a drop-in replacement for {help ppmlhdfe} 2.3.3: same syntax, same defaults, same
 separation checks, same output and the same stored results, computed by a parallel compiled solver.
 {it:depvar} must be nonnegative; it need not be an integer.
 {it:indepvars} may contain factor variables and time-series operators; see {help fvvarlist} and {help tsvarlist}.
@@ -41,14 +41,14 @@ separation checks, same output and the same stored results, computed by a parall
 {synopthdr}
 {synoptline}
 {syntab:Fixed effects}
-{synopt :{opth a:bsorb(regfast##absorb:absvars)}}categorical variables (and interactions) to absorb; same syntax as {help regfast##absorb:regfast}{p_end}
+{synopt :{opth a:bsorb(fereg##absorb:absvars)}}categorical variables (and interactions) to absorb; same syntax as {help fereg##absorb:fereg}{p_end}
 {synopt :{cmdab:a:bsorb(}{it:...}{cmd:,} {cmdab:save:fe)}}save every fixed effect as {it:__hdfe#__}{p_end}
 {synopt :{opt noa:bsorb}}absorb only the constant (same as omitting {opt absorb()}){p_end}
-{synopt :{opth d(newvar)}}save the sum of the fixed effects; required by most {help ppmlfast##postestimation:predict} options{p_end}
+{synopt :{opth d(newvar)}}save the sum of the fixed effects; required by most {help feppml##postestimation:predict} options{p_end}
 {synopt :{opt d}}save the sum of the fixed effects in {it:_ppmlhdfe_d} (overwritten if it exists){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(ppmlfast##vce:vcetype)}}{opt r:obust} (default) or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(feppml##vce:vcetype)}}{opt r:obust} (default) or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
 {synopt :{opth exp:osure(varname)}}include ln({it:varname}) in the model with coefficient constrained to 1{p_end}
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
@@ -83,7 +83,7 @@ separation checks, same output and the same stored results, computed by a parall
 {title:Description}
 
 {pstd}
-{cmd:ppmlfast} fits Poisson regressions by pseudo-maximum likelihood (PPML) with any number of absorbed
+{cmd:feppml} fits Poisson regressions by pseudo-maximum likelihood (PPML) with any number of absorbed
 fixed effects, following {cmd:ppmlhdfe} 2.3.3 (Correia, Guimarães and Zylkin, 2020): iteratively reweighted
 least squares with an inner tolerance that tightens as IRLS converges, singletons and observations separated
 by a fixed effect dropped iteratively, the ReLU separation check, the same collinearity rules and messages,
@@ -92,7 +92,7 @@ robust or multi-way clustered standard errors, and the same {cmd:e()} results, s
 
 {pstd}
 Each IRLS step is a weighted least-squares problem; the fixed effects are partialled out by the same compiled
-solver as {help regfast}, which reuses its data structures and warm-starts across IRLS iterations. Results are
+solver as {help fereg}, which reuses its data structures and warm-starts across IRLS iterations. Results are
 bit-for-bit identical for any number of threads.
 
 
@@ -102,7 +102,7 @@ bit-for-bit identical for any number of threads.
 {dlgtab:Fixed effects}
 
 {phang}
-{opt absorb(absvars)} lists the fixed effects; the syntax is that of {help regfast##absorb:regfast}
+{opt absorb(absvars)} lists the fixed effects; the syntax is that of {help fereg##absorb:fereg}
 ({it:x}, {it:x}{cmd:#}{it:y}, string variables, {it:target}{cmd:=}{it:term}, and the suboption {cmd:savefe}).
 Without {opt absorb()} (or with {opt noabsorb}) only the constant is absorbed.
 
@@ -139,7 +139,7 @@ pseudo-maximum (separated observations), which are dropped before estimation (Co
 
 {phang2}{cmd:fe}: drop fixed-effect groups whose outcome is always zero (iterated with the singleton check);{p_end}
 {phang2}{cmd:relu}: the ReLU algorithm of {cmd:ppmlhdfe} (alias {cmd:ir});{p_end}
-{phang2}{cmd:simplex}: accepted as an alias of {cmd:relu} (see {help ppmlfast##differences:differences});{p_end}
+{phang2}{cmd:simplex}: accepted as an alias of {cmd:relu} (see {help feppml##differences:differences});{p_end}
 {phang2}{cmd:mu}: drop observations with y = 0 whose fitted mean falls below a tolerance during IRLS.{p_end}
 
 {pmore}
@@ -166,13 +166,13 @@ the tolerance as IRLS converges, as {cmd:ppmlhdfe} does.
 regression of ln(y + mean(y)/100) with the fixed effects.
 
 {phang}
-{opt threads(#)}, {opt serialio} and {opt verbose(#)} are as in {help regfast}. The results do not depend on
+{opt threads(#)}, {opt serialio} and {opt verbose(#)} are as in {help fereg}. The results do not depend on
 the number of threads.
 
 {dlgtab:Reporting}
 
 {phang}
-{opt eform} and {opt irr} report exp(b) (incidence-rate ratios). Typing {cmd:ppmlfast} without arguments
+{opt eform} and {opt irr} report exp(b) (incidence-rate ratios). Typing {cmd:feppml} without arguments
 replays the results and accepts the reporting options.
 
 
@@ -193,16 +193,16 @@ The following {cmd:ppmlhdfe} options are not available and stop with an error: {
 {marker differences}{...}
 {title:Differences from ppmlhdfe}
 
-{phang2}o {cmd:simplex} separation is an alias of {cmd:relu}: {cmd:ppmlfast} does not implement
+{phang2}o {cmd:simplex} separation is an alias of {cmd:relu}: {cmd:feppml} does not implement
 {cmd:ppmlhdfe}'s simplex method (which needs the {cmd:moremata} package). The ReLU method alone detects all
 separated observations; the default {cmd:fe simplex relu} therefore runs {cmd:fe} and {cmd:relu}.{p_end}
 {phang2}o {cmd:e(ic)} (IRLS iterations) can differ by a few iterations: {cmd:ppmlhdfe}'s stopping rule also
-looks at the realized accuracy of its iterative solver, whereas {cmd:ppmlfast} uses the requested inner
-tolerance. {cmd:e(ic2)} counts the iterations of {cmd:ppmlfast}'s solver, which differ from {cmd:ppmlhdfe}'s.{p_end}
-{phang2}o {opt d()}: {cmd:ppmlfast}'s d is the exact sum of fixed effects of the final IRLS step: it is constant
+looks at the realized accuracy of its iterative solver, whereas {cmd:feppml} uses the requested inner
+tolerance. {cmd:e(ic2)} counts the iterations of {cmd:feppml}'s solver, which differ from {cmd:ppmlhdfe}'s.{p_end}
+{phang2}o {opt d()}: {cmd:feppml}'s d is the exact sum of fixed effects of the final IRLS step: it is constant
 within fixed-effect groups and the fitted means satisfy the first-order conditions sum(y - mu) = 0 within every
 group. {cmd:ppmlhdfe} computes d from the working variable of the previous IRLS iteration, so its d (and the
-{cmd:predict} statistics built on it) can differ from {cmd:ppmlfast}'s by about the square root of
+{cmd:predict} statistics built on it) can differ from {cmd:feppml}'s by about the square root of
 {opt tolerance()}, more at observations with tiny fitted means, and by much more in badly fitting models with
 a large {opt offset()}. The coefficients are not affected.{p_end}
 {phang2}o Saved fixed effects ({it:target}{cmd:=} and {cmd:savefe}) are normalized: every intercept fixed effect
@@ -245,19 +245,19 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {title:Examples}
 
 {phang2}{cmd:. sysuse auto, clear}{p_end}
-{phang2}{cmd:. ppmlfast price weight gear length, absorb(turn trunk)}{p_end}
-{phang2}{cmd:. ppmlfast price weight gear length, absorb(turn) exposure(mpg) irr d(dhat)}{p_end}
+{phang2}{cmd:. feppml price weight gear length, absorb(turn trunk)}{p_end}
+{phang2}{cmd:. feppml price weight gear length, absorb(turn) exposure(mpg) irr d(dhat)}{p_end}
 {phang2}{cmd:. predict double muhat, mu}{p_end}
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
-{phang2}{cmd:. ppmlfast hours age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)}{p_end}
-{phang2}{cmd:. ppmlfast hours age ttl_exp, absorb(fe1=idcode fe2=year) d(dsum) threads(8)}{p_end}
+{phang2}{cmd:. feppml hours age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)}{p_end}
+{phang2}{cmd:. feppml hours age ttl_exp, absorb(fe1=idcode fe2=year) d(dsum) threads(8)}{p_end}
 
 
 {marker results}{...}
 {title:Stored results}
 
 {pstd}
-{cmd:ppmlfast} stores the following in {cmd:e()}:
+{cmd:feppml} stores the following in {cmd:e()}:
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Scalars}{p_end}
@@ -291,7 +291,7 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
-{synopt:{cmd:e(cmd)}}{cmd:ppmlfast}{p_end}
+{synopt:{cmd:e(cmd)}}{cmd:feppml}{p_end}
 {synopt:{cmd:e(cmdline)}}command as typed{p_end}
 {synopt:{cmd:e(depvar)}}name of the dependent variable{p_end}
 {synopt:{cmd:e(indepvars)}}names of the estimated regressors, plus {cmd:_cons}{p_end}
@@ -311,7 +311,7 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {synopt:{cmd:e(d)}}name of the variable saved by {opt d()}{p_end}
 {synopt:{cmd:e(wtype)}}weight type{p_end}
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
-{synopt:{cmd:e(predict)}}{cmd:ppmlfast_p}{p_end}
+{synopt:{cmd:e(predict)}}{cmd:feppml_p}{p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsok)}}predictions allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
@@ -332,10 +332,10 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {title:Author}
 
 {pstd}Leo Liu{break}
-{browse "https://github.com/leoliu0/regfast":github.com/leoliu0/regfast}{p_end}
+{browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}
-{cmd:ppmlfast} reproduces the conventions of {cmd:ppmlhdfe} by Sergio Correia, Paulo Guimarães and Thomas Zylkin;
+{cmd:feppml} reproduces the conventions of {cmd:ppmlhdfe} by Sergio Correia, Paulo Guimarães and Thomas Zylkin;
 its predict program and displays are adapted from {cmd:ppmlhdfe} (MIT license). Please cite ppmlhdfe when
 reporting results:{p_end}
 

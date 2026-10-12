@@ -1,5 +1,5 @@
-*! version 0.1.0  regfast: header of ppmlfast and logitfast results
-*! ppmlfast layout from ppmlhdfe_header.ado of ppmlhdfe 2.3.3 (MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
+*! version 0.2.0  fereg: header of feppml and felogit results
+*! feppml layout from ppmlhdfe_header.ado of ppmlhdfe 2.3.3 (MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
 program _rf_glm_header
 	version 16
 
@@ -13,7 +13,7 @@ Log pseudolikelihood = ###########                Pseudo R2      = ###########
 Number of clusters (#)    = ######
 ----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+--*/
 
-	if ("`e(cmd)'" == "ppmlfast") {
+	if ("`e(cmd)'" == "feppml") {
 		di as text ""
 		di as text "`e(title)'" _c
 		di as text _col(51) "No. of obs" _col(67) "=" _c
@@ -38,7 +38,7 @@ Number of clusters (#)    = ######
 		di as text _col(69) as res %10.4f e(r2_p)
 	}
 	else {
-		* logitfast: the layout of Stata's logit header plus the absorbed groups
+		* felogit: the layout of Stata's logit header plus the absorbed groups
 		local llname = cond("`e(vcetype)'" == "Robust", "Log pseudolikelihood", "Log likelihood")
 		di as text ""
 		di as text "`e(title)'" _c

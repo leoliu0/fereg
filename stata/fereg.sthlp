@@ -1,37 +1,37 @@
 {smcl}
-{* *! version 0.1.0}{...}
+{* *! version 0.2.0}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
-{vieweralsosee "ppmlfast" "help ppmlfast"}{...}
-{vieweralsosee "logitfast" "help logitfast"}{...}
+{vieweralsosee "feppml" "help feppml"}{...}
+{vieweralsosee "felogit" "help felogit"}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
-{viewerjumpto "Syntax" "regfast##syntax"}{...}
-{viewerjumpto "Absorb syntax" "regfast##absorb"}{...}
-{viewerjumpto "Description" "regfast##description"}{...}
-{viewerjumpto "Options" "regfast##options"}{...}
-{viewerjumpto "Accepted but ignored, and unsupported options" "regfast##ignored"}{...}
-{viewerjumpto "Differences from reghdfe" "regfast##differences"}{...}
-{viewerjumpto "Postestimation" "regfast##postestimation"}{...}
-{viewerjumpto "Examples" "regfast##examples"}{...}
-{viewerjumpto "Stored results" "regfast##results"}{...}
-{viewerjumpto "Author" "regfast##author"}{...}
+{viewerjumpto "Syntax" "fereg##syntax"}{...}
+{viewerjumpto "Absorb syntax" "fereg##absorb"}{...}
+{viewerjumpto "Description" "fereg##description"}{...}
+{viewerjumpto "Options" "fereg##options"}{...}
+{viewerjumpto "Accepted but ignored, and unsupported options" "fereg##ignored"}{...}
+{viewerjumpto "Differences from reghdfe" "fereg##differences"}{...}
+{viewerjumpto "Postestimation" "fereg##postestimation"}{...}
+{viewerjumpto "Examples" "fereg##examples"}{...}
+{viewerjumpto "Stored results" "fereg##results"}{...}
+{viewerjumpto "Author" "fereg##author"}{...}
 {title:Title}
 
 {p2colset 5 16 18 2}{...}
-{p2col :{cmd:regfast} {hline 2}}Fast linear regression with multiple high-dimensional fixed effects (compiled plugin){p_end}
+{p2col :{cmd:fereg} {hline 2}}Fast linear regression with multiple high-dimensional fixed effects (compiled plugin){p_end}
 {p2colreset}{...}
 
 
 {marker syntax}{...}
 {title:Syntax}
 
-{p 8 15 2}{cmd:regfast}
+{p 8 15 2}{cmd:fereg}
 {depvar} [{indepvars}]
 {ifin} {weight}
-[{cmd:,} {opth a:bsorb(regfast##absorb:absvars)} {help regfast##options_table:options}]
+[{cmd:,} {opth a:bsorb(fereg##absorb:absvars)} {help fereg##options_table:options}]
 {p_end}
 
 {pstd}
-{cmd:regfast} is a drop-in replacement for {help reghdfe} 6.13.1 for linear models: same syntax, same
+{cmd:fereg} is a drop-in replacement for {help reghdfe} 6.13.1 for linear models: same syntax, same
 defaults, same output and the same stored results, computed by a parallel compiled solver.
 {it:indepvars} may contain factor variables and time-series operators; see {help fvvarlist} and {help tsvarlist}.
 {cmd:fweight}s, {cmd:aweight}s and {cmd:pweight}s are allowed; see {help weight}. The weight must be a variable.
@@ -41,21 +41,21 @@ defaults, same output and the same stored results, computed by a parallel compil
 {synopthdr}
 {synoptline}
 {syntab:Fixed effects}
-{synopt :{opth a:bsorb(regfast##absorb:absvars)}}categorical variables (and interactions/slopes) to absorb{p_end}
+{synopt :{opth a:bsorb(fereg##absorb:absvars)}}categorical variables (and interactions/slopes) to absorb{p_end}
 {synopt :{cmdab:a:bsorb(}{it:...}{cmd:,} {cmdab:save:fe)}}save every fixed effect as {it:__hdfe#__} (also {cmd:generate}){p_end}
 {synopt :{cmdab:a:bsorb(}{it:...}{cmd:,} {cmd:replace)}}overwrite existing target variables{p_end}
 {synopt :{opt noa:bsorb}}absorb only the constant (same as omitting {opt absorb()}){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(regfast##vce:vcetype)}}{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(fereg##vce:vcetype)}}{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
-{synopt :{opth res:iduals(newvar)}}save the regression residuals; required by several {help regfast##postestimation:predict} options{p_end}
+{synopt :{opth res:iduals(newvar)}}save the regression residuals; required by several {help fereg##postestimation:predict} options{p_end}
 {synopt :{opt res:iduals}}save the residuals in {it:_reghdfe_resid} (overwritten if it exists){p_end}
 {synopt :{opt nocons:tant}}do not report the constant{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups (not recommended){p_end}
 
 {syntab:Degrees of freedom}
-{synopt :{opth dof:adjustments(regfast##dof:list)}}{opt all} (default), {opt none}, or any of {opt first:pair}|{opt pair:wise}, {opt cl:usters}, {opt cont:inuous}{p_end}
+{synopt :{opth dof:adjustments(fereg##dof:list)}}{opt all} (default), {opt none}, or any of {opt first:pair}|{opt pair:wise}, {opt cl:usters}, {opt cont:inuous}{p_end}
 {synopt :{opth groupv:ar(newvar)}}save the identifier of the first mobility group{p_end}
 
 {syntab:Optimization and performance}
@@ -101,7 +101,7 @@ Variable abbreviations are expanded.
 {it:target}{cmd:=} saves the estimated fixed effect in the new variable {it:target}; a term with slopes also
 creates {it:target}{cmd:Slope1}, {it:target}{cmd:Slope2}, .... The suboption {cmd:savefe} saves every
 term ({it:__hdfe1__}, {it:__hdfe2__Slope1}, ...). Saved fixed effects are labeled {cmd:[FE]} {it:term}.
-As in {cmd:reghdfe}, variables named {it:__hdfe*} are dropped at the start of every {cmd:regfast} call.
+As in {cmd:reghdfe}, variables named {it:__hdfe*} are dropped at the start of every {cmd:fereg} call.
 {cmd:replace} overwrites existing target variables.
 
 
@@ -109,7 +109,7 @@ As in {cmd:reghdfe}, variables named {it:__hdfe*} are dropped at the start of ev
 {title:Description}
 
 {pstd}
-{cmd:regfast} estimates linear regressions with any number of absorbed fixed effects, heterogeneous slopes,
+{cmd:fereg} estimates linear regressions with any number of absorbed fixed effects, heterogeneous slopes,
 and unadjusted, robust or multi-way clustered standard errors, following the conventions of {cmd:reghdfe}
 6.13.1: the same sample (singletons are dropped iteratively), the same degrees-of-freedom corrections
 ({it:absorbed degrees of freedom} table), the same collinearity rules and messages, the same small-sample
@@ -129,8 +129,8 @@ of threads.
 {dlgtab:Fixed effects}
 
 {phang}
-{opt absorb(absvars)} lists the fixed effects; see {help regfast##absorb:absorb syntax}.
-Without {opt absorb()} (or with {opt noabsorb}) only the constant is absorbed and {cmd:regfast} is a
+{opt absorb(absvars)} lists the fixed effects; see {help fereg##absorb:absorb syntax}.
+Without {opt absorb()} (or with {opt noabsorb}) only the constant is absorbed and {cmd:fereg} is a
 plain least-squares regression.
 
 {marker vce}{...}
@@ -148,7 +148,7 @@ cannot be combined with {cmd:vce(unadjusted)}.
 {opt residuals(newvar)} saves the residuals; {opt residuals} without a name uses {it:_reghdfe_resid}.
 
 {phang}
-{opt noconstant} suppresses the reported constant. By default, as in {cmd:reghdfe}, {cmd:regfast} reports a
+{opt noconstant} suppresses the reported constant. By default, as in {cmd:reghdfe}, {cmd:fereg} reports a
 constant (the mean of the fixed effects) whenever a fixed effect has an intercept, so that {cmd:margins} works.
 
 {phang}
@@ -190,7 +190,7 @@ The results do not depend on the number of threads.
 {title:Accepted but ignored, and unsupported options}
 
 {pstd}
-Solver-tuning options of {cmd:reghdfe} are accepted and ignored with a note, because {cmd:regfast} uses its own
+Solver-tuning options of {cmd:reghdfe} are accepted and ignored with a note, because {cmd:fereg} uses its own
 solver: {opt technique()}, {opt transform()}, {opt acceleration()}, {opt preconditioner()}, {opt poolsize()} and
 {opt compact}.
 
@@ -208,8 +208,8 @@ and the options {opt first} and {opt ffirst} are not available in this version.
 other than the first (the one with the most categories) has a weighted mean of zero, and the first absorbs the
 shift. Only their sum per observation (the {cmd:d} prediction) is unique; how the sum splits across fixed effects
 depends on the algorithm and differs from {cmd:reghdfe}'s split.{p_end}
-{phang2}o {cmd:e(ic)} reports the iterations of {cmd:regfast}'s solver, which differ from {cmd:reghdfe}'s.
-Estimation messages read "(regfast converged in # iterations)".{p_end}
+{phang2}o {cmd:e(ic)} reports the iterations of {cmd:fereg}'s solver, which differ from {cmd:reghdfe}'s.
+Estimation messages read "(fereg converged in # iterations)".{p_end}
 {phang2}o String variables are allowed inside fixed-effect and cluster interactions ({cmd:reghdfe} rejects them).{p_end}
 {phang2}o {cmd:e(estat_cmd)} is not set; {cmd:estat} uses Stata's default {help estat} subcommands.{p_end}
 {phang2}o The mobility-group identifiers saved by {opt groupvar()} describe the same groups as {cmd:reghdfe}'s but
@@ -238,25 +238,25 @@ collinearity notes rather than after them.{p_end}
 {pstd}
 {help test}, {help lincom}, {help nlcom}, {help estimates} and {help margins} work as after {cmd:regress}
 ({cmd:margins} uses the xb component; {cmd:residuals} and {cmd:score} are not allowed in {cmd:margins}).
-Typing {cmd:regfast} without arguments replays the results.
+Typing {cmd:fereg} without arguments replays the results.
 
 
 {marker examples}{...}
 {title:Examples}
 
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
-{phang2}{cmd:. regfast ln_wage age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)}{p_end}
-{phang2}{cmd:. regfast ln_wage age i.race c.age#c.age, absorb(idcode year) vce(cluster idcode year)}{p_end}
-{phang2}{cmd:. regfast ln_wage tenure, absorb(fe1=idcode fe2=year##c.age) residuals(res)}{p_end}
+{phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)}{p_end}
+{phang2}{cmd:. fereg ln_wage age i.race c.age#c.age, absorb(idcode year) vce(cluster idcode year)}{p_end}
+{phang2}{cmd:. fereg ln_wage tenure, absorb(fe1=idcode fe2=year##c.age) residuals(res)}{p_end}
 {phang2}{cmd:. predict double dhat, d}{p_end}
-{phang2}{cmd:. regfast ln_wage tenure [aw=hours], absorb(idcode ind_code#year) threads(8)}{p_end}
+{phang2}{cmd:. fereg ln_wage tenure [aw=hours], absorb(idcode ind_code#year) threads(8)}{p_end}
 
 
 {marker results}{...}
 {title:Stored results}
 
 {pstd}
-{cmd:regfast} stores the following in {cmd:e()}:
+{cmd:fereg} stores the following in {cmd:e()}:
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Scalars}{p_end}
@@ -295,7 +295,7 @@ Typing {cmd:regfast} without arguments replays the results.
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
-{synopt:{cmd:e(cmd)}}{cmd:regfast}{p_end}
+{synopt:{cmd:e(cmd)}}{cmd:fereg}{p_end}
 {synopt:{cmd:e(cmdline)}}command as typed{p_end}
 {synopt:{cmd:e(model)}}{cmd:ols}{p_end}
 {synopt:{cmd:e(depvar)}}name of the dependent variable{p_end}
@@ -313,7 +313,7 @@ Typing {cmd:regfast} without arguments replays the results.
 {synopt:{cmd:e(wtype)}}weight type{p_end}
 {synopt:{cmd:e(wexp)}}weight expression{p_end}
 {synopt:{cmd:e(resid)}}name of the residuals variable{p_end}
-{synopt:{cmd:e(predict)}}{cmd:regfast_p}{p_end}
+{synopt:{cmd:e(predict)}}{cmd:fereg_p}{p_end}
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(properties)}}{cmd:b V}{p_end}
@@ -333,10 +333,10 @@ Typing {cmd:regfast} without arguments replays the results.
 {title:Author}
 
 {pstd}Leo Liu{break}
-{browse "https://github.com/leoliu0/regfast":github.com/leoliu0/regfast}{p_end}
+{browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}
-{cmd:regfast} reproduces the conventions of {cmd:reghdfe} by Sergio Correia; its header and footnote displays are
+{cmd:fereg} reproduces the conventions of {cmd:reghdfe} by Sergio Correia; its header and footnote displays are
 adapted from {cmd:reghdfe} (MIT license). Please cite reghdfe when reporting results:{p_end}
 
 {phang}Correia, S. 2016. Linear Models with High-Dimensional Fixed Effects: An Efficient and Feasible Estimator.

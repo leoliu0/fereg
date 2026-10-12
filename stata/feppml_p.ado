@@ -1,7 +1,7 @@
-*! version 0.1.0  ppmlfast: predict (port of ppmlhdfe_p.ado of ppmlhdfe 2.3.3, MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
-program define ppmlfast_p
+*! version 0.2.0  feppml: predict (port of ppmlhdfe_p.ado of ppmlhdfe 2.3.3, MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
+program define feppml_p
 	version 16
-	_assert "`e(cmd)'" == "ppmlfast"
+	_assert "`e(cmd)'" == "feppml"
 	_assert "`e(depvar)'" != ""
 
 	* Intercept -scores- (margins sends var* wildcards)
@@ -33,7 +33,7 @@ program define ppmlfast_p
 
 	* Every option except -xb- needs the sum of fixed effects
 	if ("`opt'" != "xb") & ("`e(absvars)'" != "_cons") {
-		_assert `"`e(d)'"' != "", msg("predict `opt' requires the -d- option of ppmlfast")
+		_assert `"`e(d)'"' != "", msg("predict `opt' requires the -d- option of feppml")
 		conf double var `e(d)', exact
 	}
 
