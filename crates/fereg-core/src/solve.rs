@@ -10,13 +10,16 @@
 
 use std::time::Instant;
 
-use crate::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts};
+use rayon::prelude::*;
+
+use crate::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts, fe1_index};
 use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
 use crate::operator::{JointCells, Ops, Rhs, Scratch, SegAgg, WeightState, weight_state};
 use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
-use crate::precond::{BlockPrecond, Joint, Precond, approx_chol::ApproxChol, dense::Dense, jacobi, sparse_chol::SparseChol};
+use crate::precond::dense::{self, Dense, SmallWork};
+use crate::precond::{BlockPrecond, Joint, Precond, approx_chol::ApproxChol, jacobi, sparse_chol::SparseChol};
 use crate::session::Term;
 use crate::slopes::SlopeSolver;
 use crate::structure::{self, Structure};
@@ -108,6 +111,9 @@ const C_CELL_CACHED: f64 = 6e-10;
 const CACHE_BYTES: usize = 32 << 20;
 const C_SMALL_ASM: f64 = 8e-10;
 const DEFER_ITERS: f64 = 8.0;
+/// Sparse small-factor path: assembly of the dense S_SS, scan and CSR extraction, per entry
+/// of S_SS (0.058 s at m_s = 4067).
+const C_SCAN: f64 = 3.5e-9;
 
 /// Structural statistics of the joint factor (weight independent), filled stage by stage.
 #[derive(Clone, Copy, Debug, Default)]
@@ -177,10 +183,95 @@ fn jacobi_iter_cost(st: &Structure, r: usize) -> f64 {
     c * (st.ncells * (st.nb + r)) as f64 + C_COORD * (st.m * r) as f64
 }
 
-/// Cost of assembling (unless the weight pass already did) and factoring the dense small block.
-fn small_build_cost(st: &Structure, ws: &WeightState) -> f64 {
+/// Cost of assembling (unless the weight pass already did) and factoring the small block.
+/// `known`: the representation of an earlier factorization of this structure ([`Dense::work`];
+/// it does not change with the weights). Without one, a sparse factor is expected when Σ_s d_s²
+/// bounds the nonzeros of S_SS below [`dense::SPARSE_DENSITY`].
+fn small_build_cost(st: &Structure, ws: &WeightState, known: Option<SmallWork>) -> f64 {
     let asm = if ws.small_s.is_some() { 0.0 } else { C_SMALL_ASM * st.small_work as f64 };
-    asm + C_FLOP * (st.m_small as f64).powi(3) / 3.0
+    let ms = st.m_small as f64;
+    let sparse_expected = (st.small_work as f64) <= dense::SPARSE_DENSITY * ms * ms;
+    let factor = match known {
+        Some(SmallWork::Sparse { flops, entries }) => C_SCAN * ms * ms + C_FLOP * flops + C_ENTRY * entries as f64,
+        Some(SmallWork::Dense) => C_FLOP * ms.powi(3) / 3.0,
+        None if sparse_expected => C_SCAN * ms * ms,
+        None => C_FLOP * ms.powi(3) / 3.0,
+    };
+    asm + factor
+}
+
+/// One application of the small factor to `r` columns. Dense: two triangular solves, measured
+/// at 1-16 threads (m_s 512-4096) as m_s²·(1.5e-10 + 3.5e-11·r) (matrix traffic, then flops per
+/// column); sparse: the factor entries are streamed twice per column.
+fn small_apply_cost(st: &Structure, work: SmallWork, r: usize) -> f64 {
+    match work {
+        SmallWork::Dense => {
+            let ms = st.m_small as f64;
+            ms * ms * (1.5e-10 + 3.5e-11 * r as f64)
+        }
+        SmallWork::Sparse { entries, .. } => C_SOLVE * (entries * r) as f64,
+    }
+}
+
+/// A stale small factor is always refactored once the weights moved by more than this ratio
+/// range since its factorization (e.g. the switch to and from the ReLU separation weights,
+/// 1 vs ~7e7): PCG would need on the order of √(ratio) iterations, more than any observed count
+/// predicts. Gradual IRLS changes stay far below it between refactorizations.
+const MAX_SMALL_DRIFT: f64 = 1e6;
+
+/// max_i(b_i / a_i) / min_i(b_i / a_i) over the rows (`None` = all ones).
+fn ratio_range(a: Option<&[f64]>, b: Option<&[f64]>, pool: &Pool) -> f64 {
+    let n = a.or(b).map_or(0, <[f64]>::len);
+    if n == 0 {
+        return 1.0;
+    }
+    let (lo, hi) = pool.install(|| {
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let q = b.map_or(1.0, |b| b[i]) / a.map_or(1.0, |a| a[i]);
+                (q, q)
+            })
+            .reduce(|| (f64::INFINITY, 0.0), |x, y| (x.0.min(y.0), x.1.max(y.1)))
+    });
+    hi / lo
+}
+
+/// Small-block factor iteration counts, for the stale-factor decision after weight changes.
+#[derive(Clone, Copy, Debug, Default)]
+struct SmallIters {
+    /// Iterations of the last solve that started with a factor for its own weights.
+    fresh: Option<usize>,
+    /// Iterations of the last two solves with a stale factor (weights changed since
+    /// factorization), most recent first.
+    stale: Option<usize>,
+    stale_prev: Option<usize>,
+}
+
+impl SmallIters {
+    /// Extra iterations the next solve with the stale factor is expected to cost: the last
+    /// stale count, extrapolated linearly from the one before (the factor drifts further from
+    /// the weights with every change), minus the fresh count; [`cg::WINDOW`] before any stale
+    /// solve.
+    fn stale_extra(&self) -> usize {
+        let Some(s) = self.stale else { return cg::WINDOW };
+        let next = match self.stale_prev {
+            Some(p) => (2 * s).saturating_sub(p).max(s),
+            None => s,
+        };
+        next.saturating_sub(self.fresh.unwrap_or(0))
+    }
+
+    fn record_stale(&mut self, iterations: usize) {
+        self.stale_prev = self.stale;
+        self.stale = Some(iterations);
+    }
+
+    /// A new factor: its staleness is learned again.
+    fn reset_stale(&mut self) {
+        self.stale = None;
+        self.stale_prev = None;
+    }
 }
 
 /// The dense factor of the small super-block for the current weights.
@@ -230,10 +321,22 @@ pub fn build(
 
 pub struct FeSolver {
     st: Structure,
+    /// FE1 of the FE normalization ([`fe1_index`]); the solver may eliminate another term.
+    norm_fe1: Option<usize>,
     ws: WeightState,
     pre: Precond,
-    /// `pre.small` / `pre.inv_diag` match the current weights.
+    /// `pre.inv_diag` matches the current weights.
     basic_fresh: bool,
+    /// `pre.small` (when set) was factored for the current weights. After a weight change the
+    /// old factor is kept as a preconditioner while that is cheaper than refactoring (see
+    /// [`FeSolver::refresh_small`]).
+    small_fresh: bool,
+    small_iters: SmallIters,
+    /// [`Dense::work`] of the last small factor built by this solver.
+    small_work: Option<SmallWork>,
+    /// Bound on max_i(w_i / w_i at factorization) / min_i(same) for the small factor: the
+    /// product of the per-change ratio ranges since it was built.
+    small_drift: f64,
     /// The large blocks were escalated (once per solver).
     escalated: bool,
     /// Escalated (block or joint) factors match the current weights.
@@ -298,10 +401,15 @@ impl FeSolver {
             ));
         }
         Ok(FeSolver {
+            norm_fe1: fe1_index(terms),
             pre: Precond { small: None, inv_diag: Vec::new(), large: (0..nl).map(|_| BlockPrecond::Jacobi).collect(), joint: None },
             st,
             ws,
             basic_fresh: false,
+            small_fresh: false,
+            small_iters: SmallIters::default(),
+            small_work: None,
+            small_drift: 1.0,
             escalated: false,
             large_fresh: true,
             base_iters: None,
@@ -341,30 +449,59 @@ impl FeSolver {
     }
 
     /// Current inverse diagonal, and the dense small factor unless `defer_small` (it is then
-    /// built at a PCG probe if the iterations turn out dearer, see [`System::probe`]).
+    /// built at a PCG probe if the iterations turn out dearer, see [`System::probe`]). A stale
+    /// small factor kept by [`FeSolver::refresh_small`] is used as is.
     fn ensure_basic(&mut self, defer_small: bool, pool: &Pool) -> Result<(), RfError> {
         if !self.basic_fresh {
             self.pre.inv_diag = jacobi::inverse_diagonal(&self.ws.diag, &self.ws.redundant);
-            self.pre.small = None;
             self.basic_fresh = true;
         }
         if !defer_small && self.pre.small.is_none() && self.st.m_small > 0 {
-            self.pre.small = Some(small_factor(&Ops { st: &self.st, ws: &self.ws }, pool)?);
+            let d = small_factor(&Ops { st: &self.st, ws: &self.ws }, pool)?;
+            self.small_work = Some(d.work());
+            self.pre.small = Some(d);
+            self.small_fresh = true;
+            self.small_drift = 1.0;
         }
         Ok(())
     }
 
+    /// After a weight change, keeps the dense small factor of earlier weights as the small-block
+    /// preconditioner (PCG then needs a few more iterations instead of being exact) unless
+    /// refactoring costs less than the extra iterations it is expected to save
+    /// ([`SmallIters::stale_extra`]), or the factored coordinates changed. Dropping it makes
+    /// [`FeSolver::ensure_basic`] (or the deferral) build a fresh one.
+    fn refresh_small(&mut self, r: usize, ctx: &Ctx) {
+        let Some(d) = &self.pre.small else { return };
+        if self.small_fresh {
+            return;
+        }
+        let (st, ws) = (&self.st, &self.ws);
+        let same_coords = d.keep().iter().copied().eq((0..st.m_small).filter(|&i| !ws.redundant[i] && ws.diag[i] > 0.0).map(|i| i as u32));
+        let build = small_build_cost(st, ws, Some(d.work()));
+        let stale = self.small_iters.stale_extra() as f64 * (jacobi_iter_cost(st, r) + small_apply_cost(st, d.work(), r));
+        if ctx.verbose >= 2 {
+            ctx.log(&format!("fereg: stale small factor: refactor est {build:.4}s vs extra pcg est {stale:.4}s"));
+        }
+        if !same_coords || build <= stale || self.small_drift > MAX_SMALL_DRIFT {
+            // The new factor starts a new cycle: its staleness is re-learned from the next
+            // stale solve (weights drift less as IRLS converges).
+            self.pre.small = None;
+            self.small_iters.reset_stale();
+        }
+    }
+
     /// Whether this solve starts with Jacobi on the small block instead of its dense factor:
-    /// every block is small (no large-block escalation or joint factor involved), the factor is
-    /// not built yet for these weights, no earlier deferral of this solver had to build it, and
+    /// every block is small (no large-block escalation or joint factor involved), no factor (not
+    /// even a stale one) is available, no earlier deferral of this solver had to build it, and
     /// it costs more than [`DEFER_ITERS`] iterations.
     fn defer_small(&self, r: usize) -> bool {
         let st = &self.st;
         st.m_small > 0
             && !st.has_large()
             && !self.small_upfront
-            && !(self.basic_fresh && self.pre.small.is_some())
-            && small_build_cost(st, &self.ws) > DEFER_ITERS * jacobi_iter_cost(st, r)
+            && self.pre.small.is_none()
+            && small_build_cost(st, &self.ws, self.small_work) > DEFER_ITERS * jacobi_iter_cost(st, r)
     }
 
     fn refresh_large(&mut self, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
@@ -673,6 +810,10 @@ struct System<'a> {
     small_deferred: bool,
     /// The deferred small factor was built during this solve (a restart, not an escalation).
     small_built: bool,
+    /// `pre.small` matches the current weights (a stale factor is a preconditioner, not S⁻¹).
+    small_fresh: bool,
+    /// [`Dense::work`] of an earlier small factor of this solver, for the build-cost estimate.
+    small_known: Option<SmallWork>,
 }
 
 impl CgSystem for System<'_> {
@@ -689,7 +830,7 @@ impl CgSystem for System<'_> {
         // M = S on the whole reduced space: a current joint factor, every block in the dense
         // small super-block, or the only block is large with a current exact sparse factor.
         (self.large_fresh && self.pre.joint.is_some())
-            || (self.pre.joint.is_none() && st.m_small == st.m && self.pre.small.is_some())
+            || (self.pre.joint.is_none() && st.m_small == st.m && self.pre.small.is_some() && self.small_fresh)
             || (st.nb == 1 && self.large_fresh && matches!(self.pre.large.first(), Some(BlockPrecond::SparseChol { .. })))
     }
 
@@ -698,7 +839,7 @@ impl CgSystem for System<'_> {
             // Build the dense small factor when the projected Jacobi iterations cost more; the
             // restart from the current iterate is then exact.
             let st = self.ops.st;
-            let (iters, build) = (p.remaining * jacobi_iter_cost(st, self.w), small_build_cost(st, self.ops.ws));
+            let (iters, build) = (p.remaining * jacobi_iter_cost(st, self.w), small_build_cost(st, self.ops.ws, self.small_known));
             if ctx.verbose >= 2 {
                 ctx.log(&format!(
                     "fereg: deferred small block at k={} (rho={:.3}, remaining={:.0}): pcg est {iters:.4}s vs factor est {build:.4}s",
@@ -709,11 +850,14 @@ impl CgSystem for System<'_> {
                 self.pre.small = Some(small_factor(&self.ops, pool)?);
                 self.small_deferred = false;
                 self.small_built = true;
+                self.small_fresh = true;
                 return Ok(Some(true));
             }
             return Ok(Some(false));
         }
-        if self.pre.joint.is_some() || !joint_allowed(self.cfg, self.joint) {
+        // Every block small: the small factor already covers all of S (a stale one is still the
+        // cheaper preconditioner), so there is no joint factor to build.
+        if self.pre.joint.is_some() || !joint_allowed(self.cfg, self.joint) || !self.ops.st.has_large() {
             return Ok(None);
         }
         let st = self.ops.st;
@@ -769,10 +913,14 @@ impl Absorber for FeSolver {
         }
         ctx.check()?;
         let mut t = Instant::now();
+        if self.pre.small.is_some() {
+            self.small_drift *= ratio_range(self.ws.w_rows.as_deref(), w.as_deref(), pool);
+        }
         self.ws = weight_state(&self.st, w, pool)?;
         log_phase(ctx, &mut t, "set_weights");
         self.joint.agg = None;
         self.basic_fresh = false;
+        self.small_fresh = false;
         if self.escalated || self.pre.joint.is_some() {
             self.large_fresh = false;
         }
@@ -828,6 +976,9 @@ impl Absorber for FeSolver {
                 joint_now = true;
             }
         }
+        if self.pre.joint.is_none() {
+            self.refresh_small(r, ctx);
+        }
         let defer = self.pre.joint.is_none() && self.defer_small(r);
         if self.pre.joint.is_none() {
             self.ensure_basic(defer, pool)?;
@@ -835,7 +986,7 @@ impl Absorber for FeSolver {
         if defer && ctx.verbose >= 2 {
             ctx.log(&format!(
                 "fereg: small block deferred: factor est {:.4}s vs pcg iteration est {:.5}s",
-                small_build_cost(&self.st, &self.ws),
+                small_build_cost(&self.st, &self.ws, self.small_work),
                 jacobi_iter_cost(&self.st, r)
             ));
         }
@@ -870,6 +1021,7 @@ impl Absorber for FeSolver {
         let mut exact = true;
         if m > 0 {
             let can_escalate = !self.escalated && self.st.has_large() && self.pre.joint.is_none();
+            let small_fresh = self.small_fresh;
             let mut sys = System {
                 ops: Ops { st: &self.st, ws: &self.ws },
                 pre: &mut self.pre,
@@ -882,6 +1034,8 @@ impl Absorber for FeSolver {
                 joint_built: false,
                 small_deferred: defer,
                 small_built: false,
+                small_fresh,
+                small_known: self.small_work,
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
@@ -891,6 +1045,19 @@ impl Absorber for FeSolver {
             // (deferral requires that there are no large blocks).
             let escalated_large = out.escalated && !sys.small_built;
             self.small_upfront |= sys.small_built;
+            if sys.small_built {
+                self.small_fresh = true;
+                self.small_drift = 1.0;
+                self.small_work = sys.pre.small.as_ref().map(Dense::work);
+            } else if sys.pre.joint.is_none() && sys.pre.small.is_some() {
+                // Iteration counts with the small factor, for the stale-factor decision (solves
+                // that built it at a probe also ran Jacobi iterations and are not recorded).
+                if small_fresh {
+                    self.small_iters.fresh = Some(iterations);
+                } else {
+                    self.small_iters.record_stale(iterations);
+                }
+            }
             if joint_built {
                 joint_now = true;
                 self.large_fresh = true;
@@ -941,18 +1108,26 @@ impl Absorber for FeSolver {
     fn term_values(&self, c: &FeCoefs, col: usize) -> Vec<Vec<f64>> {
         let v = c.col(col);
         let st = &self.st;
-        let Some(fe1) = st.fe1 else { return Vec::new() };
+        let (Some(elim), Some(norm)) = (st.fe1, self.norm_fe1) else { return Vec::new() };
         let nterms = st.blocks.len() + 1;
         let mut out: Vec<Vec<f64>> = vec![Vec::new(); nterms];
-        let mut alpha = v[st.m..].to_vec();
+        // Level weights of every term: n1 for the eliminated one, n_r for the blocks.
+        let mut lw: Vec<&[f64]> = vec![&[]; nterms];
+        out[elim] = v[st.m..].to_vec();
+        lw[elim] = &self.ws.n1;
         for blk in &st.blocks {
-            let mut vals = v[blk.off..blk.off + blk.g].to_vec();
-            let mean: f64 = vals.iter().zip(&self.ws.nr[blk.off..blk.off + blk.g]).map(|(a, w)| a * w).sum::<f64>() / self.ws.sw;
-            vals.iter_mut().for_each(|a| *a -= mean);
-            alpha.iter_mut().for_each(|a| *a += mean);
-            out[blk.term] = vals;
+            out[blk.term] = v[blk.off..blk.off + blk.g].to_vec();
+            lw[blk.term] = &self.ws.nr[blk.off..blk.off + blk.g];
         }
-        out[fe1] = alpha;
+        // Normalization: every term but FE1 (`fe1_index`, not necessarily the eliminated term)
+        // has weighted mean 0; FE1 absorbs the shifts.
+        let mut shift = 0.0;
+        for t in (0..nterms).filter(|&t| t != norm) {
+            let mean: f64 = out[t].iter().zip(lw[t]).map(|(a, w)| a * w).sum::<f64>() / self.ws.sw;
+            out[t].iter_mut().for_each(|a| *a -= mean);
+            shift += mean;
+        }
+        out[norm].iter_mut().for_each(|a| *a += shift);
         out
     }
 }

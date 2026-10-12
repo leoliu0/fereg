@@ -165,6 +165,19 @@ fn difficult(nindiv: usize, nyear: usize, nfirm: usize, weighted: bool) -> Data 
     Data { factors: vec![indiv, year, firm], terms: vec![vec![0], vec![1], vec![2]], w, seed: 13 }
 }
 
+/// Three terms of comparable size, densely coupled at random (so the FE values are unique up
+/// to the normalization), where y levels meet few z levels: y is eliminated (least assembly
+/// work), not x, the first of the largest, which stays FE1 of the normalization.
+fn comparable(weighted: bool) -> Data {
+    let n = 4000usize;
+    let mut rng = SplitMix64::new(29);
+    let x: Vec<f64> = random_codes(n, 100, &mut rng);
+    let y: Vec<f64> = random_codes(n, 100, &mut rng);
+    let z: Vec<f64> = y.iter().map(|&v| ((v as u64 + rng.next_u64() % 3) % 80) as f64).collect();
+    let w = weighted.then(|| (0..n).map(|_| 0.5 + rng.next_f64()).collect());
+    Data { factors: vec![x, y, z], terms: vec![vec![0], vec![1], vec![2]], w, seed: 31 }
+}
+
 fn limit(small_limit: usize) -> SolverConfig {
     SolverConfig { small_limit, ..SolverConfig::default() }
 }
@@ -367,6 +380,9 @@ fn set_weights_with_warm_start() {
         // Joint factor: refreshed numerically after set_weights (cost model) or kept stale.
         (coupled(43), limit(10)),
         (coupled(44), SolverConfig { joint: JointPolicy::Always, ..limit(10) }),
+        // Every block small with a sparse S_SS (sparse small factor), kept stale after
+        // set_weights while that is cheaper than refactoring.
+        (bipartite(3000, &[1000, 600], false, 45), SolverConfig::default()),
     ];
     for (d, cfg) in designs {
         let mut p = setup(&d, cfg, 2);
@@ -403,6 +419,9 @@ fn fit_rows_and_term_values_parity() {
         (bipartite(2000, &[150, 30], false, 21), all_large()),
         (bipartite(3000, &[120, 10, 40], false, 22), SolverConfig::default()),
         (bipartite(3000, &[120, 10, 40], true, 23), all_large()),
+        // The solver eliminates another term than FE1 of the normalization.
+        (comparable(true), SolverConfig::default()),
+        (comparable(false), all_large()),
     ];
     for (d, cfg) in designs {
         let mut p = setup(&d, cfg, 2);
@@ -478,4 +497,14 @@ fn maxiter_is_enforced() {
         assert_eq!(p.fast.residualize(&mut rows, 1, &o, None, pool, &ctx).unwrap_err(), RfError::Convergence(5));
     })
     .unwrap();
+}
+
+/// The `comparable` design does exercise an eliminated term other than FE1 (`fe1_index`).
+#[test]
+fn comparable_design_eliminates_another_term() {
+    for weighted in [false, true] {
+        let p = setup(&comparable(weighted), SolverConfig::default(), 1);
+        assert_eq!(p.fast.structure().fe1, Some(1));
+        assert_eq!(fereg_core::absorber::fe1_index(p.dense.terms()), Some(0));
+    }
 }

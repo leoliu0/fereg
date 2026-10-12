@@ -246,14 +246,16 @@ pub enum GlmConvention {
     #[default]
     Ppmlhdfe,
     /// fixest / pyfixest: the VCE is the session's as requested; fixest's starting values
-    /// (Poisson μ = y + 0.1, logit μ = (w·y + 1/2)/(w + 1)), so `guess` is ignored; stop when
-    /// |Δdev| / (0.1 + |dev|) < `tol` (fixest `glm.tol`, deviance on the original scale) in an
-    /// iteration without step halving whose FE solve was exact or ran at the final inner
-    /// tolerance max(min(`itol`, `tol`/10), 1e-12); the inner tolerance follows eps^{3/2} (eps = relative
-    /// deviance change) instead of ppmlhdfe's schedule. `maxiter` is the IRLS cap (fixest
-    /// `glm.iter`, 25); reaching it is a note in [`EstResult::notes`] with
-    /// [`GlmParts::converged`] = false (scalar `converged` = 0), not an error. Iteration logs are
-    /// not printed (SMCL text). Separation checks run only as set in [`GlmOptions::separation`].
+    /// (Poisson μ = y + 0.1, logit μ = (w·y + 1/2)/(w + 1)), so `guess` is ignored; fixest's step
+    /// halving for both families (the first iteration compares with the deviance of η = 1e-5 and
+    /// halves toward it at most twice); stop when |Δdev| / (0.1 + |dev|) < `tol` (fixest
+    /// `glm.tol`, deviance on the original scale) in an iteration without step halving whose FE
+    /// solve was exact or ran at the final inner tolerance max(min(`itol`, `tol`/10), 1e-12); the
+    /// inner tolerance follows eps^{3/2} (eps = relative deviance change) instead of ppmlhdfe's
+    /// schedule. `maxiter` is the IRLS cap (fixest `glm.iter`, 25); reaching it is a note in
+    /// [`EstResult::notes`] with [`GlmParts::converged`] = false (scalar `converged` = 0), not an
+    /// error. Iteration logs are not printed (SMCL text). Separation checks run only as set in
+    /// [`GlmOptions::separation`].
     Fixest,
 }
 
@@ -297,6 +299,20 @@ pub struct GlmParts {
     /// IRLS iterations.
     pub iterations: usize,
     pub converged: bool,
+}
+
+/// Result of [`crate::Session::glm_separation`] (ppmlhdfe `tagsep()` / `zvarname()`): the ReLU
+/// separation check on the current sample, without estimation. Vectors are in kept order over
+/// the session sample at the call (the session itself is not changed).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeparationCheck {
+    pub separated: Vec<bool>,
+    /// Certificate of separation: positive on separated observations, 0 elsewhere.
+    pub certificate: Vec<f64>,
+    pub num_separated: usize,
+    /// False when the check stopped without certifying its result.
+    pub complete: bool,
+    pub iterations: usize,
 }
 
 /// A named dense matrix (row-major).
