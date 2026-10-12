@@ -186,11 +186,7 @@ fn update_mu_deviance(fam: Family, d: &GlmData, eta: &[f64], sep: &[bool], lny: 
                 for (k, m) in mc.iter_mut().enumerate() {
                     let i = base + k;
                     let yi = y[i];
-                    *m = if sep[i] {
-                        if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN }
-                    } else {
-                        family::mean(fam, eta[i])
-                    };
+                    *m = if sep[i] { if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN } } else { family::mean(fam, eta[i]) };
                     let w = tw.map_or(1.0, |t| t[i]);
                     acc += match fam {
                         Family::Logit => -w * family::logit_ll(yi, eta[i]),
@@ -243,6 +239,19 @@ pub(crate) fn irls(
     let mut resid = par::alloc_vec(n, 0.0)?;
     let lny = ln_y(fam, &d.y, pool)?;
     let ztol = c.tol.min(1e-12);
+    // fixest: the deviance before the first iteration is that of η = 1e-5 without the offset,
+    // and the first step halves toward fitted values 1e-5 (plus the offset); on the
+    // standardized scale η shifts by −ln sd_y.
+    let (dev0, anchor) = if c.fixest {
+        let shift = 1e-5 - c.sd_y.ln();
+        let mut scratch = vec![0.0; n];
+        let flat = vec![shift; n];
+        let dev0 = update_mu_deviance(fam, d, &flat, &sep, &lny, &mut scratch, pool);
+        let anchor: Vec<f64> = (0..n).map(|i| shift + d.off.as_deref().map_or(0.0, |o| o[i])).collect();
+        (dev0, anchor)
+    } else {
+        (f64::NAN, Vec::new())
+    };
     let mut iter = 0usize;
     loop {
         iter += 1;
@@ -260,24 +269,22 @@ pub(crate) fn irls(
         let tw = d.tw.as_deref();
         let off = d.off.as_deref();
         pool.install(|| {
-            block.par_chunks_mut(CHUNK * r).zip(w.par_chunks_mut(CHUNK).zip(z.par_chunks_mut(CHUNK))).enumerate().for_each(
-                |(c, (bc, (wc, zc)))| {
-                    let base = c * CHUNK;
-                    for (j, ((row, wi), zi)) in bc.chunks_exact_mut(r).zip(wc.iter_mut()).zip(zc.iter_mut()).enumerate() {
-                        let i = base + j;
-                        *wi = tw.map_or(1.0, |t| t[i]) * family::irls_weight(fam, mu[i]);
-                        let e = eta[i] - off.map_or(0.0, |o| o[i]);
-                        *zi = family::working(fam, e, d.y[i], mu[i]);
-                        row[0] = *zi;
-                        row[1..].copy_from_slice(&d.x[i * k..(i + 1) * k]);
-                        for v in row.iter_mut() {
-                            if v.abs() <= ztol {
-                                *v = 0.0;
-                            }
+            block.par_chunks_mut(CHUNK * r).zip(w.par_chunks_mut(CHUNK).zip(z.par_chunks_mut(CHUNK))).enumerate().for_each(|(c, (bc, (wc, zc)))| {
+                let base = c * CHUNK;
+                for (j, ((row, wi), zi)) in bc.chunks_exact_mut(r).zip(wc.iter_mut()).zip(zc.iter_mut()).enumerate() {
+                    let i = base + j;
+                    *wi = tw.map_or(1.0, |t| t[i]) * family::irls_weight(fam, mu[i]);
+                    let e = eta[i] - off.map_or(0.0, |o| o[i]);
+                    *zi = family::working(fam, e, d.y[i], mu[i]);
+                    row[0] = *zi;
+                    row[1..].copy_from_slice(&d.x[i * k..(i + 1) * k]);
+                    for v in row.iter_mut() {
+                        if v.abs() <= ztol {
+                            *v = 0.0;
                         }
                     }
-                },
-            )
+                }
+            })
         });
         abs.set_weights(Some(w.clone()), pool, ctx)?;
 
@@ -327,10 +334,29 @@ pub(crate) fn irls(
             n_sep = sep.iter().filter(|s| **s).count();
         }
         // (f) μ, deviance.
-        let old_dev = dev;
+        let old_dev = if c.fixest && iter == 1 { dev0 } else { dev };
+        if c.fixest && iter == 1 {
+            old_eta.copy_from_slice(&anchor);
+        }
         dev = update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool);
         let mut halved = false;
-        if fam == Family::Logit && iter > 1 {
+        if c.fixest {
+            // fixest step halving (both families): unless the deviance change is already below
+            // glm.tol, a non-finite or higher deviance halves the step toward the previous η
+            // until it is finite and not higher; in the first iteration at most twice when finite,
+            // otherwise at most glm.iter times.
+            let evol = |dev: f64| (dev - old_dev) * c.sd_y;
+            let small = |dev: f64| dev.is_finite() && (evol(dev).abs() < c.tol || evol(dev).abs() / (0.1 + (dev * c.sd_y).abs()) < c.tol);
+            if !small(dev) && (!dev.is_finite() || evol(dev) > 0.0) {
+                let mut h = 0;
+                while (!dev.is_finite() || evol(dev) > 0.0) && !(iter == 1 && dev.is_finite() && h >= 2) && h < c.maxiter {
+                    pool.install(|| eta.par_iter_mut().zip(old_eta.par_iter()).for_each(|(e, o)| *e = 0.5 * (*e + o)));
+                    dev = update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool);
+                    h += 1;
+                }
+                halved = true;
+            }
+        } else if fam == Family::Logit && iter > 1 {
             let mut h = 0;
             let worse = |dev: f64| dev.is_nan() || dev > old_dev + 1e-9 * old_dev.abs().max(1.0);
             while h < MAX_HALVINGS && worse(dev) {
@@ -344,9 +370,11 @@ pub(crate) fn irls(
         if !delta.is_nan() && dev < 0.1 * delta {
             delta = dev;
         }
-        if iter > 1 {
-            let denom = dev.min(old_dev).max(0.1);
-            eps = delta.abs() / denom;
+        if iter > 1 || c.fixest {
+            if iter > 1 {
+                let denom = dev.min(old_dev).max(0.1);
+                eps = delta.abs() / denom;
+            }
             let converged = if c.fixest {
                 // fixest: |dev − dev_old| / (0.1 + |dev|) on the original deviance scale; an
                 // iteration with step halving never converges (fixest sets dev_evol = Inf). The

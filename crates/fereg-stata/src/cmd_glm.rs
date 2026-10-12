@@ -7,9 +7,11 @@
 //! ppmlhdfe `itolerance()`, default 1e-9), `separation=<comma list of relu,simplex,mu>|none`
 //! (default `relu` for Poisson, `none` for logit; `fe` is a prepare key), `guess=simple|ols`,
 //! `log=0|1`, `offset=0|1`, `dof`. There is no residual output (`resid=` is rejected).
+//! `sepcheck=1` (Poisson; feppml `tagsep()`/`zvarname()`): the ReLU separation check only, no
+//! estimation; outputs `sep=<pos>` (1 separated, 0 not) and `zsep=<pos>` (certificate).
 //! See `PROTOCOL.md`.
 
-use fereg_core::{Family, GlmOptions, Guess, Layout, RfError, Separation, Spec};
+use fereg_core::{EstResult, Family, GlmOptions, Guess, Layout, RfError, Separation, Spec};
 
 use crate::args::{self, Args};
 use crate::{Phases, check_nvars, est, io, with_ctx};
@@ -55,6 +57,17 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
         log: a.flag("log", true)?,
     };
     let has_offset = a.flag("offset", false)?;
+    let sepcheck = a.flag("sepcheck", false)?;
+    let sep_out = args::parse_position(a.str_or("sep", "0"), k.nout, "sep")?;
+    let z_out = args::parse_position(a.str_or("zsep", "0"), k.nout, "zsep")?;
+    if sepcheck {
+        let o = &k.outputs;
+        if family != Family::Poisson || o.d.is_some() || o.groupvar.is_some() || !o.fe.is_empty() || !k.matrices.is_empty() {
+            return Err(RfError::InvalidInput("fereg plugin: sepcheck=1 needs family=poisson and allows only sep= and zsep= outputs".into()));
+        }
+    } else if sep_out.is_some() || z_out.is_some() {
+        return Err(RfError::InvalidInput("fereg plugin: sep= and zsep= need sepcheck=1".into()));
+    }
     let spec = Spec {
         dof: args::parse_dof(a.str_or("dof", "pairwise,clusters,continuous"))?,
         want_d: k.outputs.d.is_some(),
@@ -80,6 +93,25 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
             None
         };
         ph.mark(&format!("glm: read {} x {r}", stored.session.n()));
+        if sepcheck {
+            let chk = stored.session.glm_separation(rows, &lay, offset, &spec, &g, ctx)?;
+            ph.mark("glm: separation check");
+            let mut res = EstResult::default();
+            res.set_scalar("N", stored.session.n() as f64);
+            res.set_scalar("num_separated", chk.num_separated as f64);
+            res.set_scalar("separation_complete", f64::from(u8::from(chk.complete)));
+            res.set_scalar("relu_iterations", chk.iterations as f64);
+            io::store_scalars_macros(&res)?;
+            let kept = io::kept_obs(&stored.session, &stored.obs);
+            if let Some(p) = sep_out {
+                let v: Vec<f64> = chk.separated.iter().map(|&b| f64::from(u8::from(b))).collect();
+                io::store_kept((before_out + p) as i32, &kept, &v)?;
+            }
+            if let Some(p) = z_out {
+                io::store_kept((before_out + p) as i32, &kept, &chk.certificate)?;
+            }
+            return Ok(());
+        }
         let res = stored.session.glm(rows, &lay, offset, &spec, &g, ctx)?;
         ph.mark("glm: estimate");
         est::finish(&res, &k, &stored, before_out)?;

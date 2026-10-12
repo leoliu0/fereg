@@ -40,7 +40,9 @@ pub struct Block {
 pub struct Structure {
     /// Rows (kept observations).
     pub n: usize,
-    /// Session index of FE1 (`None` under `noabsorb`: one synthetic level).
+    /// Session index of the eliminated term, "FE1" of the solver ([`elimination_index`]; `None`
+    /// under `noabsorb`: one synthetic level). It need not be [`fe1_index`], the term that
+    /// absorbs the shifts of the FE normalization.
     pub fe1: Option<usize>,
     /// FE1 levels (segments).
     pub g1: usize,
@@ -171,13 +173,79 @@ fn bits_for(g: usize) -> u32 {
     if g <= 1 { 0 } else { usize::BITS - (g - 1).leading_zeros() }
 }
 
+/// Candidates for elimination have at least this share of the largest term's levels.
+const ELIM_CANDIDATE_SHARE: usize = 4;
+/// Assembly work per observation below which the default elimination is kept unexamined.
+const ELIM_CHEAP_PER_OBS: u64 = 64;
+
+/// The term eliminated exactly (the solver's FE1). With two or fewer terms, or one candidate,
+/// it is [`fe1_index`] (the most levels). With three or more terms, among the terms with at
+/// least 1/[`ELIM_CANDIDATE_SHARE`] of the largest G it is the one minimizing
+/// E = Σ_{other terms o} Σ_{levels s} d_{s,o}², d_{s,o} = distinct levels of o within level s:
+/// the assembly work of the reduced system, which also measures how densely its blocks are
+/// coupled. Measured on a 7.3M-row citation panel (stkcd#year 41k, lpid#year 121k,
+/// stkcd#lsid 151k levels): eliminating the largest term (E = 1.7e10) took 1665 PCG iterations
+/// (36 s), lpid#year (E = 1.7e9) 208 (3.5 s). On the usual panels (individual, firm, year) the
+/// largest term is the only candidate or its levels are small, so only a histogram is computed.
+pub fn elimination_index(terms: &[Term], pool: &Pool) -> Result<Option<usize>, RfError> {
+    let default = fe1_index(terms);
+    let Some(f0) = default else { return Ok(None) };
+    if terms.len() < 3 {
+        return Ok(default);
+    }
+    let cands: Vec<usize> = (0..terms.len()).filter(|&q| terms[q].g * ELIM_CANDIDATE_SHARE >= terms[f0].g).collect();
+    if cands.len() < 2 {
+        return Ok(default);
+    }
+    // E of the default is at most (Q − 1)·Σ_s n_s² (n_s: observations of level s): when that
+    // is already small the reduced system is cheap whatever the choice (individual-level
+    // panels), so the pair counts are skipped.
+    let mut size = vec![0u64; terms[f0].g];
+    for &c in &terms[f0].codes {
+        size[c as usize] += 1;
+    }
+    let bound = (terms.len() as u64 - 1) * size.iter().map(|n| n * n).sum::<u64>();
+    if bound <= ELIM_CHEAP_PER_OBS * terms[f0].codes.len() as u64 {
+        return Ok(default);
+    }
+    // d counts of every (candidate, other) pair: one sort of the distinct level pairs per
+    // unordered pair of terms gives both directions.
+    let q = terms.len();
+    let mut e = vec![0u64; q];
+    for a in 0..q {
+        for b in a + 1..q {
+            if !cands.contains(&a) && !cands.contains(&b) {
+                continue;
+            }
+            let (ta, tb) = (&terms[a], &terms[b]);
+            let mut keys = alloc_vec(ta.codes.len(), 0u64)?;
+            pool.install(|| {
+                keys.par_iter_mut()
+                    .zip(ta.codes.par_iter().zip(tb.codes.par_iter()))
+                    .for_each(|(k, (&x, &y))| *k = (u64::from(x) << 32) | u64::from(y));
+                keys.par_sort_unstable();
+            });
+            keys.dedup();
+            let (mut da, mut db) = (vec![0u64; ta.g], vec![0u64; tb.g]);
+            for &k in &keys {
+                da[(k >> 32) as usize] += 1;
+                db[(k & 0xFFFF_FFFF) as usize] += 1;
+            }
+            // da[s]: distinct levels of b within level s of a (and vice versa).
+            e[a] += da.iter().map(|d| d * d).sum::<u64>();
+            e[b] += db.iter().map(|d| d * d).sum::<u64>();
+        }
+    }
+    Ok(cands.iter().copied().min_by_key(|&f| (e[f], std::cmp::Reverse(terms[f].g), f)))
+}
+
 /// Builds the structure for intercept-only `terms` over `n` kept observations; small blocks
 /// jointly hold at most `small_limit` levels. Designs with slopes use [`crate::slopes`].
 pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Result<Structure, RfError> {
     if terms.iter().any(|t| !t.slopes.is_empty() || !t.intercept) {
         return Err(RfError::Internal("structure::build: slope terms belong to slopes::SlopeSolver".into()));
     }
-    let fe1 = fe1_index(terms);
+    let fe1 = elimination_index(terms, pool)?;
     let (g1, code1): (usize, Option<&[u32]>) = match fe1 {
         Some(f) => (terms[f].g, Some(&terms[f].codes)),
         None => (1, None),
@@ -915,7 +983,7 @@ mod tests {
 
     /// Checks `st` against the definitions with plain sorts.
     fn check(terms: &[Term], n: usize, small_limit: usize, st: &Structure) {
-        let fe1 = fe1_index(terms);
+        let fe1 = with_pool(1, |pool| elimination_index(terms, pool)).unwrap().unwrap();
         assert_eq!(st.fe1, fe1);
         let c1 = |o: usize| fe1.map_or(0, |f| terms[f].codes[o]);
         let bt: Vec<usize> = st.blocks.iter().map(|b| b.term).collect();
@@ -1079,6 +1147,37 @@ mod tests {
                 let got = with_pool(threads, |pool| scatter_by_code(c, *g, pool).unwrap()).unwrap();
                 assert_eq!(got, (off.clone(), ids.clone()));
             }
+        }
+    }
+
+    /// Three comparable terms with dense coupling: the eliminated term minimizes
+    /// E = Σ_o Σ_s d_{s,o}² (brute force), here not the default (first of the largest).
+    #[test]
+    fn elimination_minimizes_assembly_work() {
+        let n = 4000usize;
+        let x: Vec<u32> = (0..n).map(|i| (i / 40) as u32).collect();
+        let y: Vec<u32> = (0..n).map(|i| (i % 100) as u32).collect();
+        let z: Vec<u32> = (0..n).map(|i| ((i * 7) % 80) as u32).collect();
+        let terms = vec![term(x, 100), term(y, 100), term(z, 80)];
+        let e = |f: usize| -> u64 {
+            (0..3)
+                .filter(|&o| o != f)
+                .map(|o| {
+                    let mut sets = vec![std::collections::BTreeSet::new(); terms[f].g];
+                    for i in 0..n {
+                        sets[terms[f].codes[i] as usize].insert(terms[o].codes[i]);
+                    }
+                    sets.iter().map(|s| (s.len() * s.len()) as u64).sum::<u64>()
+                })
+                .sum()
+        };
+        let best = (0..3).min_by_key(|&f| e(f)).unwrap();
+        assert_ne!(Some(best), fe1_index(&terms));
+        for threads in [1, 4] {
+            let got = with_pool(threads, |pool| elimination_index(&terms, pool)).unwrap().unwrap();
+            assert_eq!(got, Some(best));
+            let st = with_pool(threads, |pool| build(&terms, n, 0, pool)).unwrap().unwrap();
+            check(&terms, n, 0, &st);
         }
     }
 }
