@@ -8,10 +8,13 @@ program define feppml, eclass
 		exit
 	}
 	local rf_display
+	local rf_tagsep 0
 	capture noisily _rf_glm poisson `0'
 	local rc = _rc
 	mata: st_local("rf_scalars", invtokens(st_dir("global", "numscalar", "__rf_*")'))
 	if (`"`rf_scalars'"' != "") scalar drop `rf_scalars'
 	if (`rc') exit `rc'
+	* tagsep(): separation check only, nothing estimated or posted (as ppmlhdfe)
+	if (`rf_tagsep') exit
 	_rf_glm_replay, `rf_display'
 end

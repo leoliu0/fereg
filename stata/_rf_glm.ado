@@ -27,7 +27,7 @@ program _rf_glm, eclass
 		noHEader noTABle noFOOTnote
 		TEChnique(string) TRAnsform(string) ACCELeration(string) POOLsize(string)
 		ABSORBER(string)
-		TAGSEP(string) ZVARname(string)
+		TAGSEP(name) ZVARname(name)
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -43,11 +43,19 @@ program _rf_glm, eclass
 		di as err `"option `options' not allowed"'
 		exit 198
 	}
-	foreach opt in tagsep zvarname {
-		if (`"``opt''"' != "") {
-			di as err "option `opt'() not supported by `cmd': the plugin does not report which observations the separation check dropped"
-			exit 198
-		}
+	* tagsep()/zvarname(): ppmlhdfe's options to identify the separated observations (no estimation)
+	local is_tagsep = ("`tagsep'" != "")
+	if ("`family'" == "logit" & "`tagsep'`zvarname'" != "") {
+		di as err "options tagsep() and zvarname() not allowed with felogit"
+		exit 198
+	}
+	if ("`zvarname'" != "" & !`is_tagsep') {
+		di as err "option zvarname() requires tagsep()"
+		exit 198
+	}
+	if (`is_tagsep' & "`tagsep'" == "`zvarname'") {
+		di as err "tagsep() and zvarname() must name different variables"
+		exit 198
 	}
 	if ("`noabsorb'" != "" & `"`absorb'"' != "") {
 		di as err "options absorb() and noabsorb are mutually exclusive"
@@ -123,6 +131,14 @@ program _rf_glm, eclass
 	if (`: list posof "relu" in separation' | `: list posof "simplex" in separation') local glmsep relu
 	if (`: list posof "mu" in separation') local glmsep = cond("`glmsep'" == "", "mu", "`glmsep',mu")
 	if ("`glmsep'" == "") local glmsep none
+	* tagsep(): as ppmlhdfe, separation() is overridden by relu alone (the fe rule is not applied;
+	* singletons are still dropped) and nothing is estimated
+	if (`is_tagsep') {
+		di as text "{bf: (identifying separated observations instead of running regressions)}"
+		local separation relu
+		local sep_fe 0
+		local glmsep relu
+	}
 
 	* d(): sum of the fixed effects
 	if ("`d2'" != "") {
@@ -375,6 +391,61 @@ program _rf_glm, eclass
 	local K_all = `nx' + 1
 
 // --------------------------------------------------------------------------
+// tagsep(): the ReLU separation check alone; tag the separated observations and exit (ppmlhdfe)
+// --------------------------------------------------------------------------
+	if (`is_tagsep') {
+		* As ppmlhdfe, an existing variable of that exact name is replaced, unless the model uses it
+		local usedvars `yvar' `xvars' `offvar' `facvars' `slopevars_r' `wvar' `depvar' `exposure' `offset'
+		foreach v in `tagsep' `zvarname' {
+			if (`: list v in usedvars') {
+				di as err "tagsep()/zvarname(): variable `v' is used by the model"
+				exit 198
+			}
+		}
+		novarabbrev capture drop `tagsep'
+		qui gen byte `tagsep' = .
+		local outvars `tagsep'
+		local zarg
+		if ("`zvarname'" != "") {
+			novarabbrev capture drop `zvarname'
+			qui gen double `zvarname' = .
+			local outvars `outvars' `zvarname'
+			local zarg `""zsep=2""'
+		}
+		local nout : word count `outvars'
+		local tolstr = strtrim(string(`tolerance', "%21.17g"))
+		local args `""token=`token'" "nx=`nx'" "nout=`nout'" "family=`family'" "tol=`tolstr'" "maxiter=`maxiterations'""'
+		if (`itolerance' > 0) local args `"`args' "itol=`=strtrim(string(`itolerance', "%21.17g"))'""'
+		local args `"`args' "separation=relu" "guess=`guess'" "log=`=("`log'" != "nolog")'" "offset=`=("`offvar'" != "")'""'
+		_rf_model cached `yvar' `xvars' : `modelvars'
+		local args `"`args' "sepcheck=1" "sep=1" `zarg' "cached=`rf_cached'""'
+		capture noisily _rf_load `yvar' `xvars' `offvar' `touse' `outvars', glm `args' `common'
+		if (_rc) {
+			local rc = _rc
+			capture drop `outvars'
+			exit `rc'
+		}
+		label variable `tagsep' "[feppml: ReLU] Obs. is separated"
+		format %1.0f `tagsep'
+		if ("`zvarname'" != "") {
+			mata: _rf_prettify_z("`zvarname'", "`touse'")
+			label variable `zvarname' "[feppml: ReLU] Certificate of separation"
+			format %10.2g `zvarname'
+		}
+		if (`verbose' > -1) {
+			local nsep = scalar(__rf_num_separated)
+			local nsep_s = strtrim(string(`nsep', "%20.0f"))
+			di as text "(tagged {res}`nsep_s'{txt} separated observation`=cond(`nsep' == 1, "", "s")' in {res}`tagsep'{txt}" ///
+				`"`=cond("`zvarname'" != "", "; certificate of separation in {res}`zvarname'{txt}", "")')"'
+			if (scalar(__rf_separation_complete) == 0) {
+				di as err "warning: the ReLU separation check stopped before certifying its result; more observations may be separated"
+			}
+		}
+		c_local rf_tagsep 1
+		exit
+	}
+
+// --------------------------------------------------------------------------
 // Output variables (pre-created; the plugin fills kept observations)
 // --------------------------------------------------------------------------
 	local outvars
@@ -593,4 +664,35 @@ program AddBN
 		local old `part'
 	}
 	c_local part `part'
+end
+
+
+mata:
+// ppmlhdfe's prettify_z(): rescale the certificate of separation by the mode of round(1e6 z) over
+// z > 0 (first of the most frequent values in ascending order), when the factor is in [0.01, 100]
+void _rf_prettify_z(string scalar zvar, string scalar touse)
+{
+	real colvector z, zz
+	real scalar i, j, n, best, nbest, f
+
+	st_view(z, ., zvar, touse)
+	zz = sort(round(1e6 :* select(z, z :> 0)), 1)
+	n = rows(zz)
+	if (!n) return
+	best = 1
+	nbest = 0
+	for (i = 1; i <= n; i = j + 1) {
+		j = i
+		while (j < n) {
+			if (zz[j + 1] != zz[i]) break
+			j++
+		}
+		if (j - i + 1 > nbest) {
+			nbest = j - i + 1
+			best = i
+		}
+	}
+	f = 1e6 / zz[best]
+	if (0.01 <= f & f <= 100) z[., .] = z :* f
+}
 end

@@ -238,9 +238,70 @@ estat ic
 assert mreldif(r(S), iR) < 1e-6
 estat vce
 rcof "noi estat bogus" == 321
-* tagsep() needs per-observation separation output from the plugin: a clear error for now
-rcof "noi feppml hours age, absorb(idcode) tagsep(sep)" == 198
 di as result "estat passed"
+
+* ---------------------------------------------------------------------------
+* tagsep()/zvarname() (ppmlhdfe's secret options): ReLU separation check only, nothing estimated
+* ---------------------------------------------------------------------------
+clear
+set seed 5
+set obs 20000
+gen long firm = ceil(runiform() * 2000)
+gen int year = 2000 + floor(runiform() * 10)
+gen double x1 = rnormal()
+gen long cnt = rpoisson(exp(0.3 * x1))
+replace cnt = 0 if mod(firm, 50) == 0           // all-zero firms: separated by the firm FE
+gen byte sepx = cnt == 0 & runiform() < 0.01     // separated through the regressor
+ppmlhdfe cnt x1 sepx, absorb(firm year) tagsep(sR) zvar(zR)
+feppml cnt x1 sepx, absorb(firm year) tagsep(sF) zvar(zF)
+assert "`e(cmd)'" == ""                          // nothing posted, as ppmlhdfe
+confirm byte variable sF
+confirm double variable zF
+assert "`: format sF'" == "%1.0f" & "`: format zF'" == "%10.2g"
+qui count if sF == 1
+assert r(N) > 400
+assert sF == sR
+assert (zF > 0) == (sF == 1) if !missing(sF)
+* certificates are not unique (feppml's is the group indicator on observations separated by a fixed
+* effect, then ReLU's certificate on the remaining sample): z is 0 where y > 0
+assert zF == 0 if cnt > 0 & !missing(sF)
+* rerun: existing variables are replaced; a name that abbreviates another variable drops nothing
+feppml cnt x1 sepx, absorb(firm year) tagsep(sF)
+feppml cnt x1 sepx, absorb(firm year) tagsep(f)
+confirm variable firm f
+assert f == sR
+rcof "noi feppml cnt x1, absorb(firm) zvar(z)" == 198
+rcof "noi feppml cnt x1, absorb(firm) tagsep(x1)" == 198
+rcof "noi felogit sepx x1, absorb(firm) tagsep(s2)" == 198
+
+* licensing firm panel of the field test (when available): the tagged observations are exactly the
+* 59 observations an exact LP finds separated
+capture confirm file "/home/leo/da/Dropbox/private/Licensing/fereg_tests/sep_repro.dta"
+if (!_rc) {
+	import delimited using "/home/leo/da/Dropbox/private/Licensing/fereg_tests/sep_repro_lp59.csv", ///
+		clear varnames(1) encoding(utf-8)
+	keep stkcd year
+	gen byte lp = 1
+	tempfile lp59
+	save `lp59'
+	use "/home/leo/da/Dropbox/private/Licensing/fereg_tests/sep_repro.dta", clear
+	merge 1:1 stkcd year using `lp59', assert(master match) nogenerate
+	replace lp = 0 if missing(lp)
+	feppml F1AfNpats_appl LlnAflNpats LlnAfNpats_appl Lsize Ltobinq Llev Lcash1 LARD Lmrd Lroa ///
+		Lvol_iret Lfage Lsoe, absorb(stkcd indcd#year) tagsep(sep) zvar(zsep)
+	qui count if sep == 1 & lp == 1
+	assert r(N) == 59
+	qui count if sep == 1 & lp == 0
+	local extra = r(N)
+	* the LP sample excludes the groups dropped by the fe rule, which tagsep (as ppmlhdfe) does not
+	* apply: every observation of an all-zero stkcd group must be tagged too
+	bys stkcd: egen double ysum = total(F1AfNpats_appl) if !missing(sep)
+	qui count if ysum == 0 & sep == 0
+	assert r(N) == 0
+	di as text "ok  sep_repro: 59 LP rows tagged, plus `extra' rows of the larger sample without the fe rule"
+}
+else di as text "(sep_repro.dta not found: skipped)"
+di as result "tagsep passed"
 
 * ---------------------------------------------------------------------------
 * simulated gravity panel (exporter#year, importer#year, pair FE; zeros separated by the pair FE)
