@@ -122,8 +122,11 @@ without certifying its result (no convergence; the `mu` rule then runs as a fall
 warning note is printed), else 1.
 
 `sepcheck=1` (Poisson only; feppml `tagsep()` / `zvarname()`, ppmlhdfe's secret options): runs
-the ReLU separation check on the prepared sample and stores nothing else; no estimation, no
+the separation check on the prepared sample and stores nothing else; no estimation, no
 matrices, touse unchanged, and only the outputs `sep=<pos>` (1 = separated, 0 = not, on the
 prepared sample) and `zsep=<pos>` (certificate of separation: positive on separated
-observations, 0 elsewhere) are allowed. Scalars: `N` (prepared sample), `num_separated`,
-`separation_complete`, `relu_iterations`.
+observations, 0 elsewhere) are allowed. The check is the `fe` rule (all-zero FE groups,
+iterated with singleton removal; only when prepare ran with `sep=none`; its
+rows get certificate 1) and ReLU rounds repeated on the remaining sample until one finds
+nothing. Scalars: `N` (prepared sample), `num_separated`, `separation_complete`,
+`relu_iterations` (summed over the rounds).

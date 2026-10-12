@@ -6,7 +6,9 @@
 //! and the fixed effects, until the prediction is non-negative on the boundary sample.
 //! Deviation: ppmlhdfe aborts after 100 iterations and keeps every observation; here the
 //! iteration continues while it makes progress (see [`RELU_MAXITER`]), and a check that still
-//! stops uncertified is reported ([`ReluOut::complete`]).
+//! stops uncertified is reported ([`ReluOut::complete`]). One check finds a certificate, not
+//! necessarily one of maximal support; the caller repeats it on the remaining sample
+//! (`Session::glm_separate`).
 //! The `simplex` method is accepted as an alias of this one; the IRLS-step `mu` rule lives in
 //! [`super::irls`].
 

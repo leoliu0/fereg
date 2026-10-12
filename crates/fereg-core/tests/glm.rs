@@ -389,7 +389,7 @@ fn setup(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Setup, 
         sep_fe: g.sep_fe,
     };
     let ctx = Ctx::quiet(threads);
-    let mut session = Session::prepare_with(prep, &ctx, kind)?;
+    let session = Session::prepare_with(prep, &ctx, kind)?;
     let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
     let kc = |v: &[f64]| -> Vec<f64> { kept.iter().map(|&i| v[i]).collect() };
     let cols: Vec<Vec<f64>> = std::iter::once(kc(&y)).chain(g.x.iter().map(|x| kc(&pick(x)))).collect();
@@ -1031,10 +1031,14 @@ fn separation_check_alone_matches_the_fit() {
         let csv = Csv::read(g.data);
         for &kind in KINDS {
             let Setup { mut session, rows, offset, spec, opts, .. } = setup(g, &csv, kind, 2).unwrap();
-            let n = session.n();
             let kept_before = session.kept_index().to_vec();
             let chk = session.glm_separation(rows, &Layout::ols(g.x.len()), offset, &spec, &opts, &Ctx::quiet(2)).unwrap();
-            assert_eq!(session.n(), n, "{}: session changed", g.fixture);
+            // The session is left without the flagged observations (and singletons that leaves).
+            let left: std::collections::HashSet<u32> = session.kept_index().iter().copied().collect();
+            assert!(left.len() < kept_before.len() || chk.num_separated == 0, "{}: session not reduced", g.fixture);
+            for (k, s) in chk.separated.iter().enumerate() {
+                assert!(!(*s && left.contains(&kept_before[k])), "{}: flagged row left in the session", g.fixture);
+            }
             assert!(chk.complete);
             let fx = fixture(g.fixture);
             assert_eq!(chk.num_separated as f64, fx.get("scalars").unwrap().get("num_separated").unwrap().num(), "{}", g.fixture);
@@ -1050,6 +1054,176 @@ fn separation_check_alone_matches_the_fit() {
                     assert!(!after.contains(&kept_before[k]), "{}: flagged row kept by the fit", g.fixture);
                 }
             }
+        }
+    }
+}
+
+/// Field-panel shape of the feppml `tagsep()` report (firm + industry×year FEs, Poisson): firms
+/// with all-zero outcomes, an all-zero industry×year cell, observations separated by a
+/// regressor that is positive only where y = 0, and singletons left behind by the drops.
+struct SepPanel {
+    firm: Vec<f64>,
+    indyr: Vec<f64>,
+    y: Vec<f64>,
+    x1: Vec<f64>,
+    x2: Vec<f64>,
+}
+
+fn sep_panel() -> SepPanel {
+    let mut rng = fereg_core::rng::SplitMix64::new(20261012);
+    let normal = |rng: &mut fereg_core::rng::SplitMix64| {
+        let u1 = rng.next_f64().max(1e-300);
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * rng.next_f64()).cos()
+    };
+    let (nfirm, nyear, nind) = (120usize, 8usize, 5usize);
+    let a: Vec<f64> = (0..nfirm).map(|_| 0.5 * normal(&mut rng)).collect();
+    let c: Vec<f64> = (0..nind * nyear).map(|_| 0.5 * normal(&mut rng)).collect();
+    let mut p = SepPanel { firm: vec![], indyr: vec![], y: vec![], x1: vec![], x2: vec![] };
+    for f in 0..nfirm {
+        let ind = f % nind;
+        for t in 0..nyear {
+            if rng.next_f64() > 0.85 {
+                continue;
+            }
+            let cell = ind * nyear + t;
+            let x1 = normal(&mut rng);
+            let mu = (0.4 * x1 + a[f] + c[cell]).exp();
+            // Poisson draw by inversion.
+            let (mut k, mut pk, u) = (0.0, (-mu).exp(), rng.next_f64());
+            let mut cdf = pk;
+            while u > cdf && k < 1e3 {
+                k += 1.0;
+                pk *= mu / k;
+                cdf += pk;
+            }
+            let all_zero = f % 9 == 0 || cell == 3;
+            let y = if all_zero { 0.0 } else { k };
+            p.firm.push(f as f64);
+            p.indyr.push(cell as f64);
+            p.y.push(y);
+            p.x1.push(x1);
+            p.x2.push(if y == 0.0 && f % 7 == 3 && !all_zero { 1.0 } else { 0.0 });
+        }
+    }
+    p
+}
+
+/// Rows of `alive` (over the panel) that the `fe` rule removes, iterated with singleton removal
+/// to a fixed point (plain loops: the expected values of the test below). Returns the rows
+/// removed with y = 0 and updates `alive`.
+fn fe_cascade(p: &SepPanel, alive: &mut [bool]) -> Vec<bool> {
+    let n = p.y.len();
+    let mut out = vec![false; n];
+    loop {
+        let mut changed = false;
+        for f in [&p.firm, &p.indyr] {
+            let mut cnt = std::collections::HashMap::<i64, (usize, f64)>::new();
+            for i in (0..n).filter(|&i| alive[i]) {
+                let e = cnt.entry(f[i] as i64).or_default();
+                e.0 += 1;
+                e.1 += p.y[i];
+            }
+            for i in 0..n {
+                let (c, s) = cnt.get(&(f[i] as i64)).copied().unwrap_or_default();
+                if alive[i] && (c == 1 || s == 0.0) {
+                    alive[i] = false;
+                    out[i] = p.y[i] == 0.0;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return out;
+        }
+    }
+}
+
+fn sep_session(p: &SepPanel, sep_fe: bool, kind: AbsorberKind, ctx: &Ctx) -> (Session, Vec<f64>) {
+    let prep = Prep {
+        n: p.y.len(),
+        factors: vec![FactorValues::Num(&p.firm), FactorValues::Num(&p.indyr)],
+        absorb: (0..2).map(|q| AbsorbTerm { factors: vec![q], intercept: true, slopes: vec![], save: false }).collect(),
+        slope_vars: vec![],
+        weights: None,
+        weight_kind: WeightKind::None,
+        vce: Vce::Robust,
+        drop_singletons: true,
+        family: Family::Poisson,
+        y_for_sep: Some(&p.y),
+        sep_fe,
+    };
+    let session = Session::prepare_with(prep, ctx, kind).unwrap();
+    let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
+    let cols: Vec<Vec<f64>> = [&p.y, &p.x1, &p.x2].iter().map(|v| kept.iter().map(|&i| v[i]).collect()).collect();
+    let refs: Vec<&[f64]> = cols.iter().map(Vec::as_slice).collect();
+    let rows = session.gather(&refs, ctx).unwrap();
+    (session, rows)
+}
+
+/// The separation check without the `fe` rule at prepare (feppml `tagsep()`, as ppmlhdfe) finds
+/// every observation of all-zero FE groups, including those that become all-zero or singletons
+/// only after other separated observations are dropped, plus those separated by a regressor;
+/// the fit with `relu` alone reaches the same sample and estimates as with `fe relu`.
+#[test]
+fn separation_check_without_fe_rule_finds_all_zero_groups() {
+    let p = sep_panel();
+    let n = p.y.len();
+    let ctx = Ctx::quiet(2);
+    let opts = GlmOptions {
+        family: Family::Poisson,
+        tol: 1e-10,
+        maxiter: 10_000,
+        itol: 1e-12,
+        separation: Separation { relu: true, mu: false },
+        guess: Guess::Simple,
+        log: false,
+    };
+    for &kind in KINDS {
+        let (mut session, rows) = sep_session(&p, false, kind, &ctx);
+        let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
+        let chk = session.glm_separation(rows, &Layout::ols(2), None, &Spec::default(), &GlmOptions { tol: 1e-8, itol: 1e-9, ..opts.clone() }, &ctx).unwrap();
+        assert!(chk.complete);
+
+        // Expected: the fe cascade on the prepared sample, the rows with x2 = 1 left after it,
+        // then the cascade again.
+        let mut alive = vec![false; n];
+        kept.iter().for_each(|&i| alive[i] = true);
+        let mut want = fe_cascade(&p, &mut alive);
+        let nfe = want.iter().filter(|v| **v).count();
+        for i in 0..n {
+            if alive[i] && p.x2[i] > 0.0 {
+                want[i] = true;
+                alive[i] = false;
+            }
+        }
+        for (w, c) in want.iter_mut().zip(fe_cascade(&p, &mut alive)) {
+            *w |= c;
+        }
+        let got: Vec<bool> = {
+            let mut g = vec![false; n];
+            kept.iter().zip(&chk.separated).for_each(|(&i, &s)| g[i] = s);
+            g
+        };
+        assert!(nfe > 0 && want.iter().filter(|v| **v).count() > nfe, "the panel exercises both rules");
+        assert_eq!(got, want, "{kind:?}: separated observations");
+        assert_eq!(chk.num_separated, want.iter().filter(|v| **v).count());
+        for (s, z) in chk.separated.iter().zip(&chk.certificate) {
+            assert_eq!(*s, *z > 0.0, "{kind:?}: certificate");
+        }
+
+        // Estimation: `relu` alone gives the sample and estimates of `fe relu`.
+        let fit = |sep_fe: bool| {
+            let (mut session, rows) = sep_session(&p, sep_fe, kind, &ctx);
+            let res = session.glm(rows, &Layout::ols(2), None, &Spec::default(), &opts, &ctx).unwrap();
+            (session.kept_index().to_vec(), res)
+        };
+        let (kept_a, a) = fit(false);
+        let (kept_b, b) = fit(true);
+        assert_eq!(kept_a, kept_b, "{kind:?}: estimation sample");
+        assert_eq!(scalar(&a, "N_full"), scalar(&b, "N_full"));
+        let (ba, bb) = (mat(&a, "b"), mat(&b, "b"));
+        for (x, y) in ba.iter().zip(bb) {
+            assert!((x - y).abs() <= 1e-8 * (1.0 + y.abs()), "{kind:?}: b {ba:?} vs {bb:?}");
         }
     }
 }
