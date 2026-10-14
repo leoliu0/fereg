@@ -72,7 +72,7 @@ See `help fereg`, `help feppml` and `help felogit`.
 ## Python
 
 ```sh
-pip install fereg --find-links https://github.com/leoliu0/fereg/releases/expanded_assets/v0.4.0
+pip install fereg
 ```
 
 Wheels are provided for CPython 3.10–3.14 on Linux (x86-64, aarch64), macOS (Apple Silicon,

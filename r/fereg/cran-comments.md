@@ -1,6 +1,10 @@
-## Submission
+## Resubmission
 
-First submission of fereg 0.4.0.
+This replaces my submission of fereg 0.4.0 from earlier today (first submission of the
+package). One test compared fereg with the time-series Newey-West variance of fixest computed
+with fixest's default thread count. fixest 0.14.2 gives a different value with exactly 2
+threads, its default on a 4-core machine, so the test could fail there. The tests now run the
+fixest references single-threaded. Nothing else changed.
 
 ## Test environments
 
