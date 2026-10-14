@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.0}{...}
+{* *! version 0.4.0}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -8,6 +8,7 @@
 {viewerjumpto "Absorb syntax" "fereg##absorb"}{...}
 {viewerjumpto "Description" "fereg##description"}{...}
 {viewerjumpto "Options" "fereg##options"}{...}
+{viewerjumpto "Variance estimators" "fereg##variance"}{...}
 {viewerjumpto "Accepted but ignored, and unsupported options" "fereg##ignored"}{...}
 {viewerjumpto "Differences from reghdfe" "fereg##differences"}{...}
 {viewerjumpto "Postestimation" "fereg##postestimation"}{...}
@@ -62,12 +63,19 @@ supported.
 {synopt :{opt noa:bsorb}}absorb only the constant (same as omitting {opt absorb()}){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(fereg##vce:vcetype)}}{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(fereg##vce:vcetype)}}{opt un:adjusted} (default), {opt r:obust}, {opt cl:uster} {it:clustervars} (multi-way allowed), {opt dk:raay} [{it:#}], {opt hc2}, {opt hc3}, {opt crv3} {it:clustervars}, or {opt conley} {it:latvar lonvar}[{cmd:,} {it:conley_options}]{p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
 {synopt :{opth res:iduals(newvar)}}save the regression residuals; required by several {help fereg##postestimation:predict} options{p_end}
 {synopt :{opt res:iduals}}save the residuals in {it:_reghdfe_resid} (overwritten if it exists){p_end}
 {synopt :{opt nocons:tant}}do not report the constant{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups (not recommended){p_end}
+
+{syntab:Kernel (HAC) variances, as ivreghdfe}
+{synopt :{opt bw(#|auto)}}kernel bandwidth; with {cmd:vce(robust)} heteroskedasticity- and autocorrelation-consistent (HAC), without it autocorrelation-consistent (AC){p_end}
+{synopt :{opt kernel(string)}}kernel: {opt bar:tlett} (default), {opt par:zen}, {opt tru:ncated}, {opt thann} (Tukey-Hanning), {opt thamm} (Tukey-Hamming), {opt qs} (quadratic spectral), {opt dan:ielle}, {opt ten:t}{p_end}
+{synopt :{opt dkraay(#)}}Driscoll-Kraay errors with bandwidth {it:#} (ivreghdfe: Bartlett kernel, clustering on the time variable){p_end}
+{synopt :{opt kiefer}}Kiefer (1980) within-panel autocorrelation-consistent errors{p_end}
+{synopt :{opt psd0}, {opt psda}}make the kernel-weighted covariance of the moments positive semidefinite{p_end}
 
 {syntab:Degrees of freedom}
 {synopt :{opth dof:adjustments(fereg##dof:list)}}{opt all} (default), {opt none}, or any of {opt first:pair}|{opt pair:wise}, {opt cl:usters}, {opt cont:inuous}{p_end}
@@ -158,7 +166,9 @@ heteroskedasticity-robust (Huber/White) errors; {opt cl:uster} {it:clustervars} 
 Several cluster variables give multi-way clustering (Cameron, Gelbach and Miller, 2011), including the
 adjustment applied when the variance matrix is not positive semidefinite. A cluster variable may be an
 interaction such as {it:firm#year}, and may be a string variable. {cmd:pweight}s imply {cmd:vce(robust)} and
-cannot be combined with {cmd:vce(unadjusted)}.
+cannot be combined with {cmd:vce(unadjusted)}. The time-series, leverage-based, jackknife and spatial
+variances ({opt dkraay}, {opt hc2}, {opt hc3}, {opt crv3}, {opt conley} and the kernel options) are described
+in {help fereg##variance:Variance estimators}.
 
 {phang}
 {opt residuals(newvar)} saves the residuals; {opt residuals} without a name uses {it:_reghdfe_resid}.
@@ -202,6 +212,75 @@ The results do not depend on the number of threads.
 {opt verbose(#)}: 1 prints solver diagnostics; 2 also prints per-phase timings; -1 suppresses notes and warnings.
 
 
+{marker variance}{...}
+{title:Variance estimators}
+
+{pstd}
+Each estimator follows the command that defines it in Stata; where no Stata command does, {cmd:fereg} borrows
+the definition named below (marked {it:fereg extension}). With the kernel options and {cmd:vce(dkraay)} the data
+must be {help tsset} or {help xtset}; the time variable is {cmd:_dta[_TStvar]}, the panel variable
+{cmd:_dta[_TSpanel]} and the period {cmd:_dta[_TSdelta]}, read as {cmd:reghdfe} and {cmd:ivreghdfe} read them.
+Observations with a missing time variable (and, with a kernel on panel data, panel variable) or coordinate are
+excluded, as missing cluster variables are.
+
+{phang}
+{opt vce(dkraay [#])} (OLS: {cmd:reghdfe} 6.13.1 exactly). Driscoll-Kraay errors: the scores are summed by
+period and the period sums get Bartlett weights 1 - j/{it:#} for lags j = 1, ..., {it:#}-1, periods taken in
+their order in the sample (gaps are ignored, as {cmd:reghdfe} does). {it:#} is the bandwidth (= lags + 1); the
+default is floor(4(T/100)^(2/9)) + 1 with T the number of periods, and a bandwidth above T is reduced with
+{cmd:reghdfe}'s warning. The time variable is the cluster variable of the degrees-of-freedom rules; the
+small-sample factor is (N-1)/(N-df_m-df_a) T/(T-1), e(df_r) is at most T-1, and the header shows
+{cmd:DK Bandwidth}. With instrumental variables, {opt vce(dkraay #)} means {cmd:ivreghdfe}'s {opt dkraay(#)}
+(below; without {it:#}, the default above).
+
+{phang}
+{opt bw(#|auto)}, {opt kernel()}, {opt dkraay(#)}, {opt kiefer}, {opt psd0}, {opt psda} ({cmd:ivreghdfe} 1.1.4,
+i.e. {cmd:ivreg2}, for OLS and IV). A kernel gives autocorrelation-consistent errors with lags on the time
+variable in units of its period (calendar lags: a gap means a missing pair), within panels when the data are
+{cmd:xtset}. The weight of lag {it:tau} is the kernel at {it:tau}/{it:bw}: Bartlett, Parzen, Tukey-Hanning and
+Tukey-Hamming use lags below the bandwidth ({it:bw} = 1 means no lags, with {cmd:ivreg2}'s note), Truncated up to
+it, and the spectral kernels (quadratic spectral, Danielle, Tent) all lags; {it:bw} need not be an integer.
+With {opt vce(robust)} (or {cmd:pweight}s) the variance is HAC, without it AC (homoskedastic); with
+{opt vce(cluster} {it:timevar}{cmd:)} it is Driscoll-Kraay ({opt dkraay(#)} is {cmd:bw(#)} with this cluster),
+and with {opt vce(cluster} {it:panelvar timevar}{cmd:)} the two-way cluster-and-kernel variance of Thompson
+(2011). {opt bw(auto)} selects the bandwidth by Newey and West (1994) for Bartlett, Parzen and quadratic
+spectral kernels on time-series (not panel) data. {opt kiefer} is the truncated kernel with the bandwidth of the
+whole time span, without {opt robust} (Kiefer 1980). {opt psd0} and {opt psda} make the covariance of the moment
+conditions positive semidefinite (negative eigenvalues set to zero or to their absolute values).
+The small-sample factors are {cmd:ivreghdfe}'s with the absorbed degrees of freedom as {cmd:sdofminus}:
+N/(N-K-df_a) without a cluster, (N-1)/(N-K-df_a) G/(G-1) with one (G = periods, or the smaller of panels and
+periods). Options, error messages, {cmd:e(vce)}, {cmd:e(kernel)}, {cmd:e(bw)}, {cmd:e(tvar)}, {cmd:e(ivar)},
+{cmd:e(bwchoice)}, {cmd:e(hacsubtitleV)} and the header lines are those of {cmd:ivreghdfe}. {cmd:fweight}s are not
+allowed, as in {cmd:ivreghdfe}. With OLS, {cmd:fereg} posts {cmd:reghdfe}'s results and shows the
+{cmd:ivreghdfe} description of the variance in the header ({it:fereg extension} of {cmd:reghdfe}, which has no
+kernel options; the numbers equal {cmd:ivreghdfe}'s without endogenous regressors).
+
+{phang}
+{opt vce(hc2)} and {opt vce(hc3)} (Stata's {cmd:regress}): the squared residual of observation j is divided by
+1-h_jj (HC2) or (1-h_jj)^2 (HC3), with h_jj the leverage in the full design, i.e. including the fixed effects
+and slopes, so the results equal {cmd:regress} {it:y x} {cmd:i.}{it:fe}{cmd:, vce(hc2)}; there is no N/(N-k)
+factor, and {cmd:fweight}s count as repeated observations. {cmd:pweight}s are not allowed with {cmd:hc3}
+({cmd:regress}'s rule). Observations with leverage 1 (e.g. kept singletons) contribute nothing. Not available
+with instrumental variables (error 198, {cmd:ivreghdfe}'s message).
+
+{phang}
+{opt vce(crv3 clustervars)} ({it:fereg extension}; the CRV3 of MacKinnon, Nielsen and Webb 2023, as defined
+by {cmd:pyfixest}): the leave-one-cluster-out jackknife sum_g (b_(-g) - b)(b_(-g) - b)', centered at the
+full-sample estimate, times the cluster small-sample factor of the model ({cmd:reghdfe}'s for OLS,
+{cmd:ivreghdfe}'s for IV); several cluster variables combine by inclusion-exclusion with the multi-way
+adjustment. The reported constant is jackknifed as the mean of the dependent variable minus the means of the
+regressors times b_(-g) over the observations outside the cluster. IV allows at most two cluster variables.
+
+{phang}
+{opt vce(conley latvar lonvar} [{cmd:,} {opt cut:off(#)} {opt pix:el(#)} {opt dist:ance(triangular|spherical)}]{cmd:)}
+({it:fereg extension}; the Conley (1999) spatial variance of {cmd:fixest} 0.14.2): scores of observations
+within {opt cutoff()} kilometers of each other (uniform kernel) are correlated; latitude and longitude are in
+degrees. Without {opt cutoff()} the cutoff is {cmd:fixest}'s data-driven choice (stored in
+{cmd:e(conley_cutoff)}). {opt pixel(#)} (km, default 0) first sums the scores within grid cells of that size;
+{opt distance()} is {cmd:fixest}'s planar approximation ({cmd:triangular}, default) or the great-circle distance
+({cmd:spherical}). The small-sample factor is N/(N-df_m-df_a), and e(df_r) = N-df_m-df_a.
+
+
 {marker ignored}{...}
 {title:Accepted but ignored, and unsupported options}
 
@@ -212,8 +291,10 @@ solver: {opt technique()}, {opt transform()}, {opt acceleration()}, {opt precond
 
 {pstd}
 The following {cmd:reghdfe} features are not supported and stop with error 198:
-{opt individual()}, {opt group()} and {opt aggregation()} (group fixed effects), and {cmd:vce(dkraay)}
-(Driscoll-Kraay). Of the {cmd:ivreghdfe} estimators only 2SLS is available.
+{opt individual()}, {opt group()} and {opt aggregation()} (group fixed effects). Of the {cmd:ivreghdfe}
+estimators only 2SLS is available, and of its variance options {opt sw}, {opt center}, {opt dofminus()} and
+{opt sdofminus()} are not supported. The clustered forms {cmd:vce(hc2} {it:clustvar}{cmd:)} and
+{cmd:vce(hc3} {it:clustvar}{cmd:)} of Stata's {cmd:regress} (Bell-McCaffrey) are not supported.
 
 
 {marker differences}{...}
@@ -237,6 +318,10 @@ squares), {cmd:fereg} prints a note after the table that the standard errors are
 may be numbered differently.{p_end}
 {phang2}o Notes that the plugin prints (e.g. the multi-way clustering adjustment) may appear before the
 collinearity notes rather than after them.{p_end}
+{phang2}o Extensions of the variance options (see {help fereg##variance:Variance estimators}): the
+{cmd:ivreghdfe} kernel options, {cmd:vce(hc2)}, {cmd:vce(hc3)}, {cmd:vce(crv3)} and {cmd:vce(conley)}.
+{cmd:ivreghdfe}'s combination errors are raised before estimation (after the singleton message in
+{cmd:ivreghdfe}), and an error code of 9 is kept where {cmd:reghdfe} uses it ({cmd:vce(dkraay)}).{p_end}
 
 
 {marker postestimation}{...}
@@ -272,6 +357,11 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {phang2}{cmd:. fereg ln_wage tenure, absorb(fe1=idcode fe2=year##c.age) residuals(res)}{p_end}
 {phang2}{cmd:. predict double dhat, d}{p_end}
 {phang2}{cmd:. fereg ln_wage tenure [aw=hours], absorb(idcode ind_code#year) threads(8)}{p_end}
+{phang2}{cmd:. xtset idcode year}{p_end}
+{phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode) vce(dkraay 3)}{p_end}
+{phang2}{cmd:. fereg ln_wage age (tenure = union south), absorb(idcode) vce(robust) bw(3) kernel(parzen)}{p_end}
+{phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(hc3)}{p_end}
+{phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(crv3 ind_code)}{p_end}
 
 
 {marker results}{...}
@@ -314,6 +404,10 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {synopt:{cmd:e(N_clust)}}number of clusters (minimum across cluster variables){p_end}
 {synopt:{cmd:e(N_clust#)}}number of clusters of the #th cluster variable{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster variables{p_end}
+{synopt:{cmd:e(dkraay_bw)}}Driscoll-Kraay bandwidth (lags + 1) used by {cmd:vce(dkraay)}{p_end}
+{synopt:{cmd:e(bw)}}kernel bandwidth used (also the result of {cmd:bw(auto)} and of {cmd:kiefer}){p_end}
+{synopt:{cmd:e(conley_cutoff)}}Conley cutoff (km) used{p_end}
+{synopt:{cmd:e(conley_pixel)}}Conley pixel size (km){p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
@@ -327,9 +421,15 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {synopt:{cmd:e(dofmethod)}}degrees-of-freedom adjustments used{p_end}
 {synopt:{cmd:e(title)}}{cmd:HDFE Linear regression}{p_end}
 {synopt:{cmd:e(title2)}}{cmd:Absorbing # HDFE group(s)}{p_end}
-{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors){p_end}
-{synopt:{cmd:e(vce)}}{cmd:ols}, {cmd:robust} or {cmd:cluster}{p_end}
-{synopt:{cmd:e(vcetype)}}{cmd:Robust} for robust and clustered errors{p_end}
+{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors, {cmd:dkraay}, {cmd:conley}); with a kernel, {cmd:e(hacsubtitleV)}{p_end}
+{synopt:{cmd:e(title4)}}{cmd:and autocorrelation (Driscoll-Kraay)} ({cmd:dkraay}), {cmd:and spatial correlation (Conley)} ({cmd:conley}); with a kernel, {cmd:e(hacsubtitleV2)}{p_end}
+{synopt:{cmd:e(vce)}}{cmd:ols}, {cmd:robust}, {cmd:cluster}, {cmd:dkraay}, {cmd:hc2}, {cmd:hc3}, {cmd:crv3} or {cmd:conley}; with a kernel, {cmd:ivreghdfe}'s description (e.g. {cmd:robust hac bartlett bw=3}){p_end}
+{synopt:{cmd:e(vcetype)}}{cmd:Robust} for robust, clustered, Driscoll-Kraay and HAC errors; {cmd:Robust HC2}, {cmd:Robust HC3} ({cmd:regress}); {cmd:CRV3}; {cmd:Conley}{p_end}
+{synopt:{cmd:e(kernel)}}kernel ({cmd:Bartlett}, {cmd:Parzen}, {cmd:Truncated}, {cmd:Tukey-Hanning}, {cmd:Tukey-Hamming}, {cmd:Quadratic Spectral}, {cmd:Danielle}, {cmd:Tent}){p_end}
+{synopt:{cmd:e(tvar)}, {cmd:e(ivar)}}time and panel variables of the kernel{p_end}
+{synopt:{cmd:e(bwchoice)}}bandwidth selection of {cmd:bw(auto)}{p_end}
+{synopt:{cmd:e(hacsubtitleV)}, {cmd:e(hacsubtitleV2)}}{cmd:ivreghdfe}'s description of the kernel variance{p_end}
+{synopt:{cmd:e(conley_lat)}, {cmd:e(conley_lon)}, {cmd:e(conley_distance)}}Conley coordinates and distance{p_end}
 {synopt:{cmd:e(clustvar)}}cluster variables{p_end}
 {synopt:{cmd:e(clustvar#)}}#th cluster variable{p_end}
 {synopt:{cmd:e(wtype)}}weight type{p_end}
@@ -356,6 +456,9 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {title:Author}
 
 {pstd}Leo Liu{break}
+UTS Business School, University of Technology Sydney{break}
+Sydney, Australia{break}
+{browse "mailto:leo.liu@uts.edu.au":leo.liu@uts.edu.au}{break}
 {browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}

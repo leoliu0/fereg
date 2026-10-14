@@ -1,4 +1,4 @@
-*! version 0.3.0  fereg: predict after fereg (mirrors reghdfe_p of reghdfe 6.13.1)
+*! version 0.4.0  fereg: predict after fereg (mirrors reghdfe_p of reghdfe 6.13.1)
 program define fereg_p, rclass
 	version 16
 	* Note: we IGNORE typlist and generate the newvar as double

@@ -1,5 +1,5 @@
-*! version 0.3.0  feppml: Poisson pseudo-maximum likelihood with high-dimensional fixed effects (Rust plugin)
-*! Syntax, defaults, messages, display and e() mirror ppmlhdfe 2.3.3 (Correia, Guimarães, Zylkin).
+*! version 0.4.0  feppml: Poisson pseudo-maximum likelihood with high-dimensional fixed effects (Rust plugin)
+*! Syntax, defaults, messages, display and e() mirror ppmlhdfe 2.3.3 (Correia, Guimaraes, Zylkin).
 program define feppml, eclass
 	version 16
 	if replay() {

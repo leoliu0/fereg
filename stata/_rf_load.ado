@@ -1,4 +1,4 @@
-*! version 0.3.0  fereg: the only program that calls the compiled plugin
+*! version 0.4.0  fereg: the only program that calls the compiled plugin
 *
 * Usage:
 *   _rf_load                                     load the plugin and check that its version matches
@@ -11,7 +11,7 @@
 * = | ; * - and commas are a syntax error.
 program _rf_load
 	version 16
-	local rf_version 0.3.0
+	local rf_version 0.4.0
 
 	if (`"`0'"' == "") {
 		local _rf_version
@@ -32,7 +32,7 @@ program _rf_load
 	}
 
 	* Result locals set by the plugin (protocol: locals _rf_<name>)
-	local forward version token status
+	local forward version token status kernel bwchoice
 	* IV: Stock-Yogo critical values for (L1, K1) and for a single endogenous regressor
 	foreach t in ivbias5 ivbias10 ivbias20 ivbias30 ivsize10 ivsize15 ivsize20 ivsize25 {
 		local forward `forward' sy_`t' sy1_`t'

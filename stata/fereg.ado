@@ -1,4 +1,4 @@
-*! version 0.3.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
+*! version 0.4.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror reghdfe 6.13.1 (Sergio Correia).
 program define fereg, eclass
 	version 16
@@ -82,7 +82,7 @@ end
 
 
 program Estimate, eclass
-	local rf_version 0.3.0
+	local rf_version 0.4.0
 	local cmdline `"fereg `0'"'
 
 // --------------------------------------------------------------------------
@@ -92,6 +92,7 @@ program Estimate, eclass
 	syntax anything(id="varlist" equalok) [if] [in] [fw aw pw/] [,
 		Absorb(string) NOAbsorb
 		VCE(string) CLuster(string)
+		BW(string) kernel(string) kiefer dkraay(integer 0) psd0 psda
 		RESiduals(name) RESiduals2
 		TOLerance(real 1e-8) ITERate(integer 16000)
 		KEEPSINgletons noCONstant
@@ -228,8 +229,47 @@ program Estimate, eclass
 	_rf_parse_vce, vce(`vce') weighttype(`weight')
 	local vcetype `s(vcetype)'
 	local clustervars `s(clustervars)'
-	local base_clustervars `s(base_clustervars)'
 	local num_clusters `s(num_clusters)'
+	local dkraay_bw `s(dkraay_bw)'
+	local conley_lat `s(conley_lat)'
+	local conley_lon `s(conley_lon)'
+	local conley_cutoff `s(cutoff)'
+	local conley_pixel `s(pixel)'
+	local conley_distance `s(distance)'
+	if ("`model'" == "iv" & inlist("`vcetype'", "hc2", "hc3")) {
+		* (ivreghdfe's message; no reference defines HC2/HC3 for IV)
+		di as err "vce() only supports cluster, robust, and unadjusted"
+		exit 198
+	}
+	* ivreghdfe kernel options (bw, kernel, kiefer, dkraay, psd0/psda) and vce(dkraay)
+	local userrobust = inlist("`vcetype'", "robust", "cluster") & !(`"`vce'"' == "" & "`weight'" == "pweight")
+	_rf_parse_hac, vcetype(`vcetype') clustervars(`clustervars') weighttype(`weight') userrobust(`userrobust') ///
+		bw(`bw') kernel(`kernel') `kiefer' dkraay(`dkraay') `psd0' `psda'
+	local hac `s(hac)'
+	local hac_kernel `s(kernel)'
+	local hac_kernelkey `s(kernelkey)'
+	local hac_bw `s(bw)'
+	local hac_kiefer `s(kiefer)'
+	local hac_psd `s(psd)'
+	local hac_robust `s(robust)'
+	local tvar `s(tvar)'
+	local ivar `s(ivar)'
+	local xtivar `s(xtivar)'
+	local tdelta `s(tdelta)'
+	local clustvar_e `clustervars'
+	if (`hac') {
+		local vcetype `s(vcetype)'
+		local clustervars `s(clustervars)'
+		local num_clusters `s(num_clusters)'
+		* ivreghdfe posts e(clustvar) as given (dkraay(): the time variable)
+		if (`dkraay') local clustvar_e `tvar'
+	}
+	local base_clustervars
+	foreach dim of local clustervars {
+		local parts : subinstr local dim "#" " ", all
+		local base_clustervars `base_clustervars' `parts'
+	}
+	local base_clustervars : list uniq base_clustervars
 
 	capture drop __hdfe* // previously saved FEs (as reghdfe)
 	_rf_parse_absorb `absorb'
@@ -290,9 +330,10 @@ program Estimate, eclass
 	if ("`rf_markvars'" != "") markout `touse' `rf_markvars'
 	local nmodel : word count `modelvars'
 
-	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables
+	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables,
+	* then the tsset time and panel variables of the time-series variances
 	local factors `absfactors'
-	foreach v of local base_clustervars {
+	foreach v in `base_clustervars' `tvar' `ivar' {
 		if (!`: list v in factors') local factors `factors' `v'
 	}
 	local nfac : word count `factors'
@@ -345,17 +386,11 @@ program Estimate, eclass
 		}
 	}
 
-	* cluster key: dimensions separated by ";", each f1*f2 (1-based positions)
-	local clukey
-	foreach dim of local clustervars {
-		local parts : subinstr local dim "#" " ", all
-		local cpos
-		foreach v of local parts {
-			local k : list posof "`v'" in factors
-			local cpos = cond("`cpos'" == "", "`k'", "`cpos'*`k'")
-		}
-		local clukey = cond("`clukey'" == "", "`cpos'", "`clukey';`cpos'")
-	}
+	* variance-estimator keys (cluster dimensions, time variables, kernel, Conley)
+	_rf_vce_args, factors(`factors') vcetype(`vcetype') clustervars(`clustervars') tvar(`tvar') ivar(`ivar') ///
+		tdelta(`tdelta') dkraay_bw(`dkraay_bw') hac(`hac') kernelkey(`hac_kernelkey') bw(`hac_bw') ///
+		kiefer(`hac_kiefer') psd(`hac_psd') lat(`conley_lat') lon(`conley_lon') cutoff(`conley_cutoff') ///
+		pixel(`conley_pixel') distance(`conley_distance')
 
 	* Keys common to prepare and ols (every key=value is quoted: see protocol)
 	local common `""threads=`threads'" "verbose=`plugin_verbose'""'
@@ -368,19 +403,20 @@ program Estimate, eclass
 // Prepare: factorize, drop singletons, build the fixed-effects structure
 // --------------------------------------------------------------------------
 	_rf_load
-	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
+	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
+	local args `"`args' `rf_vceargs'"'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
-	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
 	* No if, in, weight or markout: touse is 1 everywhere and the plugin does not read it
 	if (`"`if'`in'`weight'`rf_markvars'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
-	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
+	_rf_load `facvars' `slopevars_r' `conley_lat' `conley_lon' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
 	local num_singletons = scalar(__rf_num_singletons)
 	if (`drop_singletons' & `num_singletons' > 0 & `verbose' > -1) {
 		local ns = strtrim(string(`num_singletons', "%20.0f"))
 		di as text `"(dropped `ns' {browse "http://scorreia.com/research/singletons.pdf":singleton observations})"'
 	}
+	if (`hac') _rf_hac_gaps `touse' `tvar'
 
 // --------------------------------------------------------------------------
 // Regressors: expand factor variables over the final sample (as ms_expand_varlist)
@@ -560,21 +596,32 @@ program Estimate, eclass
 
 		local N = scalar(__rf_N)
 		local df_r = scalar(__rf_df_r)
-		if ("`vcetype'" == "unadjusted") {
-			local hacV "Statistics consistent for homoskedasticity only"
-			local vcestr
+		* Variance descriptions as ivreghdfe; vce(dkraay [#]) means ivreghdfe's dkraay(#)
+		* (Bartlett kernel, clustering on the time variable); crv3 and conley are borrowed
+		local iv_hac = `hac' | ("`vcetype'" == "dkraay")
+		local iv_kernel = cond("`vcetype'" == "dkraay", "Bartlett", "`hac_kernel'")
+		local iv_clusters `clustervars'
+		local iv_clustvar `clustvar_e'
+		if ("`vcetype'" == "dkraay") {
+			local iv_clusters `tvar'
+			local iv_clustvar `tvar'
 		}
-		else if ("`vcetype'" == "robust") {
-			local hacV "Statistics robust to heteroskedasticity"
-			local vcestr robust
+		local iv_ncl : word count `iv_clusters'
+		local iv_hacargs hac(`iv_hac') kernel(`iv_kernel') tvar(`tvar') ivar(`xtivar') robust(`hac_robust') ///
+			clustvar(`iv_clustvar') clusters(`iv_clusters') kiefer(`hac_kiefer') psd(`hac_psd') bwchoice(`_rf_bwchoice')
+		_rf_hac_post, `iv_hacargs' nopost
+		local hacV `"`rf_hacV'"'
+		local hacV2 `"`rf_hacV2'"'
+		local vcestr `rf_vcestr'
+		local vcetype_e `rf_vcetype'
+		if ("`vcetype'" == "crv3") {
+			local vcestr crv3
+			local vcetype_e CRV3
 		}
-		else if (`num_clusters' == 1) {
-			local hacV "Statistics robust to heteroskedasticity and clustering on `clustervars'"
-			local vcestr robust cluster
-		}
-		else {
-			local hacV "Statistics robust to heteroskedasticity and clustering on `: word 1 of `clustervars'' and `: word 2 of `clustervars''"
-			local vcestr robust two-way cluster
+		if ("`vcetype'" == "conley") {
+			local hacV "Statistics robust to heteroskedasticity and spatial correlation (Conley)"
+			local vcestr conley
+			local vcetype_e Conley
 		}
 
 		* First-stage regressions: posted and stored as _fereg_<endog> before the main results
@@ -607,16 +654,15 @@ program Estimate, eclass
 				ereturn local depvar `en'
 				ereturn local title "First-stage regression: `en'"
 				ereturn local hacsubtitleV "`hacV'"
-				if ("`vcestr'" != "") {
-					ereturn local vce `vcestr'
-					ereturn local vcetype Robust
-				}
-				if (`num_clusters' > 0) {
-					ereturn local clustvar `clustervars'
+				if (`"`hacV2'"' != "") ereturn local hacsubtitleV2 "`hacV2'"
+				if ("`vcestr'" != "") ereturn local vce `vcestr'
+				if ("`vcetype_e'" != "") ereturn local vcetype `vcetype_e'
+				if (`iv_ncl' > 0) {
+					ereturn local clustvar `iv_clustvar'
 					PostScalar N_clust
-					if (`num_clusters' == 2) {
-						ereturn local clustvar1 `: word 1 of `clustervars''
-						ereturn local clustvar2 `: word 2 of `clustervars''
+					if (`iv_ncl' == 2) {
+						ereturn local clustvar1 `: word 1 of `iv_clusters''
+						ereturn local clustvar2 `: word 2 of `iv_clusters''
 						PostScalar N_clust1
 						PostScalar N_clust2
 					}
@@ -691,17 +737,19 @@ program Estimate, eclass
 		ereturn local marginsnotok "Residuals SCores"
 		ereturn local hacsubtitleB "Estimates efficient for homoskedasticity only"
 		ereturn local hacsubtitleV "`hacV'"
-		if ("`vcestr'" != "") {
-			ereturn local vce `vcestr'
-			ereturn local vcetype Robust
-		}
-		if (`num_clusters' > 0) {
-			ereturn local clustvar `clustervars'
-			if (`num_clusters' == 2) {
-				ereturn local clustvar1 `: word 1 of `clustervars''
-				ereturn local clustvar2 `: word 2 of `clustervars''
+		if (`"`hacV2'"' != "") ereturn local hacsubtitleV2 "`hacV2'"
+		if ("`vcestr'" != "") ereturn local vce `vcestr'
+		if ("`vcetype_e'" != "") ereturn local vcetype `vcetype_e'
+		if (`iv_ncl' > 0) {
+			ereturn local clustvar `iv_clustvar'
+			if (`iv_ncl' == 2) {
+				ereturn local clustvar1 `: word 1 of `iv_clusters''
+				ereturn local clustvar2 `: word 2 of `iv_clusters''
 			}
 		}
+		_rf_hac_post, `iv_hacargs'
+		if ("`vcetype'" == "dkraay") PostScalar dkraay_bw
+		if ("`vcetype'" == "conley") _rf_conley_post, lat(`conley_lat') lon(`conley_lon') pixel(`conley_pixel') distance(`conley_distance')
 		if ("`weight'" != "") {
 			ereturn local wexp "=`wvar'"
 			ereturn local wtype `weight'
@@ -869,16 +917,22 @@ program Estimate, eclass
 		if (!missing(scalar(__rf_sumweights))) ereturn scalar sumweights = scalar(__rf_sumweights)
 	}
 	ereturn scalar report_constant = `report_constant'
-	if ("`vcetype'" == "cluster") {
+	* Clustered variances (reghdfe: cluster, dkraay with the time variable as the cluster; also
+	* crv3 and the kernel clusters)
+	local post_clusters `clustervars'
+	if ("`vcetype'" == "dkraay") local post_clusters `tvar'
+	local post_ncl : word count `post_clusters'
+	if (`post_ncl' > 0) {
 		PostScalar N_clust
-		ereturn scalar N_clustervars = `num_clusters'
-		forval i = 1/`num_clusters' {
+		ereturn scalar N_clustervars = `post_ncl'
+		forval i = 1/`post_ncl' {
 			PostScalar N_clust`i'
-			local cv : word `i' of `clustervars'
+			local cv : word `i' of `post_clusters'
 			ereturn local clustvar`i' `cv'
 		}
-		ereturn local clustvar `clustervars'
+		ereturn local clustvar `post_clusters'
 		ereturn local title3 "Statistics robust to heteroskedasticity"
+		if ("`vcetype'" == "dkraay") ereturn local title4 "and autocorrelation (Driscoll-Kraay)"
 	}
 	ereturn scalar N_hdfe = `G'
 	ereturn scalar N_hdfe_extended = `num_slots'
@@ -901,8 +955,31 @@ program Estimate, eclass
 	ereturn local indepvars `indepvars_e'
 	ereturn local title "HDFE Linear regression"
 	ereturn local title2 "Absorbing `G' HDFE group`=cond(`G' == 1, "", "s")'"
-	if ("`vcetype'" != "unadjusted") ereturn local vcetype Robust
-	ereturn local vce = cond("`vcetype'" == "unadjusted", "ols", "`vcetype'")
+	if ("`vcetype'" == "conley") {
+		ereturn local title3 "Statistics robust to heteroskedasticity"
+		ereturn local title4 "and spatial correlation (Conley)"
+	}
+	* e(vce) and e(vcetype): reghdfe (ols, robust, cluster, dkraay), regress (hc2, hc3: Robust HC2,
+	* Robust HC3), ivreghdfe's strings for the kernel options; crv3 and conley are fereg's
+	if (`hac') {
+		_rf_hac_post, hac(1) kernel(`hac_kernel') tvar(`tvar') ivar(`xtivar') robust(`hac_robust') ///
+			clustvar(`clustvar_e') clusters(`clustervars') kiefer(`hac_kiefer') psd(`hac_psd') bwchoice(`_rf_bwchoice')
+		ereturn local vce `rf_vcestr'
+		if ("`rf_vcetype'" != "") ereturn local vcetype `rf_vcetype'
+		ereturn local hacsubtitleV "`rf_hacV'"
+		if ("`rf_hacV2'" != "") ereturn local hacsubtitleV2 "`rf_hacV2'"
+		ereturn local title3 "`rf_hacV'"
+		ereturn local title4 "`rf_hacV2'"
+	}
+	else {
+		if inlist("`vcetype'", "robust", "cluster", "dkraay") ereturn local vcetype Robust
+		if inlist("`vcetype'", "hc2", "hc3") ereturn local vcetype = "Robust " + upper("`vcetype'")
+		if ("`vcetype'" == "crv3") ereturn local vcetype CRV3
+		if ("`vcetype'" == "conley") ereturn local vcetype Conley
+		ereturn local vce = cond("`vcetype'" == "unadjusted", "ols", "`vcetype'")
+	}
+	if ("`vcetype'" == "dkraay") PostScalar dkraay_bw
+	if ("`vcetype'" == "conley") _rf_conley_post, lat(`conley_lat') lon(`conley_lon') pixel(`conley_pixel') distance(`conley_distance')
 	if ("`weight'" != "") {
 		ereturn local wexp "= `wvar'"
 		ereturn local wtype `weight'
@@ -1067,7 +1144,7 @@ program ExpandFV
 end
 
 
-* ExpandBV b V "mask" : expands b (1×k) and V (k×k) in place to the length of mask (1 = present)
+* ExpandBV b V "mask" : expands b (1xk) and V (k x k) in place to the length of mask (1 = present)
 program ExpandBV
 	args b V mask
 	mata: _rf_m = strtoreal(tokens(st_local("mask"))); _rf_i = selectindex(_rf_m)
@@ -1186,6 +1263,13 @@ program DispHeaderIV
 	di as text "{hline `=length("`e(title)'")'}"
 	if ("`e(hacsubtitleB)'" != "") di as text _n "`e(hacsubtitleB)'" _c
 	if ("`e(hacsubtitleV)'" != "") di as text _n "`e(hacsubtitleV)'"
+	if ("`e(hacsubtitleV2)'" != "") di as text "`e(hacsubtitleV2)'"
+	if ("`e(kernel)'" != "") {
+		di as text "  kernel=`e(kernel)'; bandwidth=" `e(bw)'
+		if ("`e(bwchoice)'" != "") di as text "  `e(bwchoice)'"
+		di as text "  time variable (t):  " as res e(tvar)
+		if ("`e(ivar)'" != "") di as text "  group variable (i): " as res e(ivar)
+	}
 	di
 	if ("`e(clustvar)'" != "") {
 		if ("`e(clustvar2)'" == "") {
@@ -1215,7 +1299,10 @@ end
 
 
 program DispFooterIV
-	local robust = ("`e(vcetype)'" != "")
+	* Identification statistics are robust with any non-iid variance (vcetype or kernel); the
+	* Hansen/Sargan label follows e(vcetype) alone (ivreghdfe)
+	local robust = ("`e(vcetype)'`e(kernel)'" != "")
+	local jrobust = ("`e(vcetype)'" != "")
 	if ("`e(instd1)'" != "" & !missing(e(idstat))) {
 		di as text _c "Underidentification test"
 		if (!`robust') di as text _c " (Anderson canon. corr. LM statistic):"
@@ -1235,7 +1322,7 @@ program DispFooterIV
 		di as text "{hline 78}"
 	}
 	if (!missing(e(j))) {
-		if (`robust') di as text _c "Hansen J statistic (overidentification test of all instruments):"
+		if (`jrobust') di as text _c "Hansen J statistic (overidentification test of all instruments):"
 		else di as text _c "Sargan statistic (overidentification test of all instruments):"
 		di as res _col(71) %8.3f e(j)
 		if (e(jdf)) di as text _col(52) "Chi-sq(" as res e(jdf) as text ") P-val =  " as res _col(73) %6.4f e(jp)
@@ -1247,6 +1334,10 @@ program DispFooterIV
 		di as err "         model tests should be interpreted with caution."
 		di as err "Possible causes:"
 		if ("`e(N_clust)'" != "") di as err "         number of clusters insufficient to calculate robust covariance matrix"
+		if ("`e(kernel)'" != "") {
+			di as err "         covariance matrix of moment conditions not positive definite"
+			di as err "         covariance matrix uses too many lags"
+		}
 		di as err "         singleton dummy variable (dummy with one 1 and N-1 0s or vice versa)"
 	}
 	di as text "{hline 78}"
@@ -1316,8 +1407,10 @@ program DispFFirstIV
 		exit
 	}
 	local endo : colnames `fm'
-	local robust "`e(vcetype)'"
+	* robust: any non-iid variance (ivreghdfe tests "`e(vcetype)'`e(kernel)'")
+	local robust "`e(vcetype)'`e(kernel)'"
 	local cluster "`e(clustvar)'"
+	local kernel "`e(kernel)'"
 	di
 	di as text _n "Summary results for first-stage regressions"
 	di as text "{hline 43}"
@@ -1344,8 +1437,12 @@ program DispFFirstIV
 	}
 	di
 	local rtype
-	if ("`cluster'" != "") local rtype "cluster-robust"
-	else if ("`robust'" != "") local rtype "heteroskedasticity-robust"
+	if ("`e(vcetype)'`cluster'" != "") {
+		if ("`cluster'" != "") local rtype "cluster-robust"
+		else if ("`kernel'" != "") local rtype "heteroskedasticity and autocorrelation-robust"
+		else local rtype "heteroskedasticity-robust"
+	}
+	else if ("`kernel'" != "") local rtype "autocorrelation-robust"
 	if ("`rtype'" != "") {
 		di as text "NB: first-stage test statistics `rtype'"
 		di

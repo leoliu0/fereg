@@ -1,4 +1,4 @@
-*! version 0.3.0  felogit: predict
+*! version 0.4.0  felogit: predict
 program define felogit_p
 	version 16
 	_assert "`e(cmd)'" == "felogit"
@@ -50,7 +50,7 @@ program define felogit_p
 		la var `varlist' "Pr(`e(depvar)')"
 		exit
 	}
-	* score: y − Pr (y ≠ 0 counts as 1, as logit)
+	* score: y - Pr (y != 0 counts as 1, as logit)
 	conf var `e(depvar)', exact
 	qui replace `varlist' = (`e(depvar)' != 0) - `varlist' `ifin'
 	la var `varlist' "score"

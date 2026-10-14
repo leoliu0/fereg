@@ -1,4 +1,4 @@
-*! version 0.3.0  fereg: estimation header (adapted from reghdfe_header.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
+*! version 0.4.0  fereg: estimation header (adapted from reghdfe_header.ado of reghdfe 6.13.1, MIT, (c) Sergio Correia)
 program _rf_header
 	version 16
 	if !c(noisily) exit
@@ -98,6 +98,17 @@ program _rf_header
 	if ("`e(vce)'" == "dkraay" & e(dkraay_bw) < .) {
 		.`left'.Arrpush `C1' "DK Bandwidth" `C2' "= " as res %`c2wfmt'.0fc e(dkraay_bw)
 	}
+
+	* fereg: kernel variances (ivreghdfe's lines) and the Conley cutoff
+	if ("`e(kernel)'" != "") {
+		.`left'.Arrpush `C1' "  kernel=`e(kernel)'; bandwidth=" as res e(bw)
+		if ("`e(bwchoice)'" != "") .`left'.Arrpush `C1' "  `e(bwchoice)'"
+		.`left'.Arrpush `C1' "  time variable (t):  " as res "`e(tvar)'"
+		if ("`e(ivar)'" != "") .`left'.Arrpush `C1' "  group variable (i): " as res "`e(ivar)'"
+	}
+	if ("`e(vce)'" == "conley" & e(conley_cutoff) < .) {
+		.`left'.Arrpush `C1' "Conley cutoff (km)" `C2' "= " as res %`c2wfmt'.0g e(conley_cutoff)
+	}
 	
 	HeaderDisplay `left' `right' `"`title'"' `"`title2'"' `"`title3'"' `"`title4'"' `"`title5'"'
 end
@@ -111,7 +122,9 @@ program HeaderDisplay
 
 		di
 		if `"`title1'"' != "" {
-				di as txt `"`title'"'
+				* (reghdfe_header displays an undefined local here, i.e. an empty line; reghdfe's own
+				* titles always fit the left column, fereg's kernel titles may not)
+				di as txt `"`title1'"'
 				forval i = 2/5 {
 					if `"`title`i''"' != "" {
 							di as txt `"`title`i''"'
