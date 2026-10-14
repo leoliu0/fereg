@@ -13,7 +13,8 @@ The interface and the numbers are those of fixest (\code{\link[=feols]{feols()}}
 largest fixed effect exactly and solves the rest by preconditioned conjugate gradient.
 }
 \details{
-Options: \code{fereg.nthreads} (threads, \code{0} = all cores) and \code{fereg.notes} (print notes on removed
+Options: \code{fereg.nthreads} (threads, \code{0} = all cores; default all cores, capped at
+\code{OMP_THREAD_LIMIT}, and 2 under R CMD check) and \code{fereg.notes} (print notes on removed
 observations).
 }
 \seealso{
@@ -25,16 +26,16 @@ Useful links:
 
 }
 \author{
-\strong{Maintainer}: Leo Liu \email{auleo.liu@gmail.com}
+\strong{Maintainer}: Leo Liu \email{auleo.liu@gmail.com} [copyright holder]
 
 Authors:
 \itemize{
-  \item Leo Liu \email{auleo.liu@gmail.com}
+  \item Leo Liu \email{auleo.liu@gmail.com} [copyright holder]
 }
 
 Other contributors:
 \itemize{
-  \item Authors of the dependency Rust crates (see inst/AUTHORS) [contributor]
+  \item Authors of the bundled Rust crates (see inst/AUTHORS for each crate's authors and license) [contributor, copyright holder]
 }
 
 }

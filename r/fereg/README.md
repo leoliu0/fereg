@@ -22,12 +22,22 @@ fixef(m)
 
 Supported: OLS, IV/2SLS (several endogenous regressors), Poisson, logit; any number of fixed
 effects, `fe1^fe2` interactions and varying slopes (`fe[x]`, `fe[[x]]`); weights and offsets;
-iid, hetero and up to four-way clustered variances (`ssc()` as in fixest), also post hoc in
-`summary()`; `i()`, `factor()`, multiple estimation (`c(y1, y2)`, `sw()`, `csw()`, `split`,
-`fsplit`); `predict` (with `newdata`), `resid`, `fitted`, `fixef`, `fitstat`, `etable`,
-`tidy`/`glance`. Not implemented: HC2/HC3, Newey–West, Driscoll–Kraay and Conley variances,
-`fixef.rm = "infinite_coef"`, the panel operators `l()`/`f()`/`d()`, `mvsw()` and the
-`.[]`/`..ctrl` formula macros.
+`i()`, `factor()`, multiple estimation (`c(y1, y2)`, `sw()`, `csw()`, `split`, `fsplit`);
+`predict` (with `newdata`), `resid`, `fitted`, `fixef`, `fitstat`, `etable`, `tidy`/`glance`.
+
+Variances, at estimation and post hoc (`summary()`, `vcov()`, `confint()`, `etable()`), with
+fixest's syntax, labels and `ssc()`: iid, heteroskedasticity-robust (HC1) and HC2/HC3 (exact
+leverage, fixed effects included; not for IV), one- to four-way clustering, Newey–West
+(`NW ~ id + period`, `NW(2) ~ id + period`, `NW ~ period` for a time series, or `"NW"` with
+`panel.id = ~id + period`), Driscoll–Kraay (`DK(2) ~ period`), Conley (`conley(100) ~ lat + lon`,
+`conley("60mi")`, pixel and spherical distance, fixest's deduced cutoff), and fixest's request
+objects (`NW()`, `DK()`, `conley()`, `vcov_NW()`, `vcov_DK()`, `vcov_conley()`, `vcov_hetero()`,
+`vcov_cluster()`). CRV3 (`vcov = crv3 ~ g`, `vcov_crv3()`) is a fereg extension (fixest has no
+CRV3): the leave-one-cluster-out jackknife with fixest's cluster small-sample correction;
+after estimation it re-estimates the model.
+
+Not implemented: `fixef.rm = "infinite_coef"`, the panel operators `l()`/`f()`/`d()`,
+`mvsw()`, the `.[]`/`..ctrl` formula macros, and variances given as functions or matrices.
 
 Installing from source needs Rust (cargo, rustc >= 1.85); the source tarball on the GitHub
 release page bundles every Rust dependency, so the build needs no network.

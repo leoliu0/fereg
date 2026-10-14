@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use fereg_core::{AbsorbTerm, AbsorberKind, DofOptions, Family, RfError, Vce, WeightKind};
+use fereg_core::hac::Kernel;
+use fereg_core::{AbsorbTerm, AbsorberKind, Bandwidth, ConleyVce, DofOptions, Family, KernelVce, Psd, RfError, TimeVars, Vce, WeightKind};
 
 fn bad(msg: String) -> RfError {
     RfError::InvalidInput(format!("fereg plugin: {msg}"))
@@ -132,7 +133,7 @@ pub enum RowRead {
     Kept,
 }
 
-/// 1-based list `a*b*c` → 0-based indices below `limit`.
+/// 1-based list `a*b*c` -> 0-based indices below `limit`.
 fn index_list(s: &str, limit: usize, what: &str) -> Result<Vec<usize>, RfError> {
     s.split('*')
         .map(|t| match t.parse::<usize>() {
@@ -172,18 +173,124 @@ pub fn parse_absorb(s: &str, nfac: usize, nslope: usize) -> Result<Vec<AbsorbTer
         .collect()
 }
 
-/// `vce=` and `cluster=` values.
-pub fn parse_vce(vce: &str, cluster: Option<&str>, nfac: usize) -> Result<Vce, RfError> {
-    match (vce, cluster) {
-        ("unadjusted", None) => Ok(Vce::Unadjusted),
-        ("robust", None) => Ok(Vce::Robust),
-        ("cluster", Some(c)) => {
-            Ok(Vce::Cluster(c.split(';').map(|d| index_list(d, nfac, "cluster factor")).collect::<Result<_, _>>()?))
+fn code(rc: i32, msg: &str) -> RfError {
+    RfError::Code(rc, msg.to_string())
+}
+
+/// The variance keys of `cmd=prepare` (PROTOCOL.md, "Variance estimators"): `vce`, `cluster`,
+/// `tvar`, `ivar`, `tdelta`, `dkbw`, `kernel`, `bw`, `kiefer`, `psd`, `cutoff`, `pixel`,
+/// `distance`. Conley coordinates are the slope variables `nslope` and `nslope + 1`.
+pub fn parse_vce(a: &Args, nfac: usize, nslope: usize, ncoord: usize) -> Result<Vce, RfError> {
+    let vce = a.str_or("vce", "unadjusted");
+    let dims = |s: &str| s.split(';').map(|d| index_list(d, nfac, "cluster factor")).collect::<Result<Vec<_>, _>>();
+    let cluster = a.str_opt("cluster").map(dims).transpose()?;
+    let factor_pos = |key: &str| -> Result<Option<usize>, RfError> { a.str_opt(key).map(|s| index_list(s, nfac, key).map(|v| v[0])).transpose() };
+    let tvar = factor_pos("tvar")?;
+    let ivar = factor_pos("ivar")?;
+    let tdelta: f64 = a.num_or("tdelta", 1.0)?;
+    let time = |what: &str| -> Result<TimeVars, RfError> {
+        let time = tvar.ok_or_else(|| bad(format!("{what} needs tvar=")))?;
+        Ok(TimeVars { time, panel: ivar, delta: tdelta })
+    };
+    let kernel = a.str_opt("kernel");
+    let bw = a.str_opt("bw");
+    let kiefer = a.flag("kiefer", false)?;
+    let psd = match a.str_or("psd", "none") {
+        "none" => Psd::None,
+        "psd0" => Psd::Zero,
+        "psda" => Psd::Abs,
+        v => return Err(bad(format!("invalid psd `{v}` (none|psd0|psda)"))),
+    };
+    let ncoord_ok = |want: usize| if ncoord == want { Ok(()) } else { Err(bad(format!("vce={vce} needs ncoord={want}"))) };
+
+    // ivreg2 kernel family: `kernel=`, `bw=` or `kiefer=1` with unadjusted (AC), robust (HAC) or
+    // cluster (Driscoll-Kraay / Thompson).
+    if kernel.is_some() || bw.is_some() || kiefer {
+        let robust = match vce {
+            "unadjusted" => false,
+            "robust" => true,
+            "cluster" => true,
+            v => return Err(bad(format!("kernel= is not allowed with vce={v}"))),
+        };
+        if vce == "cluster" && cluster.is_none() {
+            return Err(bad("vce=cluster needs cluster=".into()));
         }
-        ("cluster", None) => Err(bad("vce=cluster needs cluster=".into())),
-        (_, Some(_)) => Err(bad("cluster= requires vce=cluster".into())),
-        (v, None) => Err(bad(format!("invalid vce `{v}`"))),
+        if vce != "cluster" && cluster.is_some() {
+            return Err(bad("cluster= requires vce=cluster".into()));
+        }
+        ncoord_ok(0)?;
+        let kernel = match kernel {
+            Some(k) => Kernel::parse(k).ok_or_else(|| code(198, "invalid kernel"))?,
+            None if kiefer => Kernel::Truncated,
+            None => Kernel::Bartlett,
+        };
+        if kiefer && kernel != Kernel::Truncated {
+            return Err(code(198, &format!("incompatible options: kiefer and kernel({})", kernel.name())));
+        }
+        let bw = match (bw, kiefer) {
+            (Some(_), true) => return Err(code(198, "incompatible options: kiefer and bw")),
+            (None, true) => Bandwidth::Fixed(f64::NAN),
+            (None, false) => return Err(code(102, "bandwidth option bw() required for HAC-robust estimation")),
+            (Some("auto"), false) => Bandwidth::Auto,
+            (Some(s), false) => match s.parse::<f64>() {
+                Ok(b) if b > 0.0 => Bandwidth::Fixed(b),
+                Ok(_) => return Err(code(198, "invalid bandwidth in option bw() - must be real > 0")),
+                Err(_) => return Err(code(102, "bandwidth option bw() required for HAC-robust estimation")),
+            },
+        };
+        return Ok(Vce::Kernel(KernelVce { kernel, bw, robust, cluster: cluster.unwrap_or_default(), kiefer, psd, time: time("kernel=")? }));
     }
+    if psd != Psd::None {
+        return Err(bad("psd= requires a kernel".into()));
+    }
+    if vce != "conley" {
+        ncoord_ok(0)?;
+    }
+    let needs_cluster = matches!(vce, "cluster" | "crv3");
+    match (needs_cluster, &cluster) {
+        (true, None) => return Err(bad(format!("vce={vce} needs cluster="))),
+        (false, Some(_)) => return Err(bad("cluster= requires vce=cluster or vce=crv3".into())),
+        _ => {}
+    }
+    Ok(match vce {
+        "unadjusted" => Vce::Unadjusted,
+        "robust" => Vce::Robust,
+        "cluster" => Vce::Cluster(cluster.unwrap_or_default()),
+        "crv3" => Vce::Crv3(cluster.unwrap_or_default()),
+        "hc2" => Vce::Hc2,
+        "hc3" => Vce::Hc3,
+        "dkraay" => {
+            let bw = match a.str_opt("dkbw") {
+                None => None,
+                Some(s) => match s.parse::<usize>() {
+                    Ok(b) if b >= 1 => Some(b),
+                    _ => return Err(code(198, "vce(dkraay #): # must be a positive integer (bandwidth = lags + 1)")),
+                },
+            };
+            Vce::Dkraay { time: time("vce=dkraay")?, bw }
+        }
+        "conley" => {
+            ncoord_ok(2)?;
+            let cutoff = match a.str_opt("cutoff") {
+                None => None,
+                Some(s) => match s.parse::<f64>() {
+                    Ok(c) if c > 0.0 => Some(c),
+                    _ => return Err(bad(format!("invalid cutoff `{s}` (km > 0)"))),
+                },
+            };
+            let pixel: f64 = a.num_or("pixel", 0.0)?;
+            if !(pixel >= 0.0) {
+                return Err(bad("pixel must be >= 0".into()));
+            }
+            let spherical = match a.str_or("distance", "triangular") {
+                "triangular" => false,
+                "spherical" => true,
+                v => return Err(bad(format!("invalid distance `{v}` (triangular|spherical)"))),
+            };
+            Vce::Conley(ConleyVce { lat: nslope, lon: nslope + 1, cutoff, pixel, spherical })
+        }
+        v => return Err(bad(format!("invalid vce `{v}`"))),
+    })
 }
 
 pub fn parse_wtype(s: &str) -> Result<WeightKind, RfError> {
@@ -268,9 +375,51 @@ mod tests {
 
     #[test]
     fn vce_and_dof() {
-        assert_eq!(parse_vce("cluster", Some("1;2*3"), 3).unwrap(), Vce::Cluster(vec![vec![0], vec![1, 2]]));
-        assert!(parse_vce("cluster", None, 3).is_err());
-        assert!(parse_vce("robust", Some("1"), 3).is_err());
+        let vce = |v: &[&str], ncoord: usize| {
+            let mut t = vec!["prepare"];
+            t.extend_from_slice(v);
+            let a = args(&t);
+            let r = parse_vce(&a, 3, 1, ncoord);
+            if r.is_ok() {
+                a.finish().unwrap();
+            }
+            r
+        };
+        assert_eq!(vce(&["vce=cluster", "cluster=1;2*3"], 0).unwrap(), Vce::Cluster(vec![vec![0], vec![1, 2]]));
+        assert!(vce(&["vce=cluster"], 0).is_err());
+        assert!(vce(&["vce=robust", "cluster=1"], 0).is_err());
+        assert_eq!(vce(&["vce=crv3", "cluster=2"], 0).unwrap(), Vce::Crv3(vec![vec![1]]));
+        assert_eq!(vce(&["vce=hc3"], 0).unwrap(), Vce::Hc3);
+        let tv = TimeVars { time: 2, panel: Some(0), delta: 2.0 };
+        assert_eq!(vce(&["vce=dkraay", "tvar=3", "ivar=1", "tdelta=2", "dkbw=4"], 0).unwrap(), Vce::Dkraay { time: tv.clone(), bw: Some(4) });
+        assert_eq!(vce(&["vce=dkraay", "dkbw=0", "tvar=3"], 0).unwrap_err().rc(), 198);
+        assert!(vce(&["vce=dkraay"], 0).is_err());
+        let k = vce(&["vce=cluster", "cluster=3", "kernel=quadratic-spectral", "bw=2.5", "tvar=3", "ivar=1", "tdelta=2", "psd=psda"], 0).unwrap();
+        assert_eq!(
+            k,
+            Vce::Kernel(KernelVce {
+                kernel: Kernel::QuadraticSpectral,
+                bw: Bandwidth::Fixed(2.5),
+                robust: true,
+                cluster: vec![vec![2]],
+                kiefer: false,
+                psd: Psd::Abs,
+                time: tv
+            })
+        );
+        let Vce::Kernel(k) = vce(&["vce=unadjusted", "kiefer=1", "tvar=3", "ivar=1"], 0).unwrap() else { panic!() };
+        assert!(k.kiefer && !k.robust && k.kernel == Kernel::Truncated);
+        let Vce::Kernel(k) = vce(&["vce=robust", "bw=auto", "tvar=3"], 0).unwrap() else { panic!() };
+        assert!(k.robust && k.kernel == Kernel::Bartlett && k.bw == Bandwidth::Auto);
+        assert_eq!(vce(&["vce=robust", "kernel=newey", "bw=2", "tvar=3"], 0).unwrap_err().rc(), 198);
+        assert_eq!(vce(&["vce=robust", "kernel=parzen", "tvar=3"], 0).unwrap_err().rc(), 102);
+        assert!(vce(&["vce=robust", "bw=2"], 0).is_err());
+        assert_eq!(
+            vce(&["vce=conley", "cutoff=100", "distance=spherical"], 2).unwrap(),
+            Vce::Conley(ConleyVce { lat: 1, lon: 2, cutoff: Some(100.0), pixel: 0.0, spherical: true })
+        );
+        assert!(vce(&["vce=conley"], 0).is_err());
+        assert!(vce(&["vce=robust"], 2).is_err());
         assert_eq!(parse_dof("pairwise,clusters,continuous").unwrap(), DofOptions::default());
         assert_eq!(parse_dof("none").unwrap(), DofOptions::none());
         assert!(parse_dof("foo").is_err());

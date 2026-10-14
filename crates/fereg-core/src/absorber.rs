@@ -1,7 +1,7 @@
-//! The boundary between the FE solver and the estimators (plan §1.1b).
+//! The boundary between the FE solver and the estimators (plan sec. 1.1b).
 //!
 //! An [`Absorber`] projects the absorbed fixed effects out of row-major column blocks:
-//! ṽ = v − D(D'WD)⁺D'Wv for every column v. Rows are always in [`Absorber::row_order`]
+//! v~ = v - D(D'WD)^+ D'Wv for every column v. Rows are always in [`Absorber::row_order`]
 //! (the solver's preferred observation order); estimators never see the internal layout.
 //!
 //! With no absorb terms (`noabsorb`) the absorber projects out the constant.
@@ -36,7 +36,7 @@ pub struct SolveInfo {
     pub exact: bool,
 }
 
-/// FE coefficients for R columns, in absorber-specific coordinates (`p` rows, row-major p×R).
+/// FE coefficients for R columns, in absorber-specific coordinates (`p` rows, row-major p x R).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeCoefs {
     pub p: usize,
@@ -51,7 +51,7 @@ impl FeCoefs {
         (0..self.p).map(|i| self.data[i * self.r + j]).collect()
     }
 
-    /// The single column Σ_j c_j·col_j (e.g. α_y − Σ β_j α_xj with c = [1, −β…]).
+    /// The single column sum_j c_j*col_j (e.g. alpha_y - sum beta_j alpha_xj with c = [1, -beta...]).
     pub fn combine(&self, c: &[f64]) -> FeCoefs {
         assert_eq!(c.len(), self.r, "combine: one weight per column");
         let data = self.data.chunks_exact(self.r).map(|row| row.iter().zip(c).map(|(a, b)| a * b).sum()).collect();
@@ -70,10 +70,11 @@ pub trait Absorber: Send {
     fn weights(&self) -> Option<&[f64]>;
 
     /// Replaces the weights (row order, strictly positive). GLM calls this every IRLS iteration;
-    /// the structure is reused and only weight-dependent quantities are refreshed.
-    fn set_weights(&mut self, w: Option<Vec<f64>>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError>;
+    /// the structure is reused and only weight-dependent quantities are refreshed. The values
+    /// are copied into the previous weight buffer when it has the same length (no allocation).
+    fn set_weights(&mut self, w: Option<&[f64]>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError>;
 
-    /// Residualizes the N×R row-major block `z` in place. `warm` (same R) seeds the solver.
+    /// Residualizes the N x R row-major block `z` in place. `warm` (same R) seeds the solver.
     fn residualize(
         &mut self,
         z: &mut [f64],

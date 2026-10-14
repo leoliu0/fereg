@@ -1,4 +1,4 @@
-//! The session kept between `prepare` and an estimation command (plan §4.4).
+//! The session kept between `prepare` and an estimation command (plan sec. 4.4).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,4 +1,4 @@
-//! Estimation sample (plan §1.3): reghdfe's cyclic singleton removal, extended with the GLM
+//! Estimation sample (plan sec. 1.3): reghdfe's cyclic singleton removal, extended with the GLM
 //! `fe` separation rule.
 //!
 //! Each pass counts the level sizes of one term over the current sample and drops the
@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use crate::api::Family;
 use crate::par::{CHUNK, Pool};
 
-/// GLM `fe` separation: Poisson drops FE groups with Σy = 0; logit also drops groups with Σy = count.
+/// GLM `fe` separation: Poisson drops FE groups with sum y = 0; logit also drops groups with sum y = count.
 #[derive(Clone, Copy, Debug)]
 pub struct SepRule<'a> {
     /// Depvar over the same observations as the codes (logit: any nonzero value counts as 1).

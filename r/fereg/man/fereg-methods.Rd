@@ -76,8 +76,10 @@
 \arguments{
 \item{object}{A \code{fereg} object.}
 
-\item{vcov, ssc, cluster, se}{Post-hoc variance (same forms as in \code{\link[=feols]{feols()}}); computed from the
-retained estimation state without re-estimating. \code{NULL} keeps the estimation's variance.}
+\item{vcov, ssc, cluster, se}{Post-hoc variance (same forms as in \code{\link[=feols]{feols()}}, including the
+request objects of \link{vcov_requests}); computed from the retained estimation state without
+re-estimating, except CRV3, whose leave-one-cluster-out refits re-estimate the model on the
+estimation data (found again from the call). \code{NULL} keeps the estimation's variance.}
 
 \item{stage}{IV only: \code{1} first stage(s), \code{2} second stage (default), \code{1:2} both.}
 
@@ -98,7 +100,25 @@ retained estimation state without re-estimating. \code{NULL} keeps the estimatio
 
 \item{k}{AIC penalty per parameter.}
 }
+\value{
+\code{summary()}: the \code{fereg} object with the requested variance (coefficient table in
+\verb{$coeftable}); for IV with \code{stage = 1} or \code{1:2}, the requested stages (a \code{fereg_multi} when
+there are several). \code{coef()}: named vector of coefficients. \code{vcov()}: variance matrix.
+\code{confint()}: data frame of lower and upper bounds, one row per coefficient. \code{nobs()}: number
+of observations. \code{resid()}, \code{fitted()}, \code{predict()}: numeric vectors. \code{logLik()}: object of
+class \code{logLik}. \code{AIC()}, \code{BIC()}, \code{deviance()}, \code{sigma()}: numbers.
+}
 \description{
 Accessors, post-hoc variances, predictions and fixed effects of \code{\link[=feols]{feols()}}, \code{\link[=fepois]{fepois()}} and
 \code{\link[=feglm]{feglm()}} results, as in fixest.
+}
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+summary(m, vcov = "hetero")
+coef(m)
+vcov(m, vcov = ~id)
+confint(m, level = 0.9)
+head(predict(m, newdata = trade_toy))
+c(AIC = AIC(m), BIC = BIC(m))
 }

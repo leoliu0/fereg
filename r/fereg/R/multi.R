@@ -14,6 +14,16 @@ new_multi <- function(results, ids) {
 #' @param x,object A `fereg_multi` object.
 #' @param i Indices or names of estimations.
 #' @param ... Passed to the methods of each estimation.
+#' @return `print()`: `x`, invisibly. `[` and `summary()`: a `fereg_multi` object. `as.list()`:
+#'   a list of `fereg` objects. `coef()`: data frame with one row per estimation and one column
+#'   per coefficient. `nobs()`: number of observations of each estimation.
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' ms <- feols(y ~ csw(x1, x2) | id + year, trade_toy, nthreads = 2)
+#' ms
+#' coef(ms)
+#' nobs(ms)
+#' summary(ms[2], vcov = ~id)
 #' @name fereg_multi
 NULL
 

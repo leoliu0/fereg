@@ -6,8 +6,10 @@
 #' [feglm()] results, as in fixest.
 #'
 #' @param object A `fereg` object.
-#' @param vcov,ssc,cluster,se Post-hoc variance (same forms as in [feols()]); computed from the
-#'   retained estimation state without re-estimating. `NULL` keeps the estimation's variance.
+#' @param vcov,ssc,cluster,se Post-hoc variance (same forms as in [feols()], including the
+#'   request objects of [vcov_requests]); computed from the retained estimation state without
+#'   re-estimating, except CRV3, whose leave-one-cluster-out refits re-estimate the model on the
+#'   estimation data (found again from the call). `NULL` keeps the estimation's variance.
 #' @param stage IV only: `1` first stage(s), `2` second stage (default), `1:2` both.
 #' @param attr Add the attributes `type`, `df.K`, `df.t` (and `G`) to the matrix.
 #' @param parm Coefficients (names or indices); all by default.
@@ -18,6 +20,21 @@
 #' @param newdata A data frame for predictions; fixed-effect levels absent at estimation give NA.
 #' @param k AIC penalty per parameter.
 #' @param ... Not used.
+#' @return `summary()`: the `fereg` object with the requested variance (coefficient table in
+#'   `$coeftable`); for IV with `stage = 1` or `1:2`, the requested stages (a `fereg_multi` when
+#'   there are several). `coef()`: named vector of coefficients. `vcov()`: variance matrix.
+#'   `confint()`: data frame of lower and upper bounds, one row per coefficient. `nobs()`: number
+#'   of observations. `resid()`, `fitted()`, `predict()`: numeric vectors. `logLik()`: object of
+#'   class `logLik`. `AIC()`, `BIC()`, `deviance()`, `sigma()`: numbers.
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+#' summary(m, vcov = "hetero")
+#' coef(m)
+#' vcov(m, vcov = ~id)
+#' confint(m, level = 0.9)
+#' head(predict(m, newdata = trade_toy))
+#' c(AIC = AIC(m), BIC = BIC(m))
 #' @name fereg-methods
 NULL
 
@@ -46,23 +63,61 @@ update_vcov <- function(object, vcov = NULL, ssc = NULL, cluster = NULL, se = NU
   if (isTRUE(object$iv_stage == 1)) {
     stop("fereg: post-hoc variances are not available for IV first stages; re-estimate with `vcov`", call. = FALSE)
   }
+  if (!is.null(ssc) && !inherits(ssc, "ssc.type")) stop("fereg: `ssc` must be created with ssc()", call. = FALSE)
+  v <- if (is.null(vcov) && is.null(cluster) && is.null(se)) object$vcov_info$request else parse_vcov(vcov, cluster, se)
+  if (v$type == "crv3") return(refit_vcov(object, v, ssc))
   if (is.null(object$state)) {
     stop("fereg: the estimation state was not kept (lean = TRUE); re-estimate with `vcov`", call. = FALSE)
   }
-  if (!is.null(ssc) && !inherits(ssc, "ssc.type")) stop("fereg: `ssc` must be created with ssc()", call. = FALSE)
-  v <- if (is.null(vcov) && is.null(cluster) && is.null(se)) object$vcov_info[c("type", "dims")] else parse_vcov(vcov, cluster, se)
-  v <- resolve_vcov(v, object$fixef_terms)
-  ssc_used <- effective_ssc(ssc, v$type)
+  ssc_used <- effective_ssc(v$ssc %||% ssc, v$type)
   nthreads <- getOption("fereg.nthreads", default_threads())
-  if (v$type == "cluster") {
-    data <- fetch_data(object)
-    reg <- new_factors(data, environment(object$fml), new.env(parent = emptyenv()))
-    idx <- lapply(v$dims, function(d) vapply(d, function(e) factor_index(reg, e), 0))
-    out <- fereg_vcov(object$state, "cluster", ssc_core(ssc_used), reg$cols, reg$names, idx, nthreads)
-  } else {
-    out <- fereg_vcov(object$state, v$type, ssc_core(ssc_used), list(), character(0), list(), nthreads)
+  if (v$type %in% c("iid", "hetero", "hc2", "hc3")) {
+    out <- fereg_vcov(object$state, core_kind(v), ssc_core(ssc_used), list(), character(0), list(), list(), nthreads)
+    return(set_vcov(object, out, v, ssc_used))
   }
+  data <- fetch_data(object)
+  v <- resolve_vcov(v, object$fixef_terms, object$panel.id, names(data))
+  reg <- new_factors(data, environment(object$fml), new.env(parent = emptyenv()))
+  vc <- vcov_columns(v, reg)
+  for (k in c("lat", "lon")) check_coord_na(object, vc[[k]], v$vars[[k]], c(lat = "latitude", lon = "longitude")[[k]])
+  vars <- list(time = vc$time, panel = vc$panel, lat = vc$lat, lon = vc$lon)
+  out <- fereg_vcov(object$state, core_kind(v), ssc_core(ssc_used), reg$cols, reg$names, vc$cluster, vars, nthreads)
   set_vcov(object, out, v, ssc_used)
+}
+
+# fixest's error for a coordinate with missing values on the estimation rows (post hoc).
+check_coord_na <- function(object, values, expr, label) {
+  if (is.null(values)) return(invisible())
+  if (anyNA(obs_subset(values, object$obs_selection))) {
+    stop("The variable '", deparse1l(expr), "' used to estimate the VCOV (employed as ", label,
+      ") has NA values which would lead to a sample used to compute the VCOV different from the sample used to estimate the parameters. ",
+      "This would lead to wrong inference.\nPossible solutions: i) ex ante prune them, ii) impute them, or iii) use the argument 'vcov' at estimation time.",
+      call. = FALSE)
+  }
+  invisible()
+}
+
+# CRV3 after estimation: the jackknife refits need the data, so the model is estimated again on
+# the same rows with vcov = CRV3 (only its variance is used).
+refit_vcov <- function(object, v, ssc) {
+  r <- object$refit
+  data <- fetch_data(object)
+  n <- data_nrow(data)
+  args <- r$args
+  args$data <- data
+  args$vcov <- v
+  args$ssc <- ssc
+  args$lean <- TRUE
+  args$notes <- FALSE
+  w <- row_vector(args$weights, data, r$env, n, "weights")
+  if (!is.null(w)) w <- as_num(w, "weights")
+  off <- row_vector(args$offset, data, r$env, n, "offset")
+  if (!is.null(off)) off <- as_num(off, "offset")
+  new <- fit_one(r$m, args, data, r$env, n, w, off, r$drop, new.env(parent = emptyenv()))
+  if (!identical(names(new$coefficients), names(object$coefficients))) {
+    stop("fereg: the re-estimation for CRV3 does not reproduce the model; is the estimation data unchanged?", call. = FALSE)
+  }
+  apply_vcov(object, new$cov.scaled, new$vcov_info)
 }
 
 # The estimation data, found again from the call (as fixest does).
@@ -70,7 +125,7 @@ fetch_data <- function(object) {
   data <- tryCatch(eval(object$call$data, object$call_env), error = function(e) NULL)
   if (is.null(data) || !is.list(data) || data_nrow(data) != object$nobs_origin) {
     stop("fereg: the estimation data (`", deparse1l(object$call$data), "`) cannot be found or has changed; ",
-      "clustered variances after estimation need it", call. = FALSE)
+      "clustered, Newey-West, Driscoll-Kraay, Conley and CRV3 variances after estimation need it", call. = FALSE)
   }
   data
 }
@@ -94,6 +149,12 @@ vcov.fereg <- function(object, vcov = NULL, ssc = NULL, attr = FALSE, cluster = 
 #' @param object A `fereg` (or `fereg_multi`) object.
 #' @param ... Passed to [summary()][fereg-methods] (`vcov`, `ssc`, `cluster`).
 #' @return Named vectors, or the coefficient matrix for `coeftable()`.
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+#' se(m)
+#' pvalue(m, vcov = "hetero")
+#' coeftable(m, vcov = ~id)
 #' @export
 se <- function(object, ...) UseMethod("se")
 
@@ -255,6 +316,12 @@ fixef_raw <- function(object) {
 #' @param object A `fereg` object.
 #' @param ... Not used.
 #' @return A list (class `fereg.fixef`) of named vectors, one per fixed effect / slope.
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+#' fe <- fixef(m)
+#' summary(fe)
+#' head(fe$year)
 #' @export
 fixef <- function(object, ...) UseMethod("fixef")
 
@@ -288,17 +355,52 @@ print.fereg.fixef <- function(x, ...) {
   invisible(x)
 }
 
+# Layout of fixest's summary.fixest.fixef: a table of counts (integers), means and standard
+# deviations (3 significant digits) per fixed effect / slope (one line when there is a single
+# one), then the first `n` coefficients of each (4 significant digits). Returns NULL invisibly.
 #' @export
-summary.fereg.fixef <- function(object, ...) {
-  tab <- rbind(
-    "Number of fixed-effects" = lengths(object),
-    "Number of references" = attr(object, "references"),
-    "Mean" = vapply(object, mean, 0),
-    "Standard-deviation" = vapply(object, stats::sd, 0)
-  )
-  cat("Fixed_effects coefficients\n")
-  print(signif(tab, 3))
-  invisible(tab)
+summary.fereg.fixef <- function(object, n = 5, ...) {
+  q <- length(object)
+  nm <- names(object)
+  is_slope <- grepl("\\[", nm)
+  fe <- gsub("\\[.+", "", nm)
+  slope <- gsub(".+\\[|\\].+", "", nm)
+  nm[is_slope] <- paste0(slope[is_slope], " (slopes: ", fe[is_slope], ")")
+  kind <- if (all(is_slope)) "slope" else if (any(is_slope)) "both" else "fe"
+  cat(switch(kind, both = "Fixed-effects/Slope", fe = "Fixed_effects", slope = "Slope"), " coefficients\n", sep = "")
+  if (q == 1) {
+    x1 <- object[[1]]
+    if (is_slope) {
+      cat("Number of slope coefficients for variable ", slope, " (slope: ", fe, ") is ", format_int(length(x1)), ".\n", sep = "")
+    } else {
+      cat("Number of fixed-effects for variable ", nm, " is ", format_int(length(x1)), ".\n", sep = "")
+    }
+    cat("\tMean = ", signif(mean(x1), 3), "\tVariance = ", signif(stats::var(x1), 3), "\n", sep = "")
+  } else {
+    res <- as.data.frame(rbind(
+      lengths(object),
+      attr(object, "references"),
+      vapply(object, function(v) as.character(signif(mean(v), 3)), ""),
+      vapply(object, function(v) as.character(signif(stats::sd(v), 3)), "")
+    ))
+    rownames(res) <- c(
+      paste0("Number of ", switch(kind, both = "fixed-effects/slopes", fe = "fixed-effects", slope = "slopes")),
+      "Number of references", "Mean", "Standard-deviation"
+    )
+    colnames(res) <- nm
+    print(res)
+  }
+  cat("\nCOEFFICIENTS:\n")
+  for (i in seq_len(q)) {
+    m <- object[[i]][seq_len(min(n, length(object[[i]])))]
+    m_char <- as.data.frame(t(as.data.frame(c("", as.character(signif(m, 4))))))
+    names(m_char) <- c(paste0(nm[i], ":"), names(m))
+    rownames(m_char) <- " "
+    if (length(object[[i]]) > n) m_char[["   "]] <- paste0("... ", format_int(length(object[[i]]) - n), " remaining")
+    print(m_char)
+    if (i != q) cat("-----\n")
+  }
+  invisible(NULL)
 }
 
 #' @rdname fereg-methods

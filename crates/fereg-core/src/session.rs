@@ -1,4 +1,4 @@
-//! Estimation session: sample fixing, compaction and the absorber (plan §1.1).
+//! Estimation session: sample fixing, compaction and the absorber (plan sec. 1.1).
 //!
 //! `Session::prepare` encodes factors, removes singletons (and GLM `fe`-separated groups),
 //! compacts every per-observation array to the kept sample, and builds the [`Absorber`].
@@ -58,6 +58,34 @@ pub struct DropReport {
     pub fe_separated: u64,
 }
 
+/// Per-observation inputs of the time-series and spatial variance estimators (kept order).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct VceData {
+    /// Values of the tsset time variable.
+    pub time: Option<Vec<f64>>,
+    /// Codes of the xtset panel variable and their count.
+    pub panel: Option<(Vec<u32>, usize)>,
+    /// Conley latitude and longitude (degrees).
+    pub coords: Option<(Vec<f64>, Vec<f64>)>,
+}
+
+impl VceData {
+    fn filter(&mut self, alive: &[bool]) {
+        if let Some(t) = &mut self.time {
+            *t = filter(t, alive);
+        }
+        if let Some((codes, g)) = &mut self.panel {
+            let c = factor::compact(&Codes { codes: std::mem::take(codes), n: *g as u32 }, alive);
+            *codes = c.codes;
+            *g = c.n as usize;
+        }
+        if let Some((lat, lon)) = &mut self.coords {
+            *lat = filter(lat, alive);
+            *lon = filter(lon, alive);
+        }
+    }
+}
+
 pub struct Session {
     pub(crate) n_input: usize,
     pub(crate) keep: Vec<bool>,
@@ -77,6 +105,7 @@ pub struct Session {
     pub(crate) num_fe_separated: u64,
     pub(crate) kind: AbsorberKind,
     pub(crate) absorber: Box<dyn Absorber>,
+    pub(crate) vdata: VceData,
 }
 
 impl Session {
@@ -121,7 +150,7 @@ impl Session {
         gather::is_local(self.row_order())
     }
 
-    /// Kept-order columns → row-major block in [`Session::row_order`].
+    /// Kept-order columns -> row-major block in [`Session::row_order`].
     pub fn gather(&self, cols: &[&[f64]], ctx: &Ctx) -> Result<Vec<f64>, RfError> {
         for c in cols {
             if c.len() != self.n() {
@@ -131,7 +160,7 @@ impl Session {
         par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| gather::gather_rows(self.row_order(), cols, pool))?
     }
 
-    /// Input-order columns (length [`Session::n_input`]) → row-major block in
+    /// Input-order columns (length [`Session::n_input`]) -> row-major block in
     /// [`Session::row_order`], in one pass through the composed index maps (inside `pool`).
     pub(crate) fn gather_input(&self, cols: &[gather::Col], pool: &Pool) -> Result<Vec<f64>, RfError> {
         debug_assert!(cols.iter().all(|c| !matches!(c, gather::Col::Values(v) if v.len() != self.n_input)));
@@ -139,7 +168,7 @@ impl Session {
         gather::gather_input(self.row_order(), kept, cols, pool)
     }
 
-    /// Kept-order row-major block (R columns) → row-major block in [`Session::row_order`].
+    /// Kept-order row-major block (R columns) -> row-major block in [`Session::row_order`].
     pub fn permute_rows(&self, kept_rows: Vec<f64>, r: usize, ctx: &Ctx) -> Result<Vec<f64>, RfError> {
         if kept_rows.len() != self.n() * r {
             return Err(RfError::InvalidInput("permute_rows: block size differs from the kept sample".into()));
@@ -240,6 +269,7 @@ impl Session {
             cd.codes = c.codes;
             cd.g = c.n as usize;
         }
+        self.vdata.filter(&alive);
         self.weights = self.weights.as_ref().map(|w| filter(w, &alive));
         self.y_sep = self.y_sep.as_ref().map(|y| filter(y, &alive));
         self.kept_index = new_index;
@@ -318,10 +348,26 @@ fn validate(p: &Prep) -> Result<(), RfError> {
             return bad("absorb term has neither intercept nor slopes");
         }
     }
-    if let Vce::Cluster(dims) = &p.vce {
-        if dims.is_empty() || dims.iter().any(|d| d.is_empty() || d.iter().any(|&f| f >= p.factors.len())) {
+    for d in p.vce.cluster_dims() {
+        if d.is_empty() || d.iter().any(|&f| f >= p.factors.len()) {
             return bad("cluster dimension references an invalid factor");
         }
+    }
+    if matches!(&p.vce, Vce::Cluster(d) | Vce::Crv3(d) if d.is_empty()) {
+        return bad("cluster dimension references an invalid factor");
+    }
+    if let Some(tv) = p.vce.time_vars() {
+        for f in std::iter::once(tv.time).chain(tv.panel) {
+            if !matches!(p.factors.get(f), Some(FactorValues::Num(_))) {
+                return bad("the time and panel variables must be numeric factors");
+            }
+        }
+        if !(tv.delta.is_finite() && tv.delta > 0.0) {
+            return bad("the time delta must be positive");
+        }
+    }
+    if matches!(&p.vce, Vce::Conley(c) if c.lat >= p.slope_vars.len() || c.lon >= p.slope_vars.len()) {
+        return bad("Conley coordinates reference an invalid variable");
     }
     match (p.weight_kind, p.weights) {
         (WeightKind::None, None) => {}
@@ -383,10 +429,8 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
     let codes: Vec<Codes> = p.factors.iter().map(|f: &FactorValues| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
     crate::solve::log_phase(ctx, &mut t, "factorize");
     ctx.check()?;
-    let cluster_dims: &[Vec<usize>] = match &p.vce {
-        Vce::Cluster(dims) => dims,
-        _ => &[],
-    };
+    let cluster_dims = p.vce.cluster_dims();
+    let cluster_dims = cluster_dims.as_slice();
     let term_factors: Vec<&[usize]> = p.absorb.iter().map(|t| t.factors.as_slice()).collect();
     let (term_codes, cluster_codes) = term_and_cluster_codes(codes, &term_factors, cluster_dims, pool)?;
     ctx.check()?;
@@ -415,7 +459,29 @@ fn prepare_in_pool(p: &Prep, ctx: &Ctx, kind: AbsorberKind, pool: &Pool) -> Resu
         sep_fe: p.sep_fe,
         counts,
     };
-    Session::from_parts(parts, kind, pool, ctx)
+    let mut session = Session::from_parts(parts, kind, pool, ctx)?;
+    session.vdata = vce_data(p, &session.kept_index, pool)?;
+    Ok(session)
+}
+
+/// Kept-order inputs of the time-series and Conley estimators.
+fn vce_data(p: &Prep, kept: &[u32], pool: &Pool) -> Result<VceData, RfError> {
+    let num = |f: usize| match p.factors[f] {
+        FactorValues::Num(v) => Ok(v),
+        FactorValues::Str { .. } => Err(RfError::InvalidInput("the time and panel variables must be numeric factors".into())),
+    };
+    let mut out = VceData::default();
+    if let Some(tv) = p.vce.time_vars() {
+        out.time = Some(gather_kept(num(tv.time)?, kept, pool)?);
+        if let Some(pf) = tv.panel {
+            let c = factor::restrict(&factor::factorize(&p.factors[pf], pool)?, kept, pool)?;
+            out.panel = Some((c.codes, c.n as usize));
+        }
+    }
+    if let Vce::Conley(c) = &p.vce {
+        out.coords = Some((gather_kept(p.slope_vars[c.lat], kept, pool)?, gather_kept(p.slope_vars[c.lon], kept, pool)?));
+    }
+    Ok(out)
 }
 
 /// A session's inputs once its sample is fixed: term and cluster codes over the input
@@ -500,6 +566,7 @@ impl Session {
             num_fe_separated: counts.fe_separated,
             kind,
             absorber,
+            vdata: VceData::default(),
         })
     }
 }

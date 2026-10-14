@@ -363,6 +363,132 @@ Coefficient gaps are unchanged:
 - versus fixest: median 5.7e-14, max 5.6e-5 (fixest's tolerance on difficult 3-FE/Poisson rows);
 - versus the Stata `fereg`: max 3.0e-8.
 
+## 2026-10-13: GLM loop, scatter accumulators, cluster variances, elimination choice
+
+Measured with `crates/fereg-core/examples/bench_csv.rs` (one model on a `bench/data` CSV:
+median of `--reps` fits, the first coefficient and its SE, and an FNV hash of the bits of the
+coefficients and the variance matrix; `--verbose` adds one fit with phase timings). Ryzen 9
+9950X, otherwise idle. Each row: minimum over 2 alternating rounds of the median.
+
+| Row | Before (`6a51f1d`) | After | Ratio |
+|---|---|---|---|
+| OLS simple 1e7, 3 FEs, T=16 | 0.236 s | 0.220 s | 0.93 |
+| OLS difficult 1e7, T=16 | 0.328 s | 0.311 s | 0.95 |
+| OLS 5 regressors, cluster, 1e7, T=16 | 0.457 s | 0.371 s | 0.81 |
+| AKM scale 1e7, T=16 | 0.838 s | 0.784 s | 0.94 |
+| IV 1e7, hetero, T=16 | 0.402 s | 0.337 s | 0.84 |
+| Poisson 1e7, hetero, T=16 | 2.530 s | 2.066 s | 0.82 |
+| logit 1e7, T=16 | 1.980 s | 1.644 s | 0.83 |
+| AKM δ = 1 / 0.1 / 0.001, 1e6, T=16 | 0.037 / 0.131 / 0.027 s | 0.034 / 0.133 / 0.027 s | 0.93 / 1.02 / 0.98 |
+| OLS simple / difficult 1e6, T=1 | 0.062 / 0.106 s | 0.059 / 0.105 s | 0.95 / 0.99 |
+| AKM δ = 0.1, 1e6, T=1 | 0.223 s | 0.231 s | 1.03 |
+| IV / Poisson / logit 1e6, T=1 | 0.113 / 0.628 / 0.610 s | 0.109 / 0.584 / 0.588 s | 0.96 / 0.93 / 0.96 |
+| Slopes 1e6, T=1 | 0.102 s | 0.102 s | 1.00 |
+| Taxi OLS, route + how + day, two-way cluster, T=16 | 0.404 s | 0.343 s | 0.85 |
+| Taxi OLS, 4 FEs (`m2` of the article) | 1.211 s | 0.843 s | 0.70 |
+| Taxi Poisson, 4 FEs | 8.802 s | 4.185 s | 0.48 |
+| Taxi logit, 4 FEs | 10.602 s | 6.259 s | 0.59 |
+
+The AKM δ = 0.1 rows spend most of their time in the joint sparse factorization, which did not
+change; the cell-code check of item 10 adds about 1 ms at T=1. Results stay bit-identical across
+thread counts (checked at T = 1, 4, 7, 16 on seven of the rows); against the old version they
+differ in the last bits where the scatter task count or the PCG path changed (items 8 and 9) or
+the variance sums are added in another order (item 11).
+
+### 7. IRLS loop without per-iteration copies
+
+`Absorber::set_weights` borrows the weights and copies them into the previous buffer when the
+length matches (`par::copy_into`), with a parallel positivity check (`par::all_positive`); the
+solver's weight gather is parallel; cell weights are not stored when every cell holds one row.
+Without the mu separation check, eta, the previous eta, mu and the deviance terms are computed
+in one pass, with the per-row arithmetic and chunk sums of `update_mu_deviance`. Bit-identical:
+Poisson 1e7 T=16 2.53 → 2.37 s, logit 1e7 1.97 → 1.83 s; taxi GLMs within 0.5%.
+
+### 8. Scatter accumulators within a byte budget
+
+`Structure::tasks` grouped the parts so that tasks × accumulator length ≤ 2^22 values: on the
+taxi panel (2.6M cells, m·r = 195k) 53 tasks, 83 MB of accumulators beyond the 64 MiB of L3, 7.1 ms
+per matvec. `acc_tasks` now takes 16 to 64 tasks within 8 MiB in total and 1/8 of the cell data:
+13 tasks, 3.7 ms with the same iterations. The ordered combine zeroes the entries it reads
+instead of a separate reset pass: 3.4 ms. Over two suites 8 MiB was 1–3% faster than 16 MiB on
+six of the seven 1e7 T=16 rows (1.5% slower with 5 clustered regressors); 4 MiB was no faster.
+Rejected: no accumulators (every block through the M × r buffer): 27.6 ms per matvec.
+
+### 9. Refreshing stale block factors by cost
+
+Between IRLS iterations the exact sparse factors of escalated large blocks were kept as
+preconditioners for the new weights. They are now refactored before a solve when the modelled
+rebuild cost (assembly work and nonzeros, factor flops and entries) is at most 30% of the last
+solve's modelled PCG cost (`stale_refresh_pays`); approximate factors keep the iteration-count
+rule. The inputs are structural, so the path does not depend on the thread count. Taxi Poisson:
+654 → 361 PCG iterations, 6.15 → 4.95 s.
+
+### 10. Unchecked gather and scatter kernels
+
+`gather_cells`, `scatter_cell` and `scatter_cells` index the reduced vectors with
+`get_unchecked`. They are `unsafe fn` with the precondition `Structure::codes_within`, asserted
+once per task. It reads only private data, the cell codes (now behind `cell_codes()`) and their
+level bounds, and `build` checks every cell code against its bound, so no change to the public
+fields can break it. Unchecked vs checked, bit-identical: OLS difficult 1e6 T=1 0.108 → 0.105 s,
+Poisson 1e6 T=1 0.611 → 0.575 s, Poisson 1e7 T=16 2.38 → 2.35 s; taxi within noise. The
+asserts and the check cost 1–2%, within run-to-run noise.
+
+### 11. Cluster variances
+
+`group_rows` sorted rows by cluster with atomic cursors (contended at small G: 0.08–0.14 s per
+dimension on the taxi panel) and then sorted each cluster. It now uses the stable counting sort
+of the structure (`scatter_by_code`), which gives the same permutation. The score sums of every
+subset whose sums fit (16 tasks of at most 2 MB) come from one pass over the rows in row order
+(`stream_sums`: fixed row ranges, added in task order); larger subsets, such as clusters by
+worker, keep the grouped path. Taxi, two-way clustering (129, 249 and 11.3k clusters): variance
+phase OLS 0.204 → 0.050 s, Poisson 0.586 → 0.115 s (the GLM block is in kept order, so the
+grouped pass read its rows at random). The `log_dist` SE of `m2` is 0.16102386185708500 against
+0.16102386185708464 from the old code (relative 2e-15).
+
+### 12. Elimination choice in linear time
+
+With several candidates, E was computed from a comparison sort of the 6.7M level pairs of every
+pair of terms (0.124 s on the taxi panel). Now the rows are counting-sorted by each candidate and
+one pass counts the distinct levels of the other terms per level with stamp arrays; the counts
+are exact, so the choice is the same, and the sort of the chosen term is reused as the FE1 sort
+of the structure. Taxi `m2`: structure 0.185 → 0.137 s, fit 0.872 → 0.833 s, bit-identical.
+
+### 13. fixest / pyfixest collinearity in the first IRLS iteration
+
+The R and Python GLMs ran ppmlhdfe's `remove_collinears` before IRLS under the fixest
+convention: one solve of X at the fixed-effects tolerance (taxi Poisson: 63 PCG iterations,
+about 0.45 s), with a rule that can drop other near-collinear columns than fixest's. They now
+apply fixest's `cpp_cholesky` rule where fixest does (`GlmCollinear`): to X residualized in
+the first IRLS iteration, weighted by its IRLS weights (pyfixest: unweighted). The pass stays
+for Stata and before pyfixest's ReLU separation check. The first FE solve keeps its loose
+tolerance, which bounds the error of each residualized column by tol_in times its W-norm (the
+CG stopping rule). `chol_collin_certain` accepts the outcome when 100 times that bound,
+propagated through each column's coefficients on the earlier columns, plus the rounding of the
+factorization, cannot move a pivot across `tol`. Otherwise the block is residualized again at
+the final tolerance; the loose error lies in the FE space, so the second solve completes the
+first. Solving the first iteration at the final tolerance every time was up to 9% slower
+(Poisson 1e7) than the old pass.
+
+| Row | Before | Tight first solve | Certified |
+|---|---|---|---|
+| Poisson 1e7, hetero, T=16 | 2.077 s | 2.270 s | 2.024 s |
+| logit 1e7, T=16 | 1.647 s | 1.606 s | 1.590 s |
+| Poisson / logit 1e6, T=1 | 0.584 / 0.591 s | 0.633 / 0.558 s | 0.559 / 0.554 s |
+| Taxi Poisson, 4 FEs | 4.173 s | 4.164 s | 3.790 s |
+| Taxi logit, 4 FEs | 6.280 s | 6.127 s | 6.065 s |
+
+Minimum over 3 rounds. The first coefficient and its SE keep all 16 printed digits except on
+taxi Poisson (relative 4e-15 and 4e-13). Against fixest 0.14.2 and pyfixest 0.60.0, 12 Poisson
+and logit models with duplicated, FE-absorbed, near-collinear and combined regressors drop the
+same columns (R: coefficients within 1e-14).
+
+### Not done
+
+- Gathering the row block (taxi: 0.09 s) makes two passes over 427 MB; its page faults already
+  use 2 MB pages (THP `always`).
+- The candidate passes of item 12 gather three codes per row at random (about 0.08 s on the
+  taxi panel); an interleaved code matrix would cut the cache misses.
+
 ## Earlier tuning (commit log)
 
 - `0a25c0f`, `738d70f`: one-pass (parallel) sample scan, uninitialized read buffers.

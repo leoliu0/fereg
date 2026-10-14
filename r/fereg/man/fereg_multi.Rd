@@ -29,8 +29,21 @@
 
 \item{i}{Indices or names of estimations.}
 }
+\value{
+\code{print()}: \code{x}, invisibly. \code{[} and \code{summary()}: a \code{fereg_multi} object. \code{as.list()}:
+a list of \code{fereg} objects. \code{coef()}: data frame with one row per estimation and one column
+per coefficient. \code{nobs()}: number of observations of each estimation.
+}
 \description{
 A \code{fereg_multi} object is a list of \code{fereg} objects (one per estimation, fixest order:
 sample, fixed effects, dependent variable, right-hand side). Methods apply to every
 estimation.
+}
+\examples{
+data(trade_toy, package = "fereg")
+ms <- feols(y ~ csw(x1, x2) | id + year, trade_toy, nthreads = 2)
+ms
+coef(ms)
+nobs(ms)
+summary(ms[2], vcov = ~id)
 }

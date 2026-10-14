@@ -1,25 +1,26 @@
 Package: fereg
 Title: Fast Fixed-Effects Estimation with the 'fixest' Interface
-Version: 0.3.0
+Version: 0.4.0
 Authors@R: c(
-    person("Leo", "Liu", email = "auleo.liu@gmail.com", role = c("aut", "cre")),
-    person("Authors of the dependency Rust crates", role = "ctb",
-           comment = "see inst/AUTHORS")
+    person("Leo", "Liu", email = "auleo.liu@gmail.com", role = c("aut", "cre", "cph")),
+    person("Authors of the bundled Rust crates", role = c("ctb", "cph"),
+           comment = "see inst/AUTHORS for each crate's authors and license")
   )
-Description: OLS, instrumental-variables (2SLS), Poisson and logit regressions
-    with any number of high-dimensional fixed effects, interactions of fixed
-    effects, varying slopes, weights and iid, heteroskedasticity-robust or
-    multiway-clustered standard errors. The formula syntax, arguments, results
-    and methods follow the 'fixest' package and reproduce its estimates. The
-    computations run in a parallel Rust library that eliminates the largest
-    fixed effect exactly and solves for the others by preconditioned conjugate
-    gradient.
+Description: Ordinary least squares, two-stage least squares, Poisson and
+    logit regressions with any number of high-dimensional fixed effects,
+    interactions of fixed effects, varying slopes, weights and iid,
+    heteroskedasticity-robust (HC1, HC2, HC3), multiway-clustered, CRV3,
+    Newey-West, Driscoll-Kraay or Conley standard errors. The formula syntax,
+    arguments, results and methods follow the 'fixest' package and reproduce
+    its estimates. The computations run in a parallel 'Rust' library that
+    eliminates the largest fixed effect exactly and solves for the others by
+    preconditioned conjugate gradient.
 License: MIT + file LICENSE
 URL: https://github.com/leoliu0/fereg
 BugReports: https://github.com/leoliu0/fereg/issues
 Depends: R (>= 4.2)
 Imports: stats
-Suggests: fixest, testthat (>= 3.0.0), data.table, generics
+Suggests: fixest, testthat (>= 3.0.0), data.table, generics, Matrix
 SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.85)
 Config/testthat/edition: 3
 Encoding: UTF-8

@@ -1,7 +1,7 @@
 //! Safe wrappers over `c/glue.c`, the only code that calls the Stata plugin interface.
 //!
 //! Every function here must be called on Stata's thread, except [`read_rows`],
-//! [`count_sample`] and [`read_sample`], which the parallel-read path (plan §4.3) calls
+//! [`count_sample`] and [`read_sample`], which the parallel-read path (plan sec. 4.3) calls
 //! concurrently on disjoint observation ranges.
 //! Indices are 1-based (Stata convention).
 
@@ -116,7 +116,7 @@ pub fn count_sample(touse: i32, o1: i32, o2: i32) -> Result<usize, RfError> {
 /// Sample scan of observations `o1..=o2`: the c-th observation whose `touse` value is not 0
 /// (`touse` 0: every observation; touse is not read)
 /// goes to `obs_out[c]`, its value of the leading `cols.len()` variables to `cols[j][c]` and
-/// that of the remaining `w` variables to row c of the row-major `block` (`block[c·w + j]`);
+/// that of the remaining `w` variables to row c of the row-major `block` (`block[c*w + j]`);
 /// NaN for missing. Returns the number of such observations and the number of missing values
 /// among them; fails when there are more than `obs_out.len()`.
 pub fn read_sample(
@@ -204,7 +204,7 @@ pub fn read_str_into(var: i32, obs: i32, strl: bool, out: &mut Vec<u8>, buf: &mu
     Ok(())
 }
 
-/// Saves Stata scalar `name` (NaN → missing).
+/// Saves Stata scalar `name` (NaN -> missing).
 pub fn scal_save(name: &str, v: f64) -> Result<(), RfError> {
     let c = cstr(name);
     let rc = unsafe { rf_scal_save(c.as_ptr(), v) };
@@ -217,7 +217,7 @@ pub fn mat_dims(name: &str) -> (i32, i32) {
     unsafe { (rf_mat_rows(c.as_ptr()), rf_mat_cols(c.as_ptr())) }
 }
 
-/// Fills an existing `rows × cols` Stata matrix from a row-major block (NaN → missing).
+/// Fills an existing `rows x cols` Stata matrix from a row-major block (NaN -> missing).
 pub fn mat_store(name: &str, rows: usize, cols: usize, data: &[f64]) -> Result<(), RfError> {
     assert_eq!(data.len(), rows * cols);
     let c = cstr(name);

@@ -2,12 +2,12 @@
 //! instruments (`ninst`), touse, output variables (`nout`).
 //!
 //! Keys beyond `ols`: `nendog ninst first=0|1 ffirst=0|1`; always-filled matrices `S=` `W=`
-//! ((ninst+nx)², instruments sent [inst, exog]); optional matrices `firstm=` (21×nendog),
-//! `ccev=` `cdev=` (1×nendog), filled only when the estimator produced them (K1 > 0 after
+//! ((ninst+nx)^2, instruments sent [inst, exog]); optional matrices `firstm=` (21xnendog),
+//! `ccev=` `cdev=` (1xnendog), filled only when the estimator produced them (K1 > 0 after
 //! collinearity drops; e(first) needs first or ffirst); first-stage prefixes `bfirst=P`
 //! `Vfirst=P` `sfirst=P`: for every kept endogenous regressor # (position among those sent),
-//! `P#` receives its first-stage coefficients (1×(ninst+nx)), VCE ((ninst+nx)²) and
-//! (rmse, df_r, df_m, N) (1×4). Stock–Yogo critical values come back as locals `_rf_sy_<table>`.
+//! `P#` receives its first-stage coefficients (1x(ninst+nx)), VCE ((ninst+nx)^2) and
+//! (rmse, df_r, df_m, N) (1x4). Stock-Yogo critical values come back as locals `_rf_sy_<table>`.
 
 use fereg_core::{EstResult, IvOptions, Layout, RfError};
 

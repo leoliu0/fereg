@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ._binding import fit_design
-from ._vcov import parse_vcov
+from ._vcov import VcovSpec, VcovTypeNotSupportedError, parse_vcov
 from .results import (
     FitContext,
     Fegaussian,
@@ -23,7 +23,7 @@ from .results import (
     _to_pandas,
 )
 
-__all__ = ["feols", "fepois", "feglm", "ssc", "estimate"]
+__all__ = ["feols", "fepois", "feglm", "ssc", "estimate", "fit_context"]
 
 DEFAULT_FIXEF_TOL = 1e-8
 DEFAULT_FIXEF_MAXITER = 16_000
@@ -62,15 +62,18 @@ def ssc(
     return {"k_adj": k_adj, "k_fixef": k_fixef, "G_adj": G_adj, "G_df": G_df, "k_exact": k_exact, "t_df": t_df}
 
 
-def estimate(ctx: FitContext) -> Feols:
-    """Fits one model described by ``ctx`` and wraps it in its pyfixest result class."""
-    d = ctx.design
-    if ctx.model == "logit":
-        _check_binary(d)
-    out = fit_design(
+def fit_context(ctx: FitContext, *, vcov: VcovSpec | None = None, design: Any = None, lean: bool | None = None) -> Any:
+    """Runs the core on ``ctx`` (optionally with another variance request / design / ``lean``)."""
+    d = ctx.design if design is None else design
+    spec = ctx.vcov if vcov is None else vcov
+    lean = ctx.lean if lean is None else lean
+    if d.endog and spec.kind in ("hc2", "hc3"):
+        # pyfixest `_deparse_vcov_input`.
+        raise VcovTypeNotSupportedError("HC2 and HC3 inference types are not supported for IV regressions.")
+    return fit_design(
         d,
         model=ctx.model,
-        vcov=ctx.vcov.kind,
+        vcov=spec,
         ssc=ctx.ssc,
         weights_type=ctx.weights_type,
         fixef_rm=ctx.fixef_rm,
@@ -80,12 +83,20 @@ def estimate(ctx: FitContext) -> Feols:
         glm_tol=ctx.glm_tol,
         glm_maxiter=ctx.glm_maxiter,
         relu=ctx.relu,
-        keep_resid=not ctx.lean,
+        keep_resid=not lean,
         # FE values are computed on demand from the state (fixef(), predict(newdata)).
         keep_fixef=False,
-        keep_state=not ctx.lean,
+        keep_state=not lean,
         threads=ctx.threads,
     )
+
+
+def estimate(ctx: FitContext) -> Feols:
+    """Fits one model described by ``ctx`` and wraps it in its pyfixest result class."""
+    d = ctx.design
+    if ctx.model == "logit":
+        _check_binary(d)
+    out = fit_context(ctx)
     if d.endog:
         cls = Feiv
     else:
@@ -161,15 +172,13 @@ def _run(
     from .design import build_design
     from .formula import parse
 
-    if vcov_kwargs:
-        raise NotImplementedError("vcov_kwargs (HAC options) are not supported by fereg.")
     if use_compression:
         raise NotImplementedError("use_compression is not supported by fereg (the solver is exact).")
     # pandas and polars frames go to the design builder as they are (zero-copy columns);
     # sample splits need row filtering, done in pandas.
     data = _to_pandas(data) if (split is not None or fsplit is not None) else _check_frame(data)
     _check_common(fixef_rm if model == "ols" else "singleton", collin_tol, weights_type, data, split, fsplit)
-    spec = parse_vcov(vcov)
+    spec = parse_vcov(vcov, vcov_kwargs, columns=list(data.columns))
     formulas = parse(fml)
     if method != "feols" and any(f.endog for f in formulas):
         raise NotImplementedError("IV estimation is only supported for feols().")
@@ -220,6 +229,7 @@ def _run(
                 weights=weights,
                 offset=offset,
                 cluster=list(spec.cluster),
+                vcov_columns=spec.columns(),
                 drop_intercept=drop_intercept,
             )
             ctx = replace(base, formula=f, design=design, data=sub, split_value=value)
@@ -259,6 +269,32 @@ def feols(
     nthreads: int | None = None,
 ) -> Feols | Feiv | FixestMulti:
     """OLS and IV/2SLS with high-dimensional fixed effects (pyfixest ``feols``).
+
+    ``vcov`` (default ``"iid"``), as pyfixest:
+
+    - ``"iid"``; ``"hetero"`` / ``"HC1"``; ``"HC2"``, ``"HC3"`` (leverage-corrected, with
+      pyfixest's N / (N - df_k)); ``{"CRV1": "a"}``, ``{"CRV1": "a+b"}`` (multiway, up to four
+      dimensions; ``"a^b"`` clusters by the interaction); ``{"CRV3": ...}`` (leave-one-cluster-out
+      jackknife centered at the estimates, CRV1's small-sample factors, same dimensions);
+    - ``"NW"`` (Newey-West) and ``"DK"`` (Driscoll-Kraay) with ``vcov_kwargs={"time_id": ...,
+      "panel_id": ..., "lag": ...}``: ``time_id`` (numeric or date) is required; with
+      ``panel_id``, Newey-West is the panel version (lags within the unit after sorting by time);
+      without it, a time series that needs ``lag``. ``lag`` defaults to floor(T^0.25), T the
+      number of distinct periods; the correction is (N - 1) / (N - df_k) * T / (T - 1), and t
+      tests have T - 1 degrees of freedom;
+    - ``"conley"`` (fereg extension: fixest's Conley spatial HAC) with ``vcov_kwargs={"lat": ...,
+      "lon": ..., "cutoff": ..., "pixel": ..., "distance": ...}``: ``lat`` / ``lon`` are columns in
+      degrees; ``cutoff`` is a number of km or a string such as ``"100km"`` or ``"60mi"`` (default:
+      fixest's deduced cutoff); ``pixel`` (default 0 = none) aggregates the coordinates into
+      pixels of that size, in the unit of ``cutoff``; ``distance`` is ``"triangular"``
+      (default) or ``"spherical"``. Correction N / (N - df_k), N - df_k degrees of freedom.
+
+    Extensions beyond pyfixest (which raises for them): HC2/HC3 with fixed effects (exact leverage
+    of the full model, fixed effects included), CRV3 with IV, Newey-West / Driscoll-Kraay for IV
+    at estimation, and Driscoll-Kraay without ``panel_id``. HC2/HC3 with IV raise
+    :class:`fereg.VcovTypeNotSupportedError` as in pyfixest; ``"nid"`` (quantile regression)
+    raises ``NotImplementedError``. Missing values in the cluster, time, panel or coordinate
+    columns on estimation rows are an error.
 
     ``copy_data``, ``store_data``, ``solver``, ``demeaner``, ``demeaner_backend``, ``reps``,
     ``context`` and ``seed`` are accepted for compatibility and ignored: the data is never
@@ -332,7 +368,9 @@ def fepois(
     """Poisson regression with high-dimensional fixed effects (pyfixest ``fepois``).
 
     ``separation_check=None`` means ``["fe"]`` (drop fixed-effect groups whose outcome is all
-    zero); ``"ir"`` adds the ReLU separation check.
+    zero); ``"ir"`` adds the ReLU separation check. ``vcov`` / ``vcov_kwargs`` take every
+    estimator of :func:`feols` (here computed from the IRLS-weighted working residuals); HC2/HC3
+    with fixed effects is a fereg extension.
     """
     core_rm, relu = _separation(separation_check, fixef_rm)
     return _run(
@@ -396,7 +434,9 @@ def feglm(
 
     ``family`` is ``"logit"``, ``"poisson"`` (same as :func:`fepois`) or ``"gaussian"`` (OLS
     estimates with normal-based inference). ``weights``, ``weights_type`` and ``offset`` are
-    fereg extensions (pyfixest's ``feglm`` has neither).
+    fereg extensions (pyfixest's ``feglm`` has neither). ``vcov`` / ``vcov_kwargs`` take every
+    estimator of :func:`feols`; extensions as there, plus logit CRV3 (fereg's leave-one-cluster-out
+    refits are logit fits, where pyfixest refits a Poisson model).
     """
     if family == "poisson":
         return fepois(

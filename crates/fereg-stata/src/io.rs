@@ -1,4 +1,4 @@
-//! Stata data transfer: observation lists, numeric and string reads, result stores (plan §4.3).
+//! Stata data transfer: observation lists, numeric and string reads, result stores (plan sec. 4.3).
 //!
 //! Numeric reads are split into contiguous row ranges read concurrently (gated by
 //! `tests/stata/stress_io.do`; results are identical to a serial read). Output buffers are
@@ -43,7 +43,7 @@ fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
     h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
 }
 
-/// Reads `vars` for `n` rows into a row-major block (`n × vars.len()`, NaN for missing) and
+/// Reads `vars` for `n` rows into a row-major block (`n x vars.len()`, NaN for missing) and
 /// counts the missing values. `obs_of(a..b, buf)` appends the Stata observations of rows a..b.
 fn read_rows_by<F>(vars: &[i32], n: usize, threads: usize, parallel: bool, obs_of: F) -> Result<(Vec<f64>, u64), RfError>
 where
@@ -86,7 +86,7 @@ where
     Ok((out, miss))
 }
 
-/// Reads `vars` at `obs` into a row-major block (`obs.len() × vars.len()`, NaN for missing).
+/// Reads `vars` at `obs` into a row-major block (`obs.len() x vars.len()`, NaN for missing).
 pub fn read_rows(vars: &[i32], obs: &[i32], threads: usize, parallel: bool) -> Result<Vec<f64>, RfError> {
     Ok(read_rows_by(vars, obs.len(), threads, parallel, |rows, buf| buf.extend_from_slice(&obs[rows]))?.0)
 }
@@ -329,9 +329,9 @@ pub fn kept_obs(session: &Session, obs: &[i32]) -> Vec<i32> {
     session.kept_index().iter().map(|&i| obs[i as usize]).collect()
 }
 
-/// Reads `vars` for the kept sample into an N×R block in [`Session::row_order`].
+/// Reads `vars` for the kept sample into an N x R block in [`Session::row_order`].
 ///
-/// `obs` is the prepare-time observation list (input index → Stata observation).
+/// `obs` is the prepare-time observation list (input index -> Stata observation).
 pub fn read_session_rows(
     session: &Session,
     obs: &[i32],
@@ -363,7 +363,7 @@ pub fn read_session_rows(
     Ok(rows)
 }
 
-/// The N×R block of an estimation command in [`Session::row_order`]: variable `vars[c]` is
+/// The N x R block of an estimation command in [`Session::row_order`]: variable `vars[c]` is
 /// gathered from `prepare`'s model variable `cached[c]` (1-based; protocol `cached`) or, where
 /// that is 0, read from Stata. An empty `cached` reads every variable. The model block is
 /// consumed (one estimation command per prepare); each solver row reads one contiguous row.

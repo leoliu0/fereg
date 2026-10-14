@@ -33,7 +33,7 @@ pub struct Dof {
 }
 
 impl Dof {
-    /// `e(dof_table)` rows: (K, M, K−M, inexact, nested), row-major n_slots×5.
+    /// `e(dof_table)` rows: (K, M, K-M, inexact, nested), row-major n_slotsx5.
     pub fn table(&self) -> Vec<f64> {
         self.slots
             .iter()
@@ -234,8 +234,8 @@ pub(crate) fn mobility_groups(a: &[u32], ga: usize, b: &[u32], gb: usize, save: 
 }
 
 /// reghdfe `dof_update_cvars` for one slope: the variable is standardized (reghdfe
-/// `standardize_data`), then a level is redundant when max − min ≤ 1e-6 (term with intercept) or
-/// |min| + |max| ≤ 1e-6 (term without; reghdfe sums `abs(colminmax())`, not Σ|x| as the plan says).
+/// `standardize_data`), then a level is redundant when max - min <= 1e-6 (term with intercept) or
+/// |min| + |max| <= 1e-6 (term without; reghdfe sums `abs(colminmax())`, not sum|x| as the plan says).
 pub(crate) fn redundant_slope_levels(codes: &[u32], g: usize, x: &[f64], intercept: bool) -> u64 {
     let sd = stdev(x);
     let mut lo = vec![f64::INFINITY; g];

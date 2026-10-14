@@ -262,11 +262,19 @@ impl Case {
             .collect();
         let cluster: Vec<Vec<usize>> =
             json.at("cluster").list().iter().map(|d| d.strs().iter().map(|f| index_of(f, &mut factor_names)).collect()).collect();
-        // Post-hoc cluster variables are input factors too (unused by the fit itself).
+        // Post-hoc cluster, time and panel variables are input factors too (unused by the fit
+        // itself).
         for p in json.get("posthoc").map_or(Vec::new(), J::list) {
             p.at("cluster").list().iter().flat_map(|d| d.strs()).for_each(|f| {
                 index_of(&f, &mut factor_names);
             });
+        }
+        for p in std::iter::once(json.clone()).chain(json.get("posthoc").map_or(Vec::new(), J::list)) {
+            for key in ["time", "panel"] {
+                if let Some(J::Str(f)) = p.get(key) {
+                    index_of(f, &mut factor_names);
+                }
+            }
         }
         let factors = factor_names.iter().map(|f| FactorData::new(csv.col(f), kind)).collect();
         Case { json: json.clone(), csv, factor_names, factors, fe, slope_names, cluster }
@@ -297,7 +305,27 @@ impl Case {
                 _ => None,
             },
             cluster: self.cluster.clone(),
+            time: self.factor_of(j, "time"),
+            panel: self.factor_of(j, "panel"),
+            lat: self.col_of(j, "lat"),
+            lon: self.col_of(j, "lon"),
             ..Default::default()
+        }
+    }
+
+    /// Factor index of the variable named by `key` of `j` (time, panel), if any.
+    pub fn factor_of(&self, j: &J, key: &str) -> Option<usize> {
+        match j.get(key) {
+            Some(J::Str(f)) => Some(self.factor_names.iter().position(|n| n == f).expect("factor registered")),
+            _ => None,
+        }
+    }
+
+    /// Numeric column named by `key` of `j` (lat, lon), if any.
+    pub fn col_of(&self, j: &J, key: &str) -> Option<&[f64]> {
+        match j.get(key) {
+            Some(J::Str(c)) => Some(self.csv.col(c)),
+            _ => None,
         }
     }
 
@@ -358,11 +386,38 @@ impl Case {
     }
 }
 
+/// A fixture's variance request: a string (`iid`, `hetero`, `hc2`, `hc3`, `crv3`, anything else =
+/// cluster) or an object `{type: NW | DK | conley, lag, cutoff, pixel, spherical}`.
 pub fn parse_vcov(v: &J) -> VcovKind {
-    match v.str() {
-        "iid" => VcovKind::Iid,
-        "hetero" => VcovKind::Hetero,
-        _ => VcovKind::Cluster,
+    let opt_lag = |o: &J| match o.get("lag") {
+        Some(J::Num(l)) => Some(*l as usize),
+        _ => None,
+    };
+    match v {
+        J::Obj(_) => match v.at("type").str() {
+            "NW" => VcovKind::NeweyWest { lag: opt_lag(v) },
+            "DK" => VcovKind::DriscollKraay { lag: opt_lag(v) },
+            "conley" => VcovKind::Conley {
+                cutoff: match v.get("cutoff") {
+                    Some(J::Num(c)) => Some(*c),
+                    _ => None,
+                },
+                pixel: match v.get("pixel") {
+                    Some(J::Num(p)) => *p,
+                    _ => 0.0,
+                },
+                spherical: matches!(v.get("spherical"), Some(J::Bool(true))),
+            },
+            t => panic!("unknown vcov type {t}"),
+        },
+        _ => match v.str() {
+            "iid" => VcovKind::Iid,
+            "hetero" => VcovKind::Hetero,
+            "hc2" => VcovKind::Hc2,
+            "hc3" => VcovKind::Hc3,
+            "crv3" => VcovKind::Crv3,
+            _ => VcovKind::Cluster,
+        },
     }
 }
 
@@ -401,6 +456,20 @@ pub fn check_vcov(what: &str, v: &VcovOutput, names: &[String], e: &J, want_name
     // GLMs report normal inference (fixest still attaches its df.t).
     if let Some(t) = v.df_t {
         assert_eq!(t, e.at("df_t").num(), "{what}: df_t");
+    }
+    if let Some(t) = e.get("n_periods") {
+        assert_eq!(v.n_periods.map(|t| t as f64), Some(t.num()), "{what}: n_periods");
+    }
+    if let Some(l) = e.get("lag") {
+        let ours = match v.kind {
+            VcovKind::NeweyWest { lag } | VcovKind::DriscollKraay { lag } => lag,
+            _ => None,
+        };
+        assert_eq!(ours.map(|l| l as f64), Some(l.num()), "{what}: lag");
+    }
+    if let Some(c) = e.get("cutoff") {
+        let VcovKind::Conley { cutoff: Some(ours), .. } = v.kind else { panic!("{what}: no resolved cutoff") };
+        assert_close(&format!("{what} cutoff"), ours, c.num(), 1e-12);
     }
     if let Some(g) = e.get("G") {
         let ours: Vec<f64> = v.n_clusters.iter().map(|&g| g as f64).collect();
@@ -485,28 +554,33 @@ pub fn check_case(j: &J, flavor: Flavor, kind: FactorKind, threads: usize, rtol:
         if !want.is_empty() {
             let ours = ours.as_ref().unwrap();
             assert_eq!(ours.len(), want.len(), "{}: length", what(k));
-            // Separated observations (|η| > 20, μ at a bound) have a diverging η whose value
-            // depends on when IRLS stops; their μ and weights are compared through `fitted`.
+            // Separated observations (|eta| > 20, mu at a bound) have a diverging eta whose value
+            // depends on when IRLS stops; their mu and weights are compared through `fitted`.
             let (a, b): (Vec<f64>, Vec<f64>) = ours.iter().zip(&want).filter(|(_, w)| k != "eta" || w.abs() <= 20.0).map(|(a, b)| (*a, *b)).unzip();
             let scale = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
             assert_vec(&what(k), &a, &b, rtol, scale);
         }
     }
     let posthoc = case.posthoc();
-    for (p, (kind, ssc, cl)) in e.get("posthoc").map_or(Vec::new(), J::list).iter().zip(posthoc) {
+    let requests = j.get("posthoc").map_or(Vec::new(), J::list);
+    for ((p, (kind, ssc, cl)), req) in e.get("posthoc").map_or(Vec::new(), J::list).iter().zip(posthoc).zip(&requests) {
         let input = case.input();
-        let v = out
-            .state
-            .as_ref()
-            .expect("state")
-            .vcov(kind, &ssc, &input.factors, &case.factor_names, &cl, &Ctx::quiet(threads))
-            .unwrap_or_else(|err| panic!("{name} post-hoc: {err}"));
+        let data = fit::VcovData {
+            factors: &input.factors,
+            factor_names: &case.factor_names,
+            cluster: &cl,
+            time: case.factor_of(req, "time"),
+            panel: case.factor_of(req, "panel"),
+            lat: case.col_of(req, "lat"),
+            lon: case.col_of(req, "lon"),
+        };
+        let v = out.state.as_ref().expect("state").vcov(kind, &ssc, &data, &Ctx::quiet(threads)).unwrap_or_else(|err| panic!("{name} post-hoc: {err}"));
         check_vcov(&what("post-hoc"), &v, &names, p, &want_names, rtol);
     }
     (case, out)
 }
 
-/// |a − b| ≤ rtol·max(|b|, floor). An expected NaN (JSON null: jsonlite writes NA, NaN and ±Inf
+/// |a - b| <= rtol*max(|b|, floor). An expected NaN (JSON null: jsonlite writes NA, NaN and +/-Inf
 /// as null) matches any non-finite value.
 pub fn close(a: f64, b: f64, rtol: f64, floor: f64) -> bool {
     (b.is_nan() && !a.is_finite()) || (a - b).abs() <= rtol * b.abs().max(floor)

@@ -11,7 +11,7 @@
 //! estimation; outputs `sep=<pos>` (1 separated, 0 not) and `zsep=<pos>` (certificate).
 //! See `PROTOCOL.md`.
 
-use fereg_core::{EstResult, Family, GlmOptions, Guess, Layout, RfError, Separation, Spec};
+use fereg_core::{EstResult, Family, GlmCollinear, GlmOptions, Guess, Layout, RfError, Separation, Spec};
 
 use crate::args::{self, Args};
 use crate::{Phases, check_nvars, est, io, with_ctx};
@@ -55,6 +55,7 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
             v => return Err(RfError::InvalidInput(format!("fereg plugin: invalid guess `{v}`"))),
         },
         log: a.flag("log", true)?,
+        collinear: GlmCollinear::Ppmlhdfe,
     };
     let has_offset = a.flag("offset", false)?;
     let sepcheck = a.flag("sepcheck", false)?;

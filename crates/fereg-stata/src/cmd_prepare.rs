@@ -17,10 +17,13 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
     let common = a.common(SERIALIO_DEFAULT)?;
     let nfac: usize = a.num_req("nfac")?;
     let nslope: usize = a.num_or("nslope", 0)?;
+    let ncoord: usize = a.num_or("ncoord", 0)?;
     let nmodel: usize = a.num_or("nmodel", 0)?;
     let factype = a.str_or("factype", "");
     let absorb = args::parse_absorb(a.str_req("absorb")?, nfac, nslope)?;
-    let vce = args::parse_vce(a.str_or("vce", "unadjusted"), a.str_opt("cluster"), nfac)?;
+    let vce = args::parse_vce(a, nfac, nslope, ncoord)?;
+    // Conley coordinates follow the slope variables and are read as such.
+    let nslope = nslope + ncoord;
     let wtype = args::parse_wtype(a.str_or("wtype", "none"))?;
     let drop_singletons = a.flag("singletons", true)?;
     let family = args::parse_family(a.str_or("family", "gaussian"))?;

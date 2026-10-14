@@ -1,22 +1,22 @@
 //! Streaming column statistics and fit statistics (plan Phase 3.1 and 3.8, reghdfe 6.13.1).
 //!
 //! All row passes are chunked by [`CHUNK`] with chunk-ordered combination, so results do not
-//! depend on the thread count. Blocks are N×R row-major.
+//! depend on the thread count. Blocks are N x R row-major.
 
 use crate::par::{self, CHUNK, Pool, dispatch_width, width};
 
 /// Pass-A statistics of the raw (un-residualized) columns.
 #[derive(Clone, Debug)]
 pub(crate) struct ColStats {
-    /// Unweighted raw Σx² (reghdfe `norm2`, the stage-1 collinearity denominator).
+    /// Unweighted raw sum x^2 (reghdfe `norm2`, the stage-1 collinearity denominator).
     pub sumsq: Vec<f64>,
-    /// reghdfe `compute_stdevs`: unweighted sample sd (denominator n−1), floored at 1e-3.
+    /// reghdfe `compute_stdevs`: unweighted sample sd (denominator n-1), floored at 1e-3.
     pub sd: Vec<f64>,
     /// Weighted means with the raw weights (reghdfe `mean(data, weights)`).
     pub wmean: Vec<f64>,
-    /// Σw(x − x̄_w)² with the raw weights.
+    /// sum w(x - xbar_w)^2 with the raw weights.
     pub wss: Vec<f64>,
-    /// Σw·x² with the raw weights.
+    /// sum w*x^2 with the raw weights.
     pub wss_unc: Vec<f64>,
 }
 
@@ -32,7 +32,7 @@ struct Part {
     wsumsq: Vec<f64>,
 }
 
-/// Fused Pass A over `rows` (N×r, row-major) with optional raw weights (same row order).
+/// Fused Pass A over `rows` (N x r, row-major) with optional raw weights (same row order).
 /// Within a chunk means and centered sums are two-pass; chunks are merged with Chan's update in
 /// chunk order.
 pub(crate) fn col_stats(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) -> ColStats {
@@ -157,7 +157,7 @@ pub(crate) fn stdev(x: &[f64]) -> f64 {
     (m2 / (n - 1.0)).sqrt().max(1e-3)
 }
 
-/// Pass B: weighted Gram G = Σ w_i z_i z_iᵀ (r×r) and unweighted Σz² per column.
+/// Pass B: weighted Gram G = sum w_i z_i z_i^T (r x r) and unweighted sum z^2 per column.
 pub(crate) fn gram(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) -> (Vec<f64>, Vec<f64>) {
     let n = rows.len().checked_div(r).unwrap_or(0);
     let acc = par::sum_chunks(pool, n, CHUNK, r * r + r, |range, acc| dispatch_width!(r, w.is_some(), gram_chunk(rows, r, w, range, acc)));
@@ -170,7 +170,7 @@ pub(crate) fn gram(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) -> (V
     (g, acc[r * r..].to_vec())
 }
 
-/// Pass B over one chunk (upper triangle of G, then Σz²).
+/// Pass B over one chunk (upper triangle of G, then sum z^2).
 fn gram_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>, acc: &mut [f64]) {
     let r = width::<R>(r);
     // Accumulate in a local array for const widths (registers), then add to the zeroed `acc`.
@@ -211,7 +211,7 @@ pub(crate) struct FitStats {
     pub mss: f64,
 }
 
-/// `n` = N (Σfw for fweights), `used_df_r` = N − df_a − df_m − df_a_nested.
+/// `n` = N (sum fw for fweights), `used_df_r` = N - df_a - df_m - df_a_nested.
 pub(crate) fn fit_stats(n: f64, rss: f64, tss: f64, tss_within: f64, used_df_r: f64, rank: f64, has_intercept: bool) -> FitStats {
     let ln2pi = (2.0 * std::f64::consts::PI).ln();
     let hi = if has_intercept { 1.0 } else { 0.0 };

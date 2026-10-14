@@ -36,6 +36,20 @@ test_that("logit matches fixest", {
   expect_output(print(b), "GLM estimation, family = binomial")
 })
 
+test_that("collinear Poisson and logit regressors are removed as in fixest", {
+  d <- panel
+  d$x4 <- d$x1 + d$x2
+  d$xid <- d$id * 2
+  ours <- fe_fepois(count ~ x1 + x2 + x4 + xid | id, d)
+  theirs <- fx_fepois(count ~ x1 + x2 + x4 + xid | id, d)
+  expect_same_fit(ours, theirs, tol = 1e-6)
+  expect_identical(ours$collin.var, theirs$collin.var)
+  ours <- fe_feglm(binary ~ xid + x1 + x4 + x2 | id, d, family = "logit")
+  theirs <- fx_feglm(binary ~ xid + x1 + x4 + x2 | id, d, family = "logit")
+  expect_same_fit(ours, theirs, tol = 1e-6)
+  expect_identical(ours$collin.var, theirs$collin.var)
+})
+
 test_that("GLM residual types, predictions and post-hoc variances match fixest", {
   ours <- fe_fepois(count ~ x1 + x2 | id, panel, offset = ~ log(expo))
   # Called directly: fixest's predict() re-evaluates the offset argument from the call.

@@ -36,7 +36,9 @@ pub fn solve_tasks<T>(large: &[T], w: usize, kind: impl Fn(&T) -> Option<usize>)
 /// Preconditioner of one large block.
 pub enum BlockPrecond {
     Jacobi,
-    SparseChol { keep: Vec<u32>, f: Box<sparse_chol::SparseChol> },
+    /// `rebuild`: estimated cost of assembling and factoring the block again for new weights
+    /// (single-thread seconds of the solver's deterministic cost model).
+    SparseChol { keep: Vec<u32>, f: Box<sparse_chol::SparseChol>, rebuild: f64 },
     ApproxChol { keep: Vec<u32>, f: Box<approx_chol::ApproxChol> },
 }
 
@@ -68,7 +70,7 @@ pub struct Precond {
 }
 
 impl Precond {
-    /// z = M⁻¹ r for row-major m × w blocks.
+    /// z = M^-1 r for row-major m x w blocks.
     pub fn apply(&self, st: &Structure, r: &[f64], z: &mut [f64], w: usize, pool: &Pool) {
         if let Some(j) = &self.joint {
             apply_joint(j, r, z, w, pool);
@@ -95,7 +97,7 @@ impl Precond {
                 .map(|(b, cols)| {
                     let off = st.blocks[ns + b].off;
                     match &self.large[*b] {
-                        BlockPrecond::SparseChol { keep, f } => {
+                        BlockPrecond::SparseChol { keep, f, .. } => {
                             let mut rhs =
                                 Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
                             f.solve(&mut rhs);
@@ -136,7 +138,7 @@ impl Precond {
     }
 }
 
-/// z = joint⁻¹ r on the kept coordinates (redundant ones get 0). Column groups of
+/// z = joint^-1 r on the kept coordinates (redundant ones get 0). Column groups of
 /// [`SOLVE_COLS`] are solved sequentially in concurrent tasks (thread-count invariant).
 fn apply_joint(j: &Joint, r: &[f64], z: &mut [f64], w: usize, pool: &Pool) {
     let keep = &j.keep;

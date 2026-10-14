@@ -4,7 +4,7 @@
 //! fixed-effect values.
 //!
 //! n obs; nb_year = 10; indiv = n/10 (obs i: indiv i/10, year i%10); firm: random per obs among
-//! indiv/23 firms; y, x1..x10 = N(0,1) + FE effects; count outcome yp = round(exp(0.3·x1 − 0.5)).
+//! indiv/23 firms; y, x1..x10 = N(0,1) + FE effects; count outcome yp = round(exp(0.3*x1 - 0.5)).
 //! Models `y ~ x1..xk | indiv + year`, iid, residuals requested on both paths;
 //! `yp ~ x1..xk | indiv + year`; `y ~ x1 | indiv + year (+ firm)` for the fixed-effect values.
 //!
@@ -17,7 +17,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use fereg_core::fit::{self, FactorCol, FeTerm, FitInput, FitSpec};
 use fereg_core::rng::SplitMix64;
-use fereg_core::{AbsorbTerm, Ctx, Family, FactorValues, GlmConvention, GlmOptions, Guess, Layout, Prep, Separation, Session, Spec, Vce, WeightKind};
+use fereg_core::{AbsorbTerm, Ctx, Family, FactorValues, GlmCollinear, GlmConvention, GlmOptions, Guess, Layout, Prep, Separation, Session, Spec, Vce, WeightKind};
 
 fn normal(rng: &mut SplitMix64) -> f64 {
     let u1 = rng.next_f64().max(1e-300);
@@ -114,7 +114,16 @@ fn session_poisson(d: &Data, k: usize, ctx: &Ctx) -> Vec<f64> {
         std::iter::once(&d.yp).chain(&d.cols[1..=k]).map(|c| kept.par_iter().map(|&i| c[i as usize]).collect()).collect();
     let cols: Vec<&[f64]> = own.iter().map(Vec::as_slice).collect();
     let rows = s.gather(&cols, ctx).expect("gather");
-    let g = GlmOptions { family: Family::Poisson, tol: 1e-8, maxiter: 25, itol: 1e-8, separation: Separation::default(), guess: Guess::Simple, log: false };
+    let g = GlmOptions {
+        family: Family::Poisson,
+        tol: 1e-8,
+        maxiter: 25,
+        itol: 1e-8,
+        separation: Separation::default(),
+        guess: Guess::Simple,
+        log: false,
+        collinear: GlmCollinear::Ppmlhdfe,
+    };
     let (_, parts) = s.glm_parts(rows, &Layout::ols(k), None, &Spec::default(), &g, GlmConvention::Fixest, ctx).expect("glm");
     parts.coef
 }

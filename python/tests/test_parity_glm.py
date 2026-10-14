@@ -70,6 +70,19 @@ def test_logit_parity(fml, vcov):
     np.testing.assert_allclose(ours.predict(type="response"), theirs.predict(type="response"), rtol=1e-6)
 
 
+@pytest.mark.parametrize("family", ["poisson", "logit"])
+def test_collinear_regressors_dropped_as_pyfixest(family):
+    """xc = x1 + 2*x2 (x2 is dropped, after it) and cl, constant within f1 (absorbed)."""
+    if family == "poisson":
+        fml, theirs_fit, ours_fit, kw = "y_pois ~ x1 + xc + x2 + cl | f1 + f2", pf.fepois, fereg.fepois, {}
+    else:
+        fml, theirs_fit, ours_fit, kw = "y_bin ~ x1 + xc + x2 + cl | f1 + f2", pf.feglm, fereg.feglm, {"family": "logit"}
+    theirs = theirs_fit(fml, DATA, vcov="hetero", demeaner=TIGHT, **GLM_KW, **kw)
+    ours = ours_fit(fml, DATA, vcov="hetero", **GLM_KW, **kw)
+    assert list(ours._coefnames) == ["x1", "xc"]
+    compare(ours, theirs, rtol=1e-6)
+
+
 def test_logit_all_one_levels(capsys):
     """FE levels with an all-one outcome stay in pyfixest's sample; their FE is +inf in fereg
     (pyfixest stops near +25) and their predictions sit at the bound."""

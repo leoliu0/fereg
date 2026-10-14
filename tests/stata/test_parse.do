@@ -195,8 +195,15 @@ program check_vce
 end
 foreach v in "" "robust" "r" "rob" "ols" "unadjusted" "un" "conventional" "cl idcode" "cluster idcode" ///
 	"cluster idcode year" "cluster idc#year" "cluster i.idcode#i.year" "cluster idcode year#ind_code" ///
-	"cluster sid" {
+	"cluster sid" "dkraay" "dk" "dkraay 3" "dk 1" {
 	check_vce "`v'" ""
+}
+* vce(dkraay #): the bandwidth, as ms_parse_vce's s(dkraay_lags)
+foreach v in "dkraay" "dkraay 3" "dk 1" {
+	ms_parse_vce, vce(`v')
+	local R `s(dkraay_lags)'
+	_rf_parse_vce, vce(`v')
+	assert "`s(dkraay_bw)'" == "`R'"
 }
 * fereg extension: string variables inside cluster interactions (ms_parse_vce rejects them)
 _rf_parse_vce, vce(cluster sid#year i.syr)
@@ -204,14 +211,89 @@ assert "`s(clustervars)'" == "sid#year syr" & "`s(base_clustervars)'" == "sid ye
 check_vce "" pweight
 check_vce "robust" pweight
 check_vce "cluster idcode" aweight
+check_vce "dkraay 2" pweight
 foreach v in "unadjusted" "ols" {
 	capture _rf_parse_vce, vce(`v') weighttype(pweight)
 	assert _rc == 198
 }
-foreach v in "dkraay" "dk 2" "cluster" "bogus" "cluster idcode, minus(1)" "cluster c.age" {
+* errors of ms_parse_vce's vce(dkraay #) checks: same return code (its _assert: 9)
+foreach v in "dkraay 2.5" "dkraay 0" "dkraay -1" "dkraay abc" "dkraay 2 3" {
+	capture ms_parse_vce, vce(`v')
+	local rc_r = _rc
+	capture _rf_parse_vce, vce(`v')
+	assert _rc == `rc_r' & _rc == 9
+	di as text `"ok  vce(`v') fails with rc 9 as ms_parse_vce"'
+}
+gen double lat = 30 + mod(idcode, 17)
+gen double lon = -100 + mod(idcode, 23)
+foreach v in "cluster" "bogus" "cluster idcode, minus(1)" "cluster c.age" "dkraay, bw(2)" "hc2 idcode" ///
+	"hc3 idcode, dfadjust" "hc2, dfadjust" "crv3" "crv3 c.age" "conley lat" "conley lat lon w" ///
+	"conley lat lon, cutoff(0)" "conley lat lon, cutoff(x)" "conley lat lon, pixel(-1)" ///
+	"conley lat lon, distance(euclid)" "conley lat lon, bogus" "conley sid lon" {
 	capture _rf_parse_vce, vce(`v')
 	assert _rc == 198
 	di as text `"ok  vce(`v') fails with rc 198"'
 }
+* hc2/hc3 (Stata regress): pweights allowed with hc2 only, regress's message
+capture _rf_parse_vce, vce(hc3) weighttype(pweight)
+assert _rc == 198
+_rf_parse_vce, vce(hc2) weighttype(pweight)
+assert "`s(vcetype)'" == "hc2" & "`s(num_clusters)'" == "0"
+_rf_parse_vce, vce(hc3) weighttype(aweight)
+assert "`s(vcetype)'" == "hc3"
+* crv3 (cluster dimensions as vce(cluster)) and conley (coordinates and suboptions)
+_rf_parse_vce, vce(crv3 idc year#i.ind_code)
+assert "`s(vcetype)'" == "crv3" & "`s(clustervars)'" == "idcode year#ind_code" & "`s(num_clusters)'" == "2"
+assert "`s(base_clustervars)'" == "idcode year ind_code"
+_rf_parse_vce, vce(conley lat lon)
+assert "`s(vcetype)'" == "conley" & "`s(conley_lat)'" == "lat" & "`s(conley_lon)'" == "lon"
+assert "`s(cutoff)'" == "" & "`s(pixel)'" == "0" & "`s(distance)'" == "triangular" & "`s(num_clusters)'" == "0"
+_rf_parse_vce, vce(conley lon lat, cut(150.5) pix(10) dist(Spherical))
+assert "`s(conley_lat)'" == "lon" & "`s(cutoff)'" == "150.5" & "`s(pixel)'" == "10" & "`s(distance)'" == "spherical"
+di as text "ok  hc2/hc3/crv3/conley"
+
+* ---------------------------------------------------------------------------
+* 4) _rf_parse_hac (ivreghdfe's ivparse and s_vkernel; no estimation)
+* ---------------------------------------------------------------------------
+xtset idcode year
+_rf_parse_hac, vcetype(robust) userrobust(1) bw(3) kernel(PAR)
+assert "`s(hac)'" == "1" & "`s(kernel)'" == "Parzen" & "`s(kernelkey)'" == "parzen" & "`s(bw)'" == "3"
+assert "`s(robust)'" == "1" & "`s(tvar)'" == "year" & "`s(ivar)'" == "idcode" & "`s(tdelta)'" == "1"
+_rf_parse_hac, vcetype(unadjusted) bw(2.50) kernel(quadratic spectral)
+assert "`s(kernel)'" == "Quadratic Spectral" & "`s(kernelkey)'" == "quadratic-spectral" & "`s(bw)'" == "2.5" & "`s(robust)'" == "0"
+_rf_parse_hac, vcetype(unadjusted) dkraay(2)
+assert "`s(kernel)'" == "Bartlett" & "`s(bw)'" == "2" & "`s(vcetype)'" == "cluster" & "`s(clustervars)'" == "year" & "`s(robust)'" == "0"
+_rf_parse_hac, vcetype(cluster) clustervars(year idcode) userrobust(1) bw(2)
+assert "`s(clustervars)'" == "idcode year" & "`s(num_clusters)'" == "2"
+_rf_parse_hac, vcetype(unadjusted) kiefer
+assert "`s(kernel)'" == "Truncated" & "`s(kiefer)'" == "1" & "`s(bw)'" == ""
+_rf_parse_hac, vcetype(robust) weighttype(pweight) kiefer
+assert "`s(robust)'" == "1" & "`s(kiefer)'" == "1"
+_rf_parse_hac, vcetype(dkraay)
+assert "`s(hac)'" == "0" & "`s(tvar)'" == "year" & "`s(ivar)'" == ""
+_rf_parse_hac, vcetype(cluster) clustervars(idcode) userrobust(1)
+assert "`s(hac)'" == "0" & "`s(tvar)'" == "" & "`s(clustervars)'" == "idcode"
+* return codes of ivreghdfe 1.1.4 (also checked against ivreghdfe in test_hac.do)
+foreach t in "102|bw(abc)" "102|kernel(bar)" "198|bw(0)" "198|kernel(newey) bw(2)" "198|bw(auto)" ///
+	"198|dkraay(2) bw(3)" "198|dkraay(2) clustervars(idcode)" "198|kiefer userrobust(1)" "198|kiefer kernel(tru) bw(2)" ///
+	"198|bw(2) psd0 psda" "101|bw(2) weighttype(fweight)" "198|bw(2) clustervars(idcode)" ///
+	"198|bw(2) clustervars(idcode ind_code)" "198|psd0" {
+	gettoken rc opts : t, parse("|")
+	local opts = substr(`"`opts'"', 2, .)
+	capture _rf_parse_hac, vcetype(unadjusted) `opts'
+	assert _rc == `rc'
+	di as text "ok  _rf_parse_hac `opts' fails with rc `rc'"
+}
+capture _rf_parse_hac, vcetype(hc2) bw(2)
+assert _rc == 198
+xtset, clear
+foreach t in "111|bw(2)" "5|kiefer" "5|dkraay(2)" "9|" {
+	gettoken rc opts : t, parse("|")
+	local opts = substr(`"`opts'"', 2, .)
+	local vt = cond(`"`opts'"' == "", "dkraay", "unadjusted")
+	capture _rf_parse_hac, vcetype(`vt') `opts'
+	assert _rc == `rc'
+}
+di as text "ok  _rf_parse_hac"
 
 di as result "TEST_PARSE PASSED"

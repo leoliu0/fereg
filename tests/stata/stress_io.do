@@ -1,4 +1,4 @@
-* stress_io.do — plan §4.3 parallel-read experiment and read-throughput measurements.
+* stress_io.do -- plan sec. 4.3 parallel-read experiment and read-throughput measurements.
 * Run from tests/stata after scripts/build_plugin.sh:   stata-mp -b do stress_io.do
 *
 * Part 1: reads a 2e7 x 8 double dataset 200 times with parallel reads (serialio=0, all

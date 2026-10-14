@@ -313,10 +313,13 @@ fereg, level(80) noomitted
 webuse nlswork, clear
 foreach bad in "ln_wage (tenure = union), absorb(idcode)" "ln_wage tenure, absorb(idcode) noabsorb" ///
 	"ln_wage tenure, absorb(idcode) individual(idcode)" "ln_wage tenure, absorb(idcode) group(idcode)" ///
-	"ln_wage tenure, absorb(idcode) aggregation(sum)" "ln_wage tenure, absorb(idcode) vce(dkraay)" ///
+	"ln_wage tenure, absorb(idcode) aggregation(sum)" "ln_wage tenure, absorb(idcode) vce(hc2 idcode)" ///
 	"ln_wage tenure, absorb(idcode) residuals(r) residuals" "ln_wage tenure, absorb(idcode) first" ///
 	"ln_wage tenure, absorb(idcode) bogus" "ln_wage tenure, absorb(idcode) vce(robust) cluster(idcode)" ///
-	"ln_wage tenure, absorb(idcode, nosuchoption)" "ln_wage tenure [pw=age], absorb(idcode) vce(unadjusted)" {
+	"ln_wage tenure, absorb(idcode, nosuchoption)" "ln_wage tenure [pw=age], absorb(idcode) vce(unadjusted)" ///
+	"ln_wage tenure, absorb(idcode) bw(2) sw" "ln_wage tenure, absorb(idcode) bw(2) center" ///
+	"ln_wage tenure, absorb(idcode) bw(2) dofminus(1)" "ln_wage tenure, absorb(idcode) bw(2) sdofminus(1)" ///
+	"ln_wage (tenure = union), absorb(idcode) vce(hc3)" "ln_wage tenure, absorb(idcode) vce(crv3)" {
 	capture noisily fereg `bad'
 	if (_rc != 198) {
 		di as err `"FAIL: fereg `bad' gave rc `=_rc' (expected 198)"'
@@ -327,5 +330,110 @@ quietly reghdfe ln_wage tenure, absorb(idcode) tol(1e-12)
 rf_stage_mock, indepvars(tenure) status(0)
 fereg ln_wage tenure, absorb(idcode) technique(lsmr) transform(cim) acceleration(sd) poolsize(5) compact
 di as result "H passed"
+
+* ---------------------------------------------------------------------------
+* I) variance estimators: vce(dkraay) vs reghdfe (e() and display), keys of the kernel options,
+*    hc2/hc3, crv3 and conley
+* ---------------------------------------------------------------------------
+webuse nlswork, clear
+xtset idcode year
+reghdfe ln_wage age tenure, absorb(idcode) vce(dkraay 2) tol(1e-12)
+estimates store R
+keep if e(sample)
+rf_stage_mock, indepvars(age tenure) status(0 0)
+fereg ln_wage age tenure, absorb(idcode) vce(dkraay 2)
+estimates store F
+rf_compare_e R F
+rf_display_diff R F
+expect_key prepare "vce=dkraay"
+expect_key prepare "dkbw=2"
+expect_key prepare "tvar=2"
+expect_key prepare "tdelta=1"
+expect_key prepare "nfac=2"
+assert !strpos(" $rfmock_prepare ", " ivar=")
+quietly reghdfe ln_wage age tenure, absorb(year) vce(dkraay) tol(1e-12)
+estimates store R
+rf_stage_mock, indepvars(age tenure) status(0 0)
+fereg ln_wage age tenure, absorb(year) vce(dkraay)
+estimates store F
+rf_compare_e R F
+rf_display_diff R F
+expect_key prepare "tvar=1"
+expect_key prepare "nfac=1"
+assert !strpos(" $rfmock_prepare ", " dkbw=")
+
+* kernel options (numbers are the staged reghdfe ones; the e() strings and keys are checked)
+capture program drop stage_hac
+program stage_hac
+	args bw
+	quietly reghdfe ln_wage age tenure, absorb(idcode) tol(1e-12)
+	rf_stage_mock, indepvars(age tenure) status(0 0)
+	scalar __mock_bw = `bw'
+end
+stage_hac 3
+fereg ln_wage age tenure, absorb(idcode) bw(3) kernel(par)
+expect_key prepare "vce=unadjusted"
+expect_key prepare "kernel=parzen"
+expect_key prepare "bw=3"
+expect_key prepare "tvar=2"
+expect_key prepare "ivar=1"
+expect_key prepare "psd=none"
+assert "`e(vce)'" == "ac parzen bw=3" & "`e(vcetype)'" == "" & "`e(kernel)'" == "Parzen" & e(bw) == 3
+assert "`e(tvar)'" == "year" & "`e(ivar)'" == "idcode" & "`e(title3)'" == "Statistics robust to autocorrelation"
+assert "`e(hacsubtitleV)'" == "Statistics robust to autocorrelation"
+stage_hac 2.5
+fereg ln_wage age tenure, absorb(idcode) bw(2.5) kernel(quadratic spectral) vce(robust) psda
+expect_key prepare "vce=robust"
+expect_key prepare "kernel=quadratic-spectral"
+expect_key prepare "bw=2.5"
+expect_key prepare "psd=psda"
+assert "`e(vce)'" == "robust hac quadratic spectral bw=2.5 psda" & "`e(vcetype)'" == "Robust"
+assert "`e(hacsubtitleV)'" == "Statistics robust to heteroskedasticity and autocorrelation"
+stage_hac 2
+fereg ln_wage age tenure, absorb(idcode) dkraay(2)
+expect_key prepare "vce=cluster"
+expect_key prepare "cluster=2"
+expect_key prepare "kernel=bartlett"
+assert "`e(vce)'" == "cluster ac bartlett bw=2" & "`e(vcetype)'" == "Robust" & "`e(clustvar)'" == "year"
+assert "`e(hacsubtitleV)'" == "Statistics robust to heteroskedasticity and clustering on year"
+assert "`e(hacsubtitleV2)'" == "and kernel-robust to common correlated disturbances (Driscoll-Kraay)"
+stage_hac 2
+fereg ln_wage age tenure, absorb(idcode) vce(cluster year idcode) bw(2) kernel(tru)
+expect_key prepare "cluster=1;2"
+assert "`e(vce)'" == "robust two-way cluster hac truncated bw=2" & "`e(clustvar1)'" == "idcode" & "`e(clustvar2)'" == "year"
+assert "`e(hacsubtitleV)'" == "Statistics robust to heteroskedasticity and clustering on idcode and year"
+stage_hac 15
+fereg ln_wage age tenure, absorb(idcode) kiefer
+expect_key prepare "kiefer=1"
+expect_key prepare "kernel=truncated"
+assert !strpos(" $rfmock_prepare ", " bw=")
+assert "`e(vce)'" == "ac truncated bw=15" & "`e(hacsubtitleV)'" == "Statistics robust to within-cluster autocorrelation (Kiefer)"
+di as result "I kernels passed"
+
+* hc2/hc3, crv3, conley: keys and e() labels
+quietly reghdfe ln_wage age tenure, absorb(idcode) tol(1e-12)
+rf_stage_mock, indepvars(age tenure) status(0 0)
+fereg ln_wage age tenure, absorb(idcode) vce(hc3)
+expect_key prepare "vce=hc3"
+assert "`e(vce)'" == "hc3" & "`e(vcetype)'" == "Robust HC3"
+quietly reghdfe ln_wage age tenure, absorb(idcode) vce(cluster idcode ind_code) tol(1e-12)
+rf_stage_mock, indepvars(age tenure) status(0 0)
+fereg ln_wage age tenure, absorb(idcode) vce(crv3 idcode ind_code)
+expect_key prepare "vce=crv3"
+expect_key prepare "cluster=1;2"
+assert "`e(vce)'" == "crv3" & "`e(vcetype)'" == "CRV3" & "`e(clustvar)'" == "idcode ind_code" & e(N_clustervars) == 2
+gen double lat = 30 + mod(idcode, 17)
+gen double lon = -100 + mod(idcode, 23)
+quietly reghdfe ln_wage age tenure, absorb(idcode) tol(1e-12)
+rf_stage_mock, indepvars(age tenure) status(0 0)
+scalar __mock_cutoff = 250
+fereg ln_wage age tenure, absorb(idcode) vce(conley lat lon, cutoff(250) distance(spherical))
+expect_key prepare "vce=conley"
+expect_key prepare "ncoord=2"
+expect_key prepare "cutoff=250"
+expect_key prepare "pixel=0"
+expect_key prepare "distance=spherical"
+assert "`e(vce)'" == "conley" & "`e(vcetype)'" == "Conley" & e(conley_cutoff) == 250 & "`e(conley_lat)'" == "lat"
+di as result "I passed"
 
 di as result "TEST_ADO_MOCK PASSED"

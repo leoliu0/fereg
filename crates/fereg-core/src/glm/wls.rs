@@ -1,14 +1,14 @@
 //! Weighted least squares on residualized row blocks: QR (accurate; ppmlhdfe uses Mata
 //! `qrsolve` for these solves) and normal equations (ppmlhdfe `fastsolve`).
 //!
-//! The QR kernel factors √w·[X̃, ỹ] per fixed chunk of rows (Householder reflections on the
+//! The QR kernel factors sqrt w*[X~, y~] per fixed chunk of rows (Householder reflections on the
 //! chunk's columns) and merges the chunk factors in chunk order (Givens rotations), so results do
 //! not depend on the thread count.
 
 use crate::par::{self, CHUNK, Pool};
 use crate::vcov::{self, INVSYM_TOL};
 
-/// Rotates `row` (length m) into the upper-triangular m×m factor `r` (row-major).
+/// Rotates `row` (length m) into the upper-triangular m x m factor `r` (row-major).
 fn givens_add(r: &mut [f64], m: usize, row: &mut [f64]) {
     for j in 0..m {
         let a = row[j];
@@ -28,7 +28,7 @@ fn givens_add(r: &mut [f64], m: usize, row: &mut [f64]) {
     }
 }
 
-/// Σ a_i·b_i with four interleaved accumulators (vectorizes; fixed order for a given length).
+/// sum a_i*b_i with four interleaved accumulators (vectorizes; fixed order for a given length).
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0f64; 4];
     let (ac, ar) = a.split_at(a.len() - a.len() % 4);
@@ -45,7 +45,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     t
 }
 
-/// Upper-triangular R (m×m, row-major) of the column-major nc×m matrix `a` (overwritten) by
+/// Upper-triangular R (m x m, row-major) of the column-major nc x m matrix `a` (overwritten) by
 /// Householder reflections.
 fn householder_r(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
     let mut rr = vec![0.0; m * m];
@@ -64,7 +64,7 @@ fn householder_r(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
         }
         let norm = (x0 * x0 + s1).sqrt();
         let alpha = if x0 >= 0.0 { -norm } else { norm };
-        // v = x − α·e1 (in place); v'v = s1 + (x0 − α)².
+        // v = x - alpha*e1 (in place); v'v = s1 + (x0 - alpha)^2.
         x[0] = x0 - alpha;
         let vv = s1 + x[0] * x[0];
         rr[j * m + j] = alpha;
@@ -80,8 +80,8 @@ fn householder_r(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
     rr
 }
 
-/// R factor (m×m, upper) of the QR decomposition of the n×m matrix whose row i is
-/// √w_i·(rows[i·r + cols[0]], …, rows[i·r + cols[m−1]]). Diagonal signs are unspecified.
+/// R factor (m x m, upper) of the QR decomposition of the n x m matrix whose row i is
+/// sqrt w_i*(rows[i*r + cols[0]], ..., rows[i*r + cols[m-1]]). Diagonal signs are unspecified.
 pub(crate) fn qr_factor(rows: &[f64], r: usize, cols: &[usize], w: Option<&[f64]>, pool: &Pool) -> Vec<f64> {
     let n = rows.len().checked_div(r).unwrap_or(0);
     let m = cols.len();
@@ -109,7 +109,7 @@ pub(crate) fn qr_factor(rows: &[f64], r: usize, cols: &[usize], w: Option<&[f64]
 }
 
 /// Least-squares coefficients from the R factor of [X, y] (m = k + 1): solves R_xx b = R_xy by
-/// back substitution. Diagonal entries ≤ 1e-13·max|R_ii| are treated as zero (coefficient 0),
+/// back substitution. Diagonal entries <= 1e-13*max|R_ii| are treated as zero (coefficient 0),
 /// as Mata `_solveupper` does for rank-deficient systems.
 pub(crate) fn qr_solve(rr: &[f64], m: usize) -> Vec<f64> {
     let k = m - 1;
@@ -140,8 +140,8 @@ pub(crate) fn qr_coefs(rows: &[f64], r: usize, ycol: usize, xcols: &[usize], w: 
     qr_solve(&rr, cols.len())
 }
 
-/// Normal-equation coefficients from a Gram matrix `g` (r×r, columns [y, x…]):
-/// b = G_xx⁻ G_xy with the sweep generalized inverse.
+/// Normal-equation coefficients from a Gram matrix `g` (r x r, columns [y, x...]):
+/// b = G_xx^- G_xy with the sweep generalized inverse.
 pub(crate) fn normal_coefs(g: &[f64], r: usize) -> Vec<f64> {
     let k = r - 1;
     if k == 0 {

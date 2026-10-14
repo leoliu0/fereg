@@ -84,12 +84,12 @@ def _build(
         rows[("stats", name)] = [str(v) for v in values]
     rows[("stats", "Observations")] = [str(m._N) for m in models]
     rows[("stats", "S.E. type")] = [_se_type(m) for m in models]
-    rows[("stats", "R²")] = ["-" if np.isnan(m._r2) else _fmt(m._r2, digits) for m in models]
+    rows[("stats", "R\u00b2")] = ["-" if np.isnan(m._r2) else _fmt(m._r2, digits) for m in models]
     if any(m._has_fixef and not np.isnan(m._r2_within) for m in models):
-        rows[("stats", "R² Within")] = ["-" if np.isnan(m._r2_within) else _fmt(m._r2_within, digits) for m in models]
+        rows[("stats", "R\u00b2 Within")] = ["-" if np.isnan(m._r2_within) else _fmt(m._r2_within, digits) for m in models]
     pr2 = [getattr(m, "_pseudo_r2", None) for m in models]
     if any(v is not None for v in pr2):
-        rows[("stats", "Pseudo R²")] = ["-" if v is None else _fmt(v, digits) for v in pr2]
+        rows[("stats", "Pseudo R\u00b2")] = ["-" if v is None else _fmt(v, digits) for v in pr2]
 
     heads = model_heads or [""] * len(models)
     numbers = [f"({i + 1})" for i in range(len(models))]
@@ -132,7 +132,7 @@ def _tex(df: pd.DataFrame, notes: str, signif_code) -> str:
 
 
 def _tex_escape(s: str) -> str:
-    for a, b in (("&", r"\&"), ("%", r"\%"), ("_", r"\_"), ("#", r"\#"), ("²", "$^2$")):
+    for a, b in (("&", r"\&"), ("%", r"\%"), ("_", r"\_"), ("#", r"\#"), ("\u00b2", "$^2$")):
         s = s.replace(a, b)
     return s
 

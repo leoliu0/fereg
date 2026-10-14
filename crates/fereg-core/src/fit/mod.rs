@@ -15,6 +15,7 @@ use crate::par;
 
 pub mod dist;
 mod design;
+mod extra;
 mod fixef;
 mod glm;
 mod input;
@@ -77,22 +78,63 @@ pub enum Model {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Flavor {
     /// fixest 0.14.2: PSD fix of every variance matrix, `K = max(K, k + 1)` clamp, rows with a
-    /// missing cluster value are dropped at estimation.
+    /// missing cluster value, or a missing time / panel / coordinate of the requested
+    /// variance matrix, are dropped at estimation.
     #[default]
     Fixest,
     /// pyfixest 0.60.0: no PSD fix, no clamp, FE nesting is also checked against the two-way
-    /// intersection, a missing cluster value is an error, `fweights` semantics.
+    /// intersection, a missing cluster (time, panel, coordinate) value is an error, `fweights`
+    /// semantics.
     Pyfixest,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Variance estimator. Parameters left `None` are resolved by the flavor's default rule and
+/// echoed resolved in [`VcovOutput::kind`]. Every kind applies to every model (OLS, IV, Poisson,
+/// logit; IV first stages get the same kind) except HC2/HC3 with IV.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum VcovKind {
     #[default]
     Iid,
     /// HC1.
     Hetero,
+    /// HC2 / HC3 (scores / sqrt(1 - h), / (1 - h)) with the exact leverage of the full model:
+    /// fixed effects and slopes included, GLMs under the IRLS weights. Fixest: no small-sample
+    /// correction, an error when a leverage is 1, df_t from K with every fixed effect; `feols`
+    /// without fixed effects leaves the weight out of the leverage, as fixest's `hatvalues`.
+    /// Pyfixest: N/(N - df_k), frequency weights h/w and scores/sqrt(w); with fixed effects this is
+    /// fereg's extension (pyfixest raises). Not defined for IV (each reference's message).
+    /// With varying slopes fixest's own `hatvalues` fails (Cholesky of its dummy cross-product)
+    /// or, for `feglm`, demeans the regressors by the intercept fixed effects only: fereg uses the
+    /// exact leverage there.
+    Hc2,
+    Hc3,
     /// One- to four-way clustering (Cameron-Gelbach-Miller); dimensions come with the request.
     Cluster,
+    /// Leave-one-cluster-out jackknife centered at the full-sample coefficients (pyfixest CRV3)
+    /// over the same dimensions, with CRV1's small-sample factors, sign and G rules per subset of
+    /// the dimensions (inclusion-exclusion); logit refits are logit. Fixest flavor (extension):
+    /// fixest's cluster correction and PSD fix. Fit time only.
+    Crv3,
+    /// Newey-West (Bartlett): panel when a panel variable is given, time series otherwise.
+    /// Fixest: lags over the dense rank of time (pairs within the unit), default floor(T^(1/4))
+    /// (panel) or floor(sandwich::bwNeweyWest) (time series). Pyfixest: lags over the rows of a
+    /// unit sorted by time, default floor(T^0.25), the time series needs `lag`. Both:
+    /// T/(T - 1) * (n - 1)/(n - K), df_t T - 1.
+    NeweyWest { lag: Option<usize> },
+    /// Driscoll-Kraay over the per-period score sums; default lag floor(T^(1/4)); ssc and df_t
+    /// as Newey-West. The panel variable is optional (pyfixest: duplicate check only).
+    DriscollKraay { lag: Option<usize> },
+    /// Conley spatial HAC (fixest): cutoff and pixel in km; `cutoff: None` = fixest's deduced
+    /// cutoff; `spherical` = great-circle distance (fixest `distance = "spherical"`), else fixest's
+    /// `"triangular"`. n/(n - K) (pyfixest flavor, an extension: N/(N - df_k)), df_t n - K.
+    Conley { cutoff: Option<f64>, pixel: f64, spherical: bool },
+}
+
+impl VcovKind {
+    /// Clustered (CRV1 or CRV3): needs cluster dimensions and allows fixest's `K.fixef = "nonnested"`.
+    pub fn is_clustered(&self) -> bool {
+        matches!(self, VcovKind::Cluster | VcovKind::Crv3)
+    }
 }
 
 /// fixest `ssc(K.fixef=)`.
@@ -141,7 +183,7 @@ pub enum WeightsType {
     /// Observations count as rows (`nobs` = number of rows).
     #[default]
     Aweights,
-    /// Frequency weights: `nobs` = Σw.
+    /// Frequency weights: `nobs` = sum w.
     Fweights,
 }
 
@@ -157,8 +199,8 @@ pub enum FixefRm {
     /// singletons, dropping levels whose outcome is all 0 (logit too). For logit the rest of
     /// fixest's rule applies to IRLS only: the rows of levels whose remaining outcomes are all 0
     /// or all 1 stay in the reported sample (pyfixest's nobs and degrees of freedom) at the limit
-    /// pyfixest's IRLS approaches: μ at the bound (1 − 100ε or 100ε), IRLS weight w·μ(1 − μ), no
-    /// contribution to the scores, and fixed effects ±∞ on levels with no other row.
+    /// pyfixest's IRLS approaches: mu at the bound (1 - 100*eps or 100*eps), IRLS weight w*mu(1 - mu), no
+    /// contribution to the scores, and fixed effects +/-inf on levels with no other row.
     #[default]
     Perfect,
 }
@@ -180,7 +222,7 @@ pub enum FixefNorm {
 pub struct FitInput<'a> {
     /// Number of input rows; every slice below has this length.
     pub n: usize,
-    /// Dependent variable; NaN / ±inf = missing.
+    /// Dependent variable; NaN / +/-inf = missing.
     pub y: &'a [f64],
     /// Exogenous regressors (host-built design columns, no intercept column), in coefficient order.
     pub x: Vec<&'a [f64]>,
@@ -202,6 +244,14 @@ pub struct FitInput<'a> {
     pub offset: Option<&'a [f64]>,
     /// Cluster dimensions of the variance matrix (factor indices; more than one = interaction).
     pub cluster: Vec<Vec<usize>>,
+    /// Time variable of Newey-West / Driscoll-Kraay (factor index; levels ascending = time order).
+    pub time: Option<usize>,
+    /// Panel (unit) variable of Newey-West (factor index); also the duplicate check of pyfixest's
+    /// Driscoll-Kraay.
+    pub panel: Option<usize>,
+    /// Latitude and longitude of Conley variance matrices, degrees; NaN = missing.
+    pub lat: Option<&'a [f64]>,
+    pub lon: Option<&'a [f64]>,
     /// Extra rows to drop (missing values the host found while building the design); `true` = drop.
     pub drop: Option<&'a [bool]>,
 }
@@ -289,8 +339,10 @@ impl TestStat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VcovOutput {
+    /// The request with every default resolved: `lag: Some(L)` as the flavor reports it (fixest's
+    /// label `(L=...)`), `cutoff: Some(km)`.
     pub kind: VcovKind,
-    /// k × k row-major over the coefficient order it was computed for.
+    /// k x k row-major over the coefficient order it was computed for.
     pub vcov: Vec<f64>,
     /// K used by the small-sample correction (fixest `df.K`).
     pub df_k: f64,
@@ -298,6 +350,8 @@ pub struct VcovOutput {
     pub df_t: Option<f64>,
     /// Number of clusters per dimension (empty unless clustered).
     pub n_clusters: Vec<usize>,
+    /// Newey-West / Driscoll-Kraay: number of time periods T of the estimation sample.
+    pub n_periods: Option<usize>,
     /// Total small-sample multiplier applied.
     pub ssc_factor: f64,
     /// An eigenvalue was clipped (fixest PSD fix).
@@ -306,37 +360,37 @@ pub struct VcovOutput {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FitStats {
-    /// Σw·e² (GLM: response residuals y − μ).
+    /// sum w*e^2 (GLM: response residuals y - mu).
     pub ssr: f64,
-    /// Σw·(y − ȳ_w)².
+    /// sum w*(y - ybar_w)^2.
     pub ssr_null: f64,
-    /// Σw·ỹ² (y net of the fixed effects); NaN for GLMs.
+    /// sum w*y~^2 (y net of the fixed effects); NaN for GLMs.
     pub ssr_fe_only: f64,
-    /// ssr / (n − nparams); NaN for GLMs.
+    /// ssr / (n - nparams); NaN for GLMs.
     pub sigma2: f64,
-    /// sqrt(ssr / n), n = Σw when weighted.
+    /// sqrt(ssr / n), n = sum w when weighted.
     pub rmse: f64,
-    /// R² family; NaN for GLMs.
+    /// R^2 family; NaN for GLMs.
     pub r2: f64,
     pub ar2: f64,
     pub wr2: f64,
     pub war2: f64,
-    /// fixest `logLik`: OLS −n/2·(1 + ln 2π + ln(Σe²/n)); Poisson Σw(y·η − μ − lnΓ(y+1)); logit
-    /// Σ ln dbinom(round(w·y), round(w), μ) (fixest's binomial with the weights as trials).
+    /// fixest `logLik`: OLS -n/2*(1 + ln 2*pi + ln(sum e^2/n)); Poisson sum w(y*eta - mu - ln Gamma(y+1)); logit
+    /// sum ln dbinom(round(w*y), round(w), mu) (fixest's binomial with the weights as trials).
     pub loglik: f64,
     /// Log-likelihood of the constant-only model. GLM (fixest `ll_null`): without the offset;
-    /// Poisson `sy·ln(sy/N) − sy − Σ lnΓ(y+1)` (sy = Σwy, N = Σw, unweighted factorials), logit
-    /// `sy·ln p + (N − sy)·ln(1 − p)` with p = sy/N.
+    /// Poisson `sy*ln(sy/N) - sy - sum ln Gamma(y+1)` (sy = sum wy, N = sum w, unweighted factorials), logit
+    /// `sy*ln p + (N - sy)*ln(1 - p)` with p = sy/N.
     pub ll_null: f64,
     /// OLS: ssr. GLM: the model deviance.
     pub deviance: f64,
     /// OLS: ssr_null. GLM: deviance of the constant-only model without offset.
     pub null_deviance: f64,
-    /// 1 − ll/ll_null.
+    /// 1 - ll/ll_null.
     pub pseudo_r2: f64,
-    /// 1 − (ll − nparams + 1)/ll_null.
+    /// 1 - (ll - nparams + 1)/ll_null.
     pub apr2: f64,
-    /// cor(y, fitted)².
+    /// cor(y, fitted)^2.
     pub sq_cor: f64,
     /// fixest fitstat `f` (OLS).
     pub f_test: TestStat,
@@ -360,7 +414,7 @@ pub struct IvFirstStage {
     pub f_test: TestStat,
     /// fixest `ivwald1`: Wald test of the excluded instruments with the stage's vcov, p from
     /// F(df1, df2). Pyfixest flavor: pyfixest's first-stage `wald_test` (pseudo-inverse; p from
-    /// χ²(df1) on stat·df1; df2 NaN).
+    /// chi^2 (df1) on stat*df1; df2 NaN).
     pub wald: TestStat,
 }
 
@@ -371,7 +425,7 @@ pub struct IvStats {
     pub wu_hausman: TestStat,
     /// fixest `sargan` (NaN when exactly identified).
     pub sargan: TestStat,
-    /// Σw·(uncorrected second-stage residual)² (fixest `r2` for IV uses it).
+    /// sum w*(uncorrected second-stage residual)^2 (fixest `r2` for IV uses it).
     pub ssr_iv: f64,
 }
 
@@ -394,7 +448,7 @@ pub struct FixefValues {
 /// Rows removed before estimation. A row counts once, in the first applicable class.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dropped {
-    /// Missing values (NaN / ±inf / missing factor codes / `FitInput::drop`).
+    /// Missing values (NaN / +/-inf / missing factor codes / `FitInput::drop`).
     pub na: usize,
     pub zero_weight: usize,
     pub singletons: usize,
@@ -403,7 +457,9 @@ pub struct Dropped {
     /// ppmlhdfe `relu` / `mu` separation.
     pub separated: usize,
     /// Rows with a missing value per input group (a row may count in several):
-    /// y, x, endog, inst, fe (factors and slopes), cluster, weights, offset, extra drop mask.
+    /// y, x, endog, inst, fe (factors and slopes), cluster (every variable of the requested
+    /// variance matrix: cluster, time, panel, latitude, longitude; fixest's `vcov` group),
+    /// weights, offset, extra drop mask.
     pub na_by: NaCounts,
 }
 
@@ -425,7 +481,7 @@ pub struct FitOutput {
     pub nobs: usize,
     /// Input rows.
     pub nobs_origin: usize,
-    /// Σ weights over the estimation rows (= nobs when unweighted).
+    /// sum weights over the estimation rows (= nobs when unweighted).
     pub sumw: f64,
     /// Ascending input-row index of every estimation row. Every per-observation output below
     /// follows this order.
@@ -443,13 +499,13 @@ pub struct FitOutput {
     pub fe_sizes: Vec<usize>,
     pub stats: FitStats,
     pub iv: Option<IvStats>,
-    /// Residuals (IV: fixest's corrected residuals y − Xβ − FE with the original endogenous
-    /// variables; GLM: response residuals y − μ).
+    /// Residuals (IV: fixest's corrected residuals y - X beta - FE with the original endogenous
+    /// variables; GLM: response residuals y - mu).
     pub resid: Option<Vec<f64>>,
-    /// Fitted values including the fixed effects (IV: fixest's y − second-stage residual, i.e.
-    /// with the first-stage fitted endogenous variables; GLM: μ).
+    /// Fitted values including the fixed effects (IV: fixest's y - second-stage residual, i.e.
+    /// with the first-stage fitted endogenous variables; GLM: mu).
     pub fitted: Option<Vec<f64>>,
-    /// GLM linear predictor η (including the offset).
+    /// GLM linear predictor eta (including the offset).
     pub eta: Option<Vec<f64>>,
     /// GLM final IRLS weights (including observation weights).
     pub irls_weights: Option<Vec<f64>>,
@@ -459,6 +515,20 @@ pub struct FitOutput {
     pub state: Option<FitState>,
 }
 
+/// Inputs of a post-hoc variance matrix ([`FitState::vcov`]), all over the rows of the original
+/// [`FitInput`] (input length): the factor columns that `cluster`, `time` and `panel` index, and
+/// the coordinates. A missing value on an estimation row is an error.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VcovData<'a> {
+    pub factors: &'a [FactorCol<'a>],
+    pub factor_names: &'a [String],
+    pub cluster: &'a [Vec<usize>],
+    pub time: Option<usize>,
+    pub panel: Option<usize>,
+    pub lat: Option<&'a [f64]>,
+    pub lon: Option<&'a [f64]>,
+}
+
 /// Retained data for post-hoc variance matrices (fixest `summary(m, vcov=)`, pyfixest
 /// `m.vcov()`) and fixed-effect values (fixest / pyfixest `fixef()`).
 pub struct FitState {
@@ -466,19 +536,11 @@ pub struct FitState {
 }
 
 impl FitState {
-    /// Variance matrix of the same fit under another estimator or small-sample correction.
-    /// `factors` are input-length columns (the rows of the original [`FitInput`]); `cluster`
-    /// indexes into them. A missing cluster value on an estimation row is an error.
-    pub fn vcov(
-        &self,
-        kind: VcovKind,
-        ssc: &Ssc,
-        factors: &[FactorCol],
-        factor_names: &[String],
-        cluster: &[Vec<usize>],
-        ctx: &Ctx,
-    ) -> Result<VcovOutput, RfError> {
-        self.inner.vcov(kind, ssc, factors, factor_names, cluster, ctx)
+    /// Variance matrix of the same fit under another estimator or small-sample correction, with
+    /// the conventions of the fit's flavor. [`VcovKind::Crv3`] is an error: the jackknife
+    /// re-estimates the model (hosts fit again with `vcov = Crv3`).
+    pub fn vcov(&self, kind: VcovKind, ssc: &Ssc, data: &VcovData, ctx: &Ctx) -> Result<VcovOutput, RfError> {
+        self.inner.vcov(kind, ssc, data, ctx)
     }
 
     /// Fixed-effect values of the fit under `norm`, as [`FitOutput::fixef`] with

@@ -307,7 +307,7 @@ jobs:
       - name: Build the source tarball (fereg-core copied in, crates vendored)
         run: |
           sh scripts/sync-core.sh
-          sh r/fereg/tools/vendor-crates.sh
+          python3 r/fereg/tools/vendor-crates.py
           R CMD build r/fereg
           ls -l fereg_${VERSION}.tar.gz
           tar -tzf fereg_${VERSION}.tar.gz | grep -x fereg/src/rust/vendor.tar.xz

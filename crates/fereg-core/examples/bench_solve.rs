@@ -191,7 +191,7 @@ fn main() {
                                 best = Some(run);
                             }
                         }
-                        let b = best.expect("reps ≥ 1");
+                        let b = best.expect("reps >= 1");
                         // D2 budget of the residualize call: two streaming row passes (read; read +
                         // write) plus the cell codes twice, and per iteration one pass over the cells.
                         let q1 = (nfe - 1) as f64;

@@ -6,10 +6,14 @@
 //! scaling. Residualization is linear, so here the raw columns are residualized and the Gram
 //! matrices are rescaled afterwards; all scale-sensitive decisions use the standardized matrices.
 
+pub(crate) mod stata_vce;
+
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
 use crate::api::{Ctx, EstResult, Layout, NamedMat, Spec, Vce, WeightKind};
+use crate::crv3::{JkModel, JkProblem};
+use crate::leverage::FeCols;
 use crate::dof::{self, Dof};
 use crate::error::RfError;
 use crate::fe_recovery;
@@ -29,16 +33,16 @@ pub(crate) fn collinear_tol(tol: f64) -> f64 {
 }
 
 /// Stage 1 (reghdfe `check_collinear_with_fe`): column j is explained by the fixed effects when
-/// Σz̃_j² / Σx_j² ≤ `ctol` (unweighted, raw uncentered denominator). A zero denominator gives a
+/// sum z~_j^2 / sum x_j^2 <= `ctol` (unweighted, raw uncentered denominator). A zero denominator gives a
 /// missing ratio, which Stata treats as "not collinear" (the sweep then drops the column).
 pub(crate) fn stage1_absorbed(ss_resid: &[f64], ss_raw: &[f64], ctol: f64) -> Vec<bool> {
     ss_resid.iter().zip(ss_raw).map(|(a, b)| a / b <= ctol).collect()
 }
 
 /// Stage 2 (reghdfe `reghdfe_rmcoll`, Mata `invsym(xx, 1..K)`): sweeps the columns `cols` of the
-/// r×r Gram `g` in order on the standardized scale (entry (a,b) divided by sd_a·sd_b).
+/// r x r Gram `g` in order on the standardized scale (entry (a,b) divided by sd_a*sd_b).
 /// Returns (collinear flag per entry of `cols`, generalized inverse of the standardized block with
-/// zero rows/columns for collinear entries, |cols|×|cols|).
+/// zero rows/columns for collinear entries, |cols|x|cols|).
 pub(crate) fn stage2_collinear(g: &[f64], r: usize, cols: &[usize], sd: &[f64]) -> (Vec<bool>, Vec<f64>) {
     let k = cols.len();
     let gs: Vec<f64> = (0..k * k).map(|ab| {
@@ -50,7 +54,7 @@ pub(crate) fn stage2_collinear(g: &[f64], r: usize, cols: &[usize], sd: &[f64]) 
     (dropped, inv)
 }
 
-/// Extracts the sub-block of a k×k matrix on `keep` (indices into 0..k).
+/// Extracts the sub-block of a k x k matrix on `keep` (indices into 0..k).
 pub(crate) fn sub_block(m: &[f64], k: usize, keep: &[usize]) -> Vec<f64> {
     keep.iter().flat_map(|&a| keep.iter().map(move |&b| m[a * k + b])).collect()
 }
@@ -60,13 +64,13 @@ pub(crate) struct Weights {
     pub kind: WeightKind,
     /// Kept observations (rows).
     pub n_obs: usize,
-    /// Σ raw weights (N_obs when unweighted): `e(sumweights)`.
+    /// sum raw weights (N_obs when unweighted): `e(sumweights)`.
     pub sumw: f64,
-    /// N: Σfw with fweights, N_obs otherwise.
+    /// N: sum fw with fweights, N_obs otherwise.
     pub n: f64,
     /// Raw weights in row order.
     pub raw: Option<Vec<f64>>,
-    /// Regression weights w_v in row order: w·N_obs/Σw for aw/pw, w for fw, `None` unweighted.
+    /// Regression weights w_v in row order: w*N_obs/sum w for aw/pw, w for fw, `None` unweighted.
     pub wv: Option<Vec<f64>>,
 }
 
@@ -96,7 +100,7 @@ impl Weights {
         self.wv.as_ref().map_or(1.0, |w| w[i])
     }
 
-    /// reghdfe `tmp_N` of the constant extension: N_obs for aw/pw, Σfw (= N) otherwise.
+    /// reghdfe `tmp_N` of the constant extension: N_obs for aw/pw, sum fw (= N) otherwise.
     pub(crate) fn n_const(&self) -> f64 {
         match self.kind {
             WeightKind::Aweight | WeightKind::Pweight => self.n_obs as f64,
@@ -104,7 +108,7 @@ impl Weights {
         }
     }
 
-    /// reghdfe robust multiplier m_i given the residual: e² (none), e²·w (fw), (e·w_v)² (aw/pw).
+    /// reghdfe robust multiplier m_i given the residual: e^2 (none), e^2*w (fw), (e*w_v)^2 (aw/pw).
     #[inline]
     pub(crate) fn robust_mult(&self, i: usize, e: f64) -> f64 {
         match self.kind {
@@ -118,8 +122,8 @@ impl Weights {
     }
 }
 
-/// reghdfe TSS of each column: Σw(x − x̄_w)² with an intercept in the model, else Σw·x², scaled
-/// by N_obs/Σw for aw/pw.
+/// reghdfe TSS of each column: sum w(x - xbar_w)^2 with an intercept in the model, else sum w*x^2, scaled
+/// by N_obs/sum w for aw/pw.
 pub(crate) fn tss_of(cs: &ColStats, w: &Weights, has_intercept: bool) -> Vec<f64> {
     let scale = match w.kind {
         WeightKind::Aweight | WeightKind::Pweight => w.n_obs as f64 / w.sumw,
@@ -129,7 +133,7 @@ pub(crate) fn tss_of(cs: &ColStats, w: &Weights, has_intercept: bool) -> Vec<f64
     base.iter().map(|v| v * scale).collect()
 }
 
-/// VCE flavour after reghdfe's rule "pweight + unadjusted → robust".
+/// VCE flavour after reghdfe's rule "pweight + unadjusted -> robust".
 pub(crate) fn effective_vce(vce: &Vce, kind: WeightKind) -> Vce {
     match vce {
         Vce::Unadjusted if kind == WeightKind::Pweight => Vce::Robust,
@@ -142,14 +146,49 @@ pub(crate) fn missing_if_nonfinite(x: f64) -> f64 {
     if x.is_finite() { x } else { f64::NAN }
 }
 
+/// Kept-order columns of a row-order block (R columns).
+pub(crate) fn kept_columns(rows: &[f64], r: usize, row_order: &[u32]) -> Result<Vec<Vec<f64>>, RfError> {
+    let n = row_order.len();
+    (0..r)
+        .map(|j| {
+            let mut c = par::alloc_vec(n, 0.0)?;
+            for (i, &k) in row_order.iter().enumerate() {
+                c[k as usize] = rows[i * r + j];
+            }
+            Ok(c)
+        })
+        .collect()
+}
+
+/// Meat on the design rows a = (b_1 + xbar_1, ..., b_k + xbar_k, b_{k+1}) from the meat on b
+/// ((k+1) x (k+1), b_{k+1} the constant column): T M T' with T = [[I, xbar], [0, 1]].
+pub(crate) fn shift_constant(m: &[f64], msize: usize, xbar: &[f64]) -> Vec<f64> {
+    let k = msize - 1;
+    let mut t = vec![0.0; msize * msize];
+    for p in 0..msize {
+        t[p * msize + p] = 1.0;
+    }
+    for (p, &x) in xbar.iter().enumerate() {
+        t[p * msize + k] = x;
+    }
+    let tm = vcov::matmul(&t, m, msize);
+    let mut out = vec![0.0; msize * msize];
+    for a in 0..msize {
+        for b in 0..msize {
+            out[a * msize + b] = (0..msize).map(|c| tm[a * msize + c] * t[b * msize + c]).sum();
+        }
+    }
+    out
+}
+
 impl Session {
-    /// OLS on `rows` (N×R row-major in [`Session::row_order`], layout `[y, x...]`).
+    /// OLS on `rows` (N x R row-major in [`Session::row_order`], layout `[y, x...]`).
     pub fn ols(&mut self, rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx) -> Result<EstResult, RfError> {
         if lay.nendog != 0 || lay.ninst != 0 {
             return Err(RfError::InvalidInput("ols: layout has endogenous variables or instruments".into()));
         }
         if rows.len() != self.n() * lay.ncols() {
-            return Err(RfError::InvalidInput("ols: data block size differs from N·R".into()));
+            return Err(RfError::InvalidInput("ols: data block size differs from N*R".into()));
         }
         par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.ols_in_pool(rows, lay.nx, s, ctx, pool))?
     }
@@ -162,6 +201,17 @@ impl Session {
         let report_constant = has_intercept && !s.noconstant;
         let w = Weights::new(self.weight_kind, self.weights.as_deref(), self.absorber.row_order(), pool)?;
         let big_n = w.n;
+        let vce = effective_vce(&self.vce, w.kind);
+        if vce == Vce::Hc3 && w.kind == WeightKind::Pweight {
+            return Err(RfError::Code(198, "pweights not allowed with option vce(hc3)".into()));
+        }
+        // Kernel VCEs are validated against the sample before any heavy work.
+        let mut kplan = match &vce {
+            Vce::Kernel(kv) => Some(stata_vce::KernelPlan::new(kv, &self.vdata, w.kind, self.absorber.row_order(), pool)?),
+            _ => None,
+        };
+        // CRV3 refits need the raw columns (kept order).
+        let raw_cols: Option<Vec<Vec<f64>>> = if matches!(vce, Vce::Crv3(_)) { Some(kept_columns(&rows, r, self.absorber.row_order())?) } else { None };
 
         // Degrees of freedom do not depend on the data columns.
         let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false);
@@ -224,8 +274,7 @@ impl Session {
         let b_s: Vec<f64> = (0..k).map(|a| (0..k).map(|b| inv_s[a * k + b] * xy_s[b]).sum()).collect();
         let beta: Vec<f64> = (0..k).map(|a| b_s[a] * sd_y / sd[kept[a]]).collect();
 
-        // Pass C: residuals e = ỹ − X̃β (materialized only when needed) and rss = Σ w_v e².
-        let vce = effective_vce(&self.vce, w.kind);
+        // Pass C: residuals e = y~ - X~beta (materialized only when needed) and rss = sum w_v e^2.
         let need_e = s.want_resid || !matches!(vce, Vce::Unadjusted);
         let resid_of = |i: usize| -> f64 {
             let row = &rows[i * r..(i + 1) * r];
@@ -242,7 +291,7 @@ impl Session {
         } else {
             None
         };
-        // Without materialized residuals, rss = G_yy − 2β'G_xy + β'G_xxβ from the Gram saves a
+        // Without materialized residuals, rss = G_yy - 2*beta'G_xy + beta'G_xx beta from the Gram saves a
         // pass unless cancellation would cost more than ~1e-10 relative (near-perfect fits).
         let rss_gram = || {
             let gy: f64 = kept.iter().zip(&beta).map(|(&j, b)| b * g[j]).sum();
@@ -280,8 +329,8 @@ impl Session {
         let mut notes = Vec::new();
         let mut v_s = vec![0.0; msize * msize];
         let mut n_clust: Option<(f64, Vec<f64>)> = None;
-        // Raw-scale design row a_i = (x̃_i + x̄ if constant, 1 if constant); `scale` converts a raw
-        // meat to the standardized one: M_s(a,b) = M(a,b) / (sc_a·sc_b·sd_y²).
+        // Raw-scale design row a_i = (x~_i + xbar if constant, 1 if constant); `scale` converts a raw
+        // meat to the standardized one: M_s(a,b) = M(a,b) / (sc_a*sc_b*sd_y^2).
         let xbar: Vec<f64> = kept.iter().map(|&j| cs.wmean[j]).collect();
         let fill_row = |i: usize, a: &mut [f64]| {
             let row = &rows[i * r..(i + 1) * r];
@@ -300,43 +349,199 @@ impl Session {
                 }
             }
         };
+        let mut extra: Vec<(&str, f64)> = Vec::new();
+        let mut macros: Vec<(String, String)> = Vec::new();
+        let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
+        let cluster_list = || self.clusters.iter().map(|c| c.g as f64).collect::<Vec<f64>>();
+        let row_order = self.absorber.row_order();
+        // reghdfe's cluster small-sample factor.
+        let nested_adj = if dof.df_a_nested > 0 { 1.0 } else { 0.0 };
+        let q_cluster = (big_n - 1.0) / (big_n - nested_adj - df_m - df_a) * g_min / (g_min - 1.0);
+        // ivreghdfe's sdofminus (absorb_ct >= 1).
+        let sdof = df_a.max(1.0);
         if msize > 0 {
+            let e = e.as_deref();
+            let res_e = |i: usize| e.map_or(0.0, |e| e[i]);
             match &vce {
                 Vce::Unadjusted => {
                     let adj = big_n / df_r;
                     v_s = bread.iter().map(|x| (rss_s / big_n) * adj * x).collect();
                 }
                 Vce::Robust => {
-                    let e = e.as_deref().expect("residuals materialized for robust VCE");
                     let mut meat = vcov::robust_meat(n, msize, pool, |i, a| {
                         fill_row(i, a);
-                        w.robust_mult(i, e[i])
+                        w.robust_mult(i, res_e(i))
                     });
                     standardize_meat(&mut meat);
                     v_s = vcov::sandwich(&bread, &meat, msize, big_n / (big_n - df_a - df_m));
                 }
                 Vce::Cluster(_) => {
-                    let e = e.as_deref().expect("residuals materialized for cluster VCE");
                     let dims: Vec<ClusterCodes> = self.clusters.iter().map(|c| ClusterCodes { codes: &c.codes, g: c.g }).collect();
-                    let mut meat = vcov::multiway_meat(&dims, self.absorber.row_order(), msize, pool, |i, a| {
+                    let mut meat = vcov::multiway_meat(&dims, row_order, msize, pool, |i, a| {
                         fill_row(i, a);
-                        e[i] * w.wv(i)
+                        res_e(i) * w.wv(i)
                     })?;
                     standardize_meat(&mut meat);
-                    let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
-                    let nested_adj = if dof.df_a_nested > 0 { 1.0 } else { 0.0 };
-                    let adj = (big_n - 1.0) / (big_n - nested_adj - df_m - df_a) * g_min / (g_min - 1.0);
-                    v_s = vcov::sandwich(&bread, &meat, msize, adj);
+                    v_s = vcov::sandwich(&bread, &meat, msize, q_cluster);
                     if self.clusters.len() > 1 && vcov::fix_psd(&mut v_s, msize, report_constant) {
                         notes.push("Warning: VCV matrix was non-positive semi-definite; adjustment from Cameron, Gelbach & Miller applied.".to_string());
                     }
                 }
+                Vce::Hc2 | Vce::Hc3 => {
+                    // Leverage of the full design: the absorbed part plus w_v x~'(X~'WX~)^-1 x~ (the
+                    // reported constant lies in the absorbed span).
+                    let hc3 = vce == Vce::Hc3;
+                    let h_fe = stata_vce::fe_leverage(&self.terms, has_intercept, self.weights.as_deref(), n, ctx, pool)?;
+                    let h_fe = vcov::to_row_order(&h_fe, row_order, pool)?;
+                    let ginv: Vec<f64> = (0..k * k).map(|ab| inv_s[ab] / (sd[kept[ab / k]] * sd[kept[ab % k]])).collect();
+                    let fw = w.kind == WeightKind::Fweight;
+                    let mut meat = vcov::robust_meat(n, msize, pool, |i, a| {
+                        let row = &rows[i * r..(i + 1) * r];
+                        let mut q = 0.0;
+                        for (p, &jp) in kept.iter().enumerate() {
+                            let mut acc = 0.0;
+                            for (c, &jc) in kept.iter().enumerate() {
+                                acc += ginv[p * k + c] * row[jc];
+                            }
+                            q += row[jp] * acc;
+                        }
+                        let h = h_fe[i] + w.wv(i) * q;
+                        fill_row(i, a);
+                        stata_vce::hc_mult(hc3, res_e(i) * w.wv(i), if fw { w.wv(i) } else { 1.0 }, h)
+                    });
+                    standardize_meat(&mut meat);
+                    v_s = vcov::sandwich(&bread, &meat, msize, 1.0);
+                }
+                Vce::Crv3(_) => {
+                    let cols = raw_cols.as_ref().expect("raw columns kept for CRV3");
+                    let xs: Vec<&[f64]> = kept.iter().map(|&j| cols[j].as_slice()).collect();
+                    let fe: Vec<FeCols> = self
+                        .terms
+                        .iter()
+                        .map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() })
+                        .collect();
+                    // A constant is a coefficient of the refits only without absorbed terms.
+                    let icpt = self.terms.is_empty() && report_constant;
+                    let b0_raw = cs.wmean[0] - xbar.iter().zip(&beta).map(|(m, b)| m * b).sum::<f64>();
+                    let jk_beta: Vec<f64> = icpt.then_some(b0_raw).into_iter().chain(beta.iter().copied()).collect();
+                    let p = JkProblem {
+                        model: JkModel::Linear,
+                        n,
+                        y: &cols[0],
+                        x: xs.clone(),
+                        endog: Vec::new(),
+                        inst: Vec::new(),
+                        intercept: icpt,
+                        weights: self.weights.as_deref(),
+                        offset: None,
+                        fe,
+                        beta: &jk_beta,
+                        fixef_tol: s.tol,
+                        fixef_maxiter: s.maxiter,
+                        glm_tol: 1e-10,
+                        glm_maxiter: 10_000,
+                        collin_tol: crate::fit::FitSpec::default().collin_tol,
+                    };
+                    let target: Vec<f64> = beta.iter().copied().chain(report_constant.then_some(b0_raw)).collect();
+                    let wk = self.weights.as_deref();
+                    let augment = |codes: &[u32], g: usize, betas: Vec<f64>| -> Vec<f64> {
+                        if icpt {
+                            // [b0, beta] -> [beta, b0]
+                            betas.chunks_exact(k + 1).flat_map(|b| b[1..].iter().copied().chain(std::iter::once(b[0]))).collect()
+                        } else if report_constant {
+                            stata_vce::add_constant(codes, g, betas, wk, &cols[0], &xs)
+                        } else {
+                            betas
+                        }
+                    };
+                    let meat = stata_vce::crv3_meat(&p, &self.clusters, &target, &augment, ctx, pool)?;
+                    // Raw-scale V -> reghdfe's standardized scale.
+                    v_s = (0..msize * msize).map(|ab| q_cluster * meat[ab] * sc[ab / msize] * sc[ab % msize] / (sd_y * sd_y)).collect();
+                    if self.clusters.len() > 1 && vcov::fix_psd(&mut v_s, msize, report_constant) {
+                        notes.push("Warning: VCV matrix was non-positive semi-definite; adjustment from Cameron, Gelbach & Miller applied.".to_string());
+                    }
+                }
+                Vce::Dkraay { bw, .. } => {
+                    let (mut meat, bw_used, dk_notes) = stata_vce::dkraay_reghdfe(&self.clusters[0], *bw, row_order, msize, pool, |i, a| {
+                        fill_row(i, a);
+                        res_e(i) * w.wv(i)
+                    })?;
+                    notes.extend(dk_notes);
+                    standardize_meat(&mut meat);
+                    // reghdfe: no nested adjustment.
+                    let adj = (big_n - 1.0) / (big_n - df_m - df_a) * g_min / (g_min - 1.0);
+                    v_s = vcov::sandwich(&bread, &meat, msize, adj);
+                    vcov::fix_psd(&mut v_s, msize, report_constant);
+                    extra.push(("dkraay_bw", bw_used as f64));
+                }
+                Vce::Kernel(_) => {
+                    let plan = kplan.as_mut().expect("kernel plan built");
+                    // ivreghdfe on OLS: Z = X~ (no constant). The meat is taken on b_i = (x~_i, 1),
+                    // psd0/psda act on the x~ block (ivreghdfe's S), then a_i = T b_i.
+                    if plan.auto_pending {
+                        let f: Vec<f64> = (0..n).map(|i| res_e(i) * kept.iter().map(|&j| rows[i * r + j]).sum::<f64>()).collect();
+                        plan.resolve_auto(&f, big_n, pool);
+                    }
+                    let mut meat = plan.meat(1, msize, big_n, false, pool, |i, b| {
+                        let row = &rows[i * r..(i + 1) * r];
+                        b[0] = res_e(i);
+                        for (p, &j) in kept.iter().enumerate() {
+                            b[1 + p] = row[j];
+                        }
+                        if report_constant {
+                            b[1 + k] = 1.0;
+                        }
+                        w.wv(i)
+                    })?;
+                    if plan.psd != crate::api::Psd::None {
+                        let mut sx: Vec<f64> = (0..k * k).map(|ab| meat[(ab / k) * msize + ab % k]).collect();
+                        stata_vce::apply_psd(&mut sx, k, plan.psd);
+                        for ab in 0..k * k {
+                            meat[(ab / k) * msize + ab % k] = sx[ab];
+                        }
+                    }
+                    if report_constant {
+                        meat = shift_constant(&meat, msize, &xbar);
+                    }
+                    standardize_meat(&mut meat);
+                    let adj = match plan.n_clust() {
+                        Some(g) => (big_n - 1.0) / (big_n - df_m - sdof) * g / (g - 1.0),
+                        None => big_n / (big_n - df_m - sdof),
+                    };
+                    v_s = vcov::sandwich(&bread, &meat, msize, adj);
+                    notes.append(&mut plan.notes);
+                }
+                Vce::Conley(cv) => {
+                    let (mut meat, cutoff) = stata_vce::conley_meat(cv, &self.vdata, row_order, msize, pool, |i, a| {
+                        fill_row(i, a);
+                        res_e(i) * w.wv(i)
+                    })?;
+                    standardize_meat(&mut meat);
+                    v_s = vcov::sandwich(&bread, &meat, msize, big_n / (big_n - df_m - df_a));
+                    extra.push(("cutoff", cutoff));
+                }
             }
         }
-        if let Vce::Cluster(_) = &vce {
-            let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
-            df_r = df_r.min(g_min - 1.0);
-            n_clust = Some((g_min, self.clusters.iter().map(|c| c.g as f64).collect()));
+        match &vce {
+            Vce::Cluster(_) | Vce::Crv3(_) | Vce::Dkraay { .. } => {
+                df_r = df_r.min(g_min - 1.0);
+                n_clust = Some((g_min, cluster_list()));
+            }
+            Vce::Kernel(_) => {
+                let plan = kplan.as_ref().expect("kernel plan built");
+                df_r = match plan.n_clust() {
+                    Some(g) => g - 1.0,
+                    None => big_n - df_m - sdof,
+                };
+                if plan.n_clust().is_some() {
+                    n_clust = Some((g_min, cluster_list()));
+                }
+                extra.push(("bw", plan.bw));
+                extra.push(("hac_T", plan.span));
+                macros.push(("kernel".into(), plan.kernel.name().into()));
+                macros.push(("bwchoice".into(), plan.bwchoice.clone()));
+            }
+            _ => {}
         }
         ctx.check()?;
 
@@ -418,9 +623,13 @@ impl Session {
         scal(&mut res, "df_a_redundant", dof.df_a_redundant as f64);
         scal(&mut res, "df_a_nested", dof.df_a_nested as f64);
         scal(&mut res, "num_singletons", self.num_singletons as f64);
-        // reghdfe: e(N_full) = e(N) + num_singletons (e(N) is Σfw with fweights).
+        // reghdfe: e(N_full) = e(N) + num_singletons (e(N) is sum fw with fweights).
         scal(&mut res, "N_full", big_n + self.num_singletons as f64);
         scal(&mut res, "y_absorbed", f64::from(u8::from(y_absorbed)));
+        for (name, v) in extra {
+            scal(&mut res, name, v);
+        }
+        res.macros.extend(macros);
 
         res.matrices.push(NamedMat { name: "b".into(), rows: 1, cols: k_all, data: b_out });
         res.matrices.push(NamedMat { name: "V".into(), rows: k_all, cols: k_all, data: v_out });

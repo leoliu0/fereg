@@ -92,7 +92,7 @@ program savefix
 end
 
 * ---------------------------------------------------------------------------------------------
-* Simulated panel: 150 ids × 10 obs + 20 singleton ids; ids 1-75 only meet firms 1-20 and
+* Simulated panel: 150 ids x 10 obs + 20 singleton ids; ids 1-75 only meet firms 1-20 and
 * ids 76-150 only firms 21-40, so (id, firm) has two mobility groups.
 set seed 20261011
 set obs 1520

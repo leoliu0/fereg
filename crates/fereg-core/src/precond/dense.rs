@@ -1,11 +1,11 @@
-//! Exact factor of the small super-block S_SS (plan D5 (a)): dense LDLᵀ, or a sparse LDLᵀ
+//! Exact factor of the small super-block S_SS (plan D5 (a)): dense LDL^T, or a sparse LDL^T
 //! (AMD ordering) when S_SS is sparse enough for that to cost a fraction of the dense one.
 //!
 //! S_SS is singular (one null direction per connected component). It is scaled to unit
-//! diagonal and factored by LDLᵀ with dynamic regularization: a pivot below [`PIVOT_TOL`] marks a
+//! diagonal and factored by LDL^T with dynamic regularization: a pivot below [`PIVOT_TOL`] marks a
 //! null direction and is replaced by a huge value, which grounds that coordinate (its component
-//! of the solution becomes ≈ 0). (faer's LLᵀ leaves a stale diagonal for regularized pivots,
-//! its LDLᵀ does not; the sparse factor grounds the same way.) The result is a reflexive generalized inverse, so null-space components are
+//! of the solution becomes ~= 0). (faer's LL^T leaves a stale diagonal for regularized pivots,
+//! its LDL^T does not; the sparse factor grounds the same way.) The result is a reflexive generalized inverse, so null-space components are
 //! neither amplified nor needed (every null direction of a diagonal block of S is a null
 //! direction of S itself).
 
@@ -27,7 +27,7 @@ pub const PIVOT_TOL: f64 = 1e-10;
 /// Replacement pivot for grounded coordinates.
 pub const GROUND: f64 = 1e30;
 
-/// LDLᵀ regularization grounding pivots below [`PIVOT_TOL`] (`signs` all +1: S is PSD).
+/// LDL^T regularization grounding pivots below [`PIVOT_TOL`] (`signs` all +1: S is PSD).
 pub fn regularization(signs: &[i8]) -> LdltRegularization<'_, f64> {
     LdltRegularization {
         dynamic_regularization_signs: Some(signs),
@@ -42,12 +42,12 @@ pub fn par_for(k: usize, pool: &Pool) -> Par {
     if k >= 1024 && pool.threads() > 1 { Par::rayon(pool.threads()) } else { Par::Seq }
 }
 
-/// Off-diagonal density (nonzeros / k²) up to which a sparse factor is tried, and the size
+/// Off-diagonal density (nonzeros / k^2) up to which a sparse factor is tried, and the size
 /// below which the dense factor is always used (its cost is negligible there).
 pub const SPARSE_DENSITY: f64 = 1.0 / 16.0;
 const SPARSE_MIN_K: usize = 256;
 /// The sparse factor is kept when its multiply-adds are at most this share of the dense ones
-/// (k³/3); a supernodal factor runs at a lower flop rate than the dense LDLᵀ.
+/// (k^3/3); a supernodal factor runs at a lower flop rate than the dense LDL^T.
 const SPARSE_FLOP_SHARE: f64 = 0.25;
 
 /// Representation chosen by [`Dense::factor`]: dense, or sparse with its multiply-adds and
@@ -62,7 +62,7 @@ pub enum SmallWork {
 enum Factor {
     /// Unit lower L (strict lower part) and D (diagonal), of S_SS scaled by `scale`.
     Dense { scale: Vec<f64>, l: Mat<f64> },
-    /// Sparse LDLᵀ (AMD ordering, same grounding) when S_SS is sparse: the small blocks of
+    /// Sparse LDL^T (AMD ordering, same grounding) when S_SS is sparse: the small blocks of
     /// panels whose levels meet few others within FE1 levels (e.g. firms within industry-years)
     /// factor in a fraction of the dense cost.
     Sparse(Box<SparseChol>),
@@ -75,14 +75,14 @@ pub struct Dense {
 }
 
 impl Dense {
-    /// Factors the m_s × m_s row-major matrix `a`, skipping `redundant` coordinates.
+    /// Factors the m_s x m_s row-major matrix `a`, skipping `redundant` coordinates.
     pub fn factor(a: &[f64], ms: usize, redundant: &[bool], pool: &Pool) -> Result<Dense, RfError> {
         let keep: Vec<u32> = (0..ms).filter(|&i| !redundant[i] && a[i * ms + i] > 0.0).map(|i| i as u32).collect();
         let k = keep.len();
-        if k >= SPARSE_MIN_K
-            && let Some(f) = sparse_factor(a, ms, &keep, pool)?
-        {
-            return Ok(Dense { keep, f: Factor::Sparse(Box::new(f)) });
+        if k >= SPARSE_MIN_K {
+            if let Some(f) = sparse_factor(a, ms, &keep, pool)? {
+                return Ok(Dense { keep, f: Factor::Sparse(Box::new(f)) });
+            }
         }
         let scale: Vec<f64> = keep.iter().map(|&i| 1.0 / a[i as usize * (ms + 1)].sqrt()).collect();
         let mut l = Mat::<f64>::from_fn(k, k, |i, j| {
@@ -113,7 +113,7 @@ impl Dense {
         }
     }
 
-    /// z[0..m_s] = S_SS⁺ r[0..m_s] (both row-major with `w` columns; redundant rows get 0).
+    /// z[0..m_s] = S_SS^+ r[0..m_s] (both row-major with `w` columns; redundant rows get 0).
     pub fn apply(&self, r: &[f64], z: &mut [f64], ms: usize, w: usize, pool: &Pool) {
         z[..ms * w].iter_mut().for_each(|v| *v = 0.0);
         let k = self.keep.len();

@@ -114,6 +114,29 @@ test_that("residuals, fitted values and fixed effects match fixest", {
   expect_equal(unname(so[["firm[[x2]]"]]), unname(st[["firm[[x2]]"]]), tolerance = 1e-5)
 })
 
+test_that("combined fixed effects are ordered as fixest (labels as character strings)", {
+  for (fml in list(y ~ x1 | id^year + firm, y ~ x1 | firm + year^id, y ~ x1 | firm^h + id)) {
+    fo <- fixef(fe_feols(fml, panel))
+    ft <- fixest::fixef(fx_feols(fml, panel))
+    expect_identical(names(fo), names(ft))
+    for (k in names(ft)) {
+      expect_identical(names(fo[[k]]), names(ft[[k]]))
+      expect_equal(unname(fo[[k]]), unname(ft[[k]]), tolerance = 1e-8)
+    }
+  }
+})
+
+test_that("summary of fixef() prints as fixest's", {
+  for (fml in list(y ~ x1 + x2 | id + year + firm, y ~ x1 | year, y ~ x1 | id^year + firm)) {
+    fo <- fixef(fe_feols(fml, panel))
+    ft <- fixest::fixef(fx_feols(fml, panel))
+    expect_identical(capture.output(s <- summary(fo)), capture.output(s <- summary(ft)))
+  }
+  capture.output(out <- withVisible(summary(fixef(fe_feols(y ~ x1 | id + year, panel)))))
+  expect_null(out$value)
+  expect_false(out$visible)
+})
+
 test_that("predictions on new data match fixest, unseen levels are NA", {
   ours <- fe_feols(y ~ x1 + x2 + i(h) | id + year, panel)
   theirs <- fx_feols(y ~ x1 + x2 + i(h) | id + year, panel)
@@ -148,6 +171,28 @@ test_that("printing works", {
   expect_output(print(m), "Within R2")
   expect_output(print(etable(m, fe_feols(y ~ x1, panel))), "Constant")
   expect_match(as.character(etable(m, tex = TRUE)), "tabular")
+})
+
+test_that("etable keep/drop select coefficient rows as fixest", {
+  coef_rows <- function(labels) {
+    from <- which(labels == "Dependent Var.:") + 2
+    to <- which(labels == "Fixed-Effects:" | grepl("^_+$", labels))[1] - 1
+    if (to < from) character(0) else labels[from:to]
+  }
+  fmls <- list(y ~ x1 + x2 + x3 | id, y ~ x1 + x2)
+  ours <- stats::setNames(lapply(fmls, fe_feols, data = panel), c("m1", "m2"))
+  theirs <- stats::setNames(lapply(fmls, fx_feols, data = panel), c("m1", "m2"))
+  full <- do.call(etable, ours)
+  for (sel in list(
+    list(keep = c("x1", "x3")), list(keep = c("x1", "Constant")), list(keep = "%Intercept", drop = "x3"),
+    list(keep = "!x2"), list(drop = "^x[12]$"), list(drop = "!x"), list(keep = "x", drop = "%!x3")
+  )) {
+    o <- do.call(etable, c(ours, sel))
+    t <- do.call(fixest::etable, c(theirs, sel))
+    expect_identical(coef_rows(o[[1]]), coef_rows(t[[1]]))
+    expect_identical(o[match(coef_rows(o[[1]]), o[[1]]), ], full[match(coef_rows(o[[1]]), full[[1]]), ], ignore_attr = TRUE)
+  }
+  expect_error(etable(ours[[1]], keep = "nothing"), "no coefficient was selected")
 })
 
 test_that("fixed effects are computed on demand and cached; lean drops them", {

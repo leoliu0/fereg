@@ -6,13 +6,13 @@
 //! (`s_crossprods`, `s_gmm1s`, `s_iegmm`, `s_ffirst`, ivreghdfe.ado l.5188-6496), livreg2's
 //! `m_omega` (variance of the moment conditions) and ranktest 2.0.04 (`s_jstat`, `m_svd`).
 //!
-//! Notation: X = [endog, exog] (coefficient order of e(b)), Z = [inst, exog], N = Σfw or the
-//! number of rows, w_v = regression weights (w·N_obs/Σw for aw/pw, fw, or 1); every
+//! Notation: X = [endog, exog] (coefficient order of e(b)), Z = [inst, exog], N = sum fw or the
+//! number of rows, w_v = regression weights (w*N_obs/sum w for aw/pw, fw, or 1); every
 //! cross-product is weighted by w_v (ivreg2's `wf*wvar`).
 //!
 //! Weighting of the moment-condition covariance (`m_omega`, livreg2 1.2.01 l.240-546, checked
-//! against the ivreghdfe fixtures): robust meat Σ m_i z_i z_i' with m_i = e² (none), e²·w (fw),
-//! (e·w_v)² (aw/pw); cluster scores Σ_{i∈g} e_i·w_v,i·z_i. These are exactly reghdfe's
+//! against the ivreghdfe fixtures): robust meat sum m_i z_i z_i' with m_i = e^2 (none), e^2*w (fw),
+//! (e*w_v)^2 (aw/pw); cluster scores sum_{i in g} e_i*w_v,i*z_i. These are exactly reghdfe's
 //! [`Weights::robust_mult`] and cluster score, so no variant was needed.
 
 mod dense;
@@ -24,13 +24,17 @@ mod stock_yogo;
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
-use crate::api::{Ctx, EstResult, Layout, NamedMat, Spec, Vce};
+use crate::api::{Bandwidth, ConleyVce, Ctx, EstResult, KernelVce, Layout, NamedMat, Psd, Spec, Vce};
+use crate::crv3::{JkModel, JkProblem};
+use crate::hac::{self, Kernel};
+use crate::leverage::FeCols;
+use crate::ols::stata_vce::{self, KernelPlan};
 use crate::dof;
 use crate::error::RfError;
 use crate::fe_recovery;
-use crate::ols::{STATUS_ABSORBED, STATUS_COLLINEAR, Weights, collinear_tol, effective_vce, missing_if_nonfinite, stage1_absorbed, stage2_collinear};
+use crate::ols::{STATUS_ABSORBED, STATUS_COLLINEAR, Weights, collinear_tol, effective_vce, kept_columns, missing_if_nonfinite, stage1_absorbed, stage2_collinear};
 use crate::par::{self, CHUNK, Pool};
-use crate::session::Session;
+use crate::session::{Session, VceData};
 use crate::stats;
 use crate::vcov::{self, ClusterCodes};
 
@@ -40,9 +44,19 @@ use dense::M;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
     Iid,
+    /// Heteroskedasticity-robust (also HAC and Conley).
     Robust,
-    /// Cluster-robust with G_min clusters (one or two dimensions).
+    /// Cluster-robust with G_min clusters (one or two dimensions; also kernel + cluster).
     Cluster { g: f64 },
+    /// ivreg2 AC: kernel without robust (homoskedastic autocorrelation; `kiefer`).
+    Ac,
+}
+
+/// Source of the robust/cluster meat beyond reghdfe's (m_omega's kernel branches, Conley).
+pub(crate) enum Extra<'a> {
+    Plain,
+    Kernel(&'a KernelPlan),
+    Conley { cv: &'a ConleyVce, vdata: &'a VceData, cutoff: std::cell::Cell<f64> },
 }
 
 /// Streaming passes over the residualized rows.
@@ -54,12 +68,15 @@ pub(crate) struct Passes<'a> {
     mode: Mode,
     dims: Vec<ClusterCodes<'a>>,
     row_order: &'a [u32],
+    extra: Extra<'a>,
+    /// ivreg2's N (sum fw or the number of rows).
+    big_n: f64,
 }
 
 /// Scratch length for the per-row linear combinations of [`Passes::meat`] kept on the stack.
 const STACK_COMB: usize = 128;
 
-/// Σ_j a_j·b_j in index order, accumulated in a register.
+/// sum_j a_j*b_j in index order, accumulated in a register.
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = 0.0;
@@ -74,7 +91,7 @@ impl Passes<'_> {
         self.rows.len() / self.r
     }
 
-    /// Linear combinations of row i: out[c] = Σ_j row_j·coef[j, c], with `coef_t` the c×R
+    /// Linear combinations of row i: out[c] = sum_j row_j*coef[j, c], with `coef_t` the c x R
     /// transpose of coef (each combination is one register dot product).
     #[inline]
     fn combine(row: &[f64], coef_t: &[f64], out: &mut [f64]) {
@@ -83,7 +100,7 @@ impl Passes<'_> {
         }
     }
 
-    /// Σ_i w_v,i·e_i e_i' (m×m) with e_i = coef'·row_i (`quadcross(e, wf*wvar, e)`).
+    /// sum_i w_v,i*e_i e_i' (m x m) with e_i = coef'*row_i (`quadcross(e, wf*wvar, e)`).
     pub(crate) fn cross(&self, coef: &M) -> M {
         let m = coef.c;
         let (rows, r, w) = (self.rows, self.r, self.w);
@@ -109,7 +126,7 @@ impl Passes<'_> {
         M { r: m, c: m, d: acc }
     }
 
-    /// Σ_i w_v,i·e_i (m) with e_i = coef'·row_i.
+    /// sum_i w_v,i*e_i (m) with e_i = coef'*row_i.
     fn wsum(&self, coef: &M) -> Vec<f64> {
         let m = coef.c;
         let (rows, r, w) = (self.rows, self.r, self.w);
@@ -126,9 +143,33 @@ impl Passes<'_> {
         })
     }
 
-    /// Un-normalized robust or cluster meat of the moments e ⊗ z (`m_omega` × N), (m·l)², with
-    /// e_i = ce'·row_i (m residuals) and z_i = cz'·row_i (l instruments); index c·l + k.
+    /// Un-normalized robust or cluster meat of the moments e (x) z (`m_omega` x N), (m*l)^2, with
+    /// e_i = ce'*row_i (m residuals) and z_i = cz'*row_i (l instruments); index c*l + k.
     pub(crate) fn meat(&self, ce: &M, cz: &M) -> Result<M, RfError> {
+        self.meat_for(ce, cz, false)
+    }
+
+    /// [`Passes::meat`] as ivreghdfe's `ranktest` calls compute it: with a kernel VCE they pass
+    /// `bw()` but no `kernel()` or `psd0`/`psda` (ivreghdfe.ado 1741-1752: `kernopt` is never
+    /// set), so the kernel is Bartlett at the same bandwidth and no PSD repair applies. Under
+    /// `kiefer` not even `bw()` is passed (bw is still 0 when `bwopt` is built, ivreghdfe.ado
+    /// 3920-3933): ranktest gets only `robust` (pweights) and the cluster options, so the meat
+    /// is the plain robust or cluster one.
+    pub(crate) fn meat_rank(&self, ce: &M, cz: &M) -> Result<M, RfError> {
+        self.meat_for(ce, cz, true)
+    }
+
+    /// `kiefer`: ivreghdfe's ranktest calls get no `bw()`.
+    fn ranktest_kiefer(&self) -> bool {
+        matches!(&self.extra, Extra::Kernel(p) if p.kiefer)
+    }
+
+    /// ivreghdfe's ranktest calls run homoskedastic (`kiefer` without robust or cluster).
+    pub(crate) fn ranktest_iid(&self) -> bool {
+        self.ranktest_kiefer() && self.mode == Mode::Ac
+    }
+
+    fn meat_for(&self, ce: &M, cz: &M, ranktest: bool) -> Result<M, RfError> {
         let (m, l) = (ce.c, cz.c);
         let dim = m * l;
         let (rows, r, w) = (self.rows, self.r, self.w);
@@ -157,22 +198,45 @@ impl Passes<'_> {
                 }
             }
         };
-        let d = match self.mode {
-            Mode::Iid => return Err(RfError::Internal("iv: meat requested for an iid VCE".into())),
-            Mode::Robust => vcov::robust_meat(self.n(), dim, self.pool, |i, a| {
+        let extra = if ranktest && self.ranktest_kiefer() { &Extra::Plain } else { &self.extra };
+        let d = match (extra, self.mode) {
+            (_, Mode::Iid) => return Err(RfError::Internal("iv: meat requested for an iid VCE".into())),
+            (Extra::Kernel(plan), _) => {
+                let mut s = plan.meat(m, l, self.big_n, ranktest, self.pool, |i, buf| {
+                    let row = &rows[i * r..(i + 1) * r];
+                    for (b, col) in buf.iter_mut().zip(ez_t.chunks_exact(r)) {
+                        *b = dot(row, col);
+                    }
+                    w.wv(i)
+                })?;
+                if !ranktest {
+                    stata_vce::apply_psd(&mut s, dim, plan.psd);
+                }
+                s
+            }
+            (Extra::Conley { cv, vdata, cutoff }, _) => {
+                let (s, c) = stata_vce::conley_meat(cv, vdata, self.row_order, dim, self.pool, |i, a| {
+                    fill(i, a);
+                    w.wv(i)
+                })?;
+                cutoff.set(c);
+                s
+            }
+            (Extra::Plain, Mode::Robust) => vcov::robust_meat(self.n(), dim, self.pool, |i, a| {
                 fill(i, a);
                 w.robust_mult(i, 1.0)
             }),
-            Mode::Cluster { .. } => vcov::multiway_meat(&self.dims, self.row_order, dim, self.pool, |i, a| {
+            (Extra::Plain, Mode::Cluster { .. }) => vcov::multiway_meat(&self.dims, self.row_order, dim, self.pool, |i, a| {
                 fill(i, a);
                 w.wv(i)
             })?,
+            (Extra::Plain, Mode::Ac) => return Err(RfError::Internal("iv: AC without a kernel".into())),
         };
         Ok(M { r: dim, c: dim, d })
     }
 }
 
-/// Coefficients (over the R row columns) of `target − Σ_k b_k·col_k`, as an R×1 matrix.
+/// Coefficients (over the R row columns) of `target - sum_k b_k*col_k`, as an Rx1 matrix.
 pub(crate) fn resid_coef(r: usize, target: usize, cols: &[usize], b: &[f64]) -> M {
     let mut c = M::zeros(r, 1);
     c.d[target] += 1.0;
@@ -182,7 +246,7 @@ pub(crate) fn resid_coef(r: usize, target: usize, cols: &[usize], b: &[f64]) -> 
     c
 }
 
-/// R×l selector of the row columns `cols`.
+/// R x l selector of the row columns `cols`.
 pub(crate) fn selector(r: usize, cols: &[usize]) -> M {
     let mut s = M::zeros(r, cols.len());
     for (k, &j) in cols.iter().enumerate() {
@@ -191,7 +255,7 @@ pub(crate) fn selector(r: usize, cols: &[usize]) -> M {
     s
 }
 
-/// Scatters a square matrix over kept items into an n×n row-major matrix at positions `pos`
+/// Scatters a square matrix over kept items into an n x n row-major matrix at positions `pos`
 /// (zeros elsewhere, as ivreg2's `AddOmitted`).
 fn scatter_sym(m: &M, pos: &[usize], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n * n];
@@ -205,7 +269,7 @@ fn scatter_sym(m: &M, pos: &[usize], n: usize) -> Vec<f64> {
 
 /// Inputs shared by the diagnostics (ranktest, first stage).
 pub(crate) struct Model<'a> {
-    /// Weighted Gram of all residualized columns (R×R).
+    /// Weighted Gram of all residualized columns (R x R).
     pub g: &'a M,
     pub en: &'a [usize],
     pub ex: &'a [usize],
@@ -228,17 +292,19 @@ impl Model<'_> {
 }
 
 impl Session {
-    /// 2SLS on `rows` (N×R row-major in [`Session::row_order`], layout `[y, exog..., endog...,
+    /// 2SLS on `rows` (N x R row-major in [`Session::row_order`], layout `[y, exog..., endog...,
     /// inst...]`). e(b) is ordered endog then exog (ivreghdfe), without a constant;
     /// [`EstResult::status`] follows the layout order (exog, endog, inst).
     pub fn iv(&mut self, rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx) -> Result<EstResult, RfError> {
         if rows.len() != self.n() * lay.ncols() {
-            return Err(RfError::InvalidInput("iv: data block size differs from N·R".into()));
+            return Err(RfError::InvalidInput("iv: data block size differs from N*R".into()));
         }
-        if let Vce::Cluster(d) = &self.vce
-            && d.len() > 2
-        {
-            return Err(RfError::Code(198, "fereg: IV supports at most two cluster variables".into()));
+        match &self.vce {
+            Vce::Cluster(d) | Vce::Crv3(d) if d.len() > 2 => {
+                return Err(RfError::Code(198, "fereg: IV supports at most two cluster variables".into()));
+            }
+            Vce::Hc2 | Vce::Hc3 => return Err(RfError::Code(198, "vce() only supports cluster, robust, and unadjusted".into())),
+            _ => {}
         }
         par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.iv_in_pool(rows, lay, s, ctx, pool))?
     }
@@ -252,8 +318,26 @@ impl Session {
         let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false);
         // ivreghdfe l.670: absorb_ct = df_a, or 1 when every FE is nested in a cluster.
         let sdof = dof.df_a.max(1) as f64;
+        let vce = effective_vce(&self.vce, w.kind);
+        // `vce(dkraay [#])` on IV is ivreghdfe's dkraay(#): Bartlett kernel, cluster on time.
+        let dk_kernel = match &vce {
+            Vce::Dkraay { time, bw } => Some(KernelVce {
+                kernel: Kernel::Bartlett,
+                bw: Bandwidth::Fixed(bw.unwrap_or_else(|| hac::bw_reghdfe_dkraay(self.clusters[0].g)) as f64),
+                robust: true,
+                cluster: vec![vec![time.time]],
+                kiefer: false,
+                psd: Psd::None,
+                time: time.clone(),
+            }),
+            _ => None,
+        };
+        let mut kplan = match (&vce, &dk_kernel) {
+            (Vce::Kernel(kv), _) | (_, Some(kv)) => Some(KernelPlan::new(kv, &self.vdata, w.kind, self.absorber.row_order(), pool)?),
+            _ => None,
+        };
+        let raw_cols = if matches!(vce, Vce::Crv3(_)) { Some(kept_columns(&rows, r, self.absorber.row_order())?) } else { None };
         ctx.check()?;
-
         let cs = stats::col_stats(&rows, r, w.raw.as_deref(), pool);
         let want_coefs = s.want_d || (s.want_fe && self.terms.iter().any(|t| t.save));
         let opts = SolveOpts { tol: s.tol, maxiter: s.maxiter, want_coefs };
@@ -306,21 +390,19 @@ impl Session {
         let zcols: Vec<usize> = iz.iter().chain(&ex).copied().collect();
         let (k, l) = (k1 + k2, l1 + k2);
 
-        let vce = effective_vce(&self.vce, w.kind);
-        let mode = match vce {
-            Vce::Unadjusted => Mode::Iid,
-            Vce::Robust => Mode::Robust,
-            Vce::Cluster(_) => Mode::Cluster { g: self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64 },
+        let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
+        let mode = match (&vce, &kplan) {
+            (_, Some(p)) => match p.n_clust() {
+                Some(g) => Mode::Cluster { g },
+                None if p.mode == stata_vce::KernelMode::Ac => Mode::Ac,
+                None => Mode::Robust,
+            },
+            (Vce::Unadjusted, _) => Mode::Iid,
+            (Vce::Cluster(_) | Vce::Crv3(_), _) => Mode::Cluster { g: g_min },
+            _ => Mode::Robust,
         };
-        let passes = Passes {
-            rows: &rows,
-            r,
-            w: &w,
-            pool,
-            mode,
-            dims: self.clusters.iter().map(|c| ClusterCodes { codes: &c.codes, g: c.g }).collect(),
-            row_order: self.absorber.row_order(),
-        };
+        let dims: Vec<ClusterCodes> = self.clusters.iter().map(|c| ClusterCodes { codes: &c.codes, g: c.g }).collect();
+        let base = Passes { rows: &rows, r, w: &w, pool, mode, dims, row_order: self.absorber.row_order(), extra: Extra::Plain, big_n };
 
         // Cross-products (s_crossprods) and 2SLS (s_gmm1s).
         let xx = gm.pick(&xcols, &xcols);
@@ -335,22 +417,39 @@ impl Session {
         let xxinv = dense::spd_inv(&xx);
         let beta = xpzx_inv.mul(&xz_zzinv.mul(&zy)).d;
         let ce = resid_coef(r, 0, &xcols, &beta);
-        let ee = passes.cross(&ce).d[0];
+        let ee = base.cross(&ce).d[0];
         let rss = ee;
-        let ysum = passes.wsum(&selector(r, &[0]))[0];
+        let ysum = base.wsum(&selector(r, &[0]))[0];
         let sz = selector(r, &zcols);
         ctx.check()?;
 
+        // ivreghdfe `abw` on the 2SLS residuals and the row sums of Z (no weights).
+        if let Some(p) = kplan.as_mut().filter(|p| p.auto_pending) {
+            let f: Vec<f64> = (0..n)
+                .map(|i| {
+                    let row = &rows[i * r..(i + 1) * r];
+                    dot(row, &ce.d) * zcols.iter().map(|&c| row[c]).sum::<f64>()
+                })
+                .collect();
+            p.resolve_auto(&f, big_n, pool);
+        }
+        let extra = match (&vce, &kplan) {
+            (_, Some(p)) => Extra::Kernel(p),
+            (Vce::Conley(cv), _) => Extra::Conley { cv, vdata: &self.vdata, cutoff: std::cell::Cell::new(f64::NAN) },
+            _ => Extra::Plain,
+        };
+        let passes = Passes { extra, ..base };
+
         let nk = big_n - k as f64 - sdof;
         let sigmasq = rss / big_n;
-        let (v, omega, rank_s, rank_v) = match mode {
+        let (mut v, omega, rank_s, mut rank_v) = match mode {
             Mode::Iid => {
                 let v = xpzx_inv.scale(rss / nk);
                 let omega = zz.scale(sigmasq / big_n);
                 let rank_v = v.diag().iter().filter(|d| **d != 0.0).count();
                 (v, omega, dense::ginv(&zz).1, rank_v)
             }
-            Mode::Robust | Mode::Cluster { .. } => {
+            Mode::Robust | Mode::Cluster { .. } | Mode::Ac => {
                 let s_raw = passes.meat(&ce, &sz)?;
                 let bmat = xpzx_inv.mul(&xz_zzinv);
                 let mut v = bmat.mul(&s_raw).mul(&bmat.t());
@@ -366,6 +465,43 @@ impl Session {
                 (v, omega, rank_s, rank_v)
             }
         };
+        // CRV3: the jackknife replaces V (S and the diagnostics stay cluster-robust).
+        if let Some(cols) = &raw_cols {
+            let col = |c: usize| cols[c].as_slice();
+            let fe: Vec<FeCols> =
+                self.terms.iter().map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() }).collect();
+            let icpt = self.terms.is_empty();
+            // beta is ordered [endog, exog]; the refits use [constant?, exog, endog].
+            let b_of = |c: usize| beta[xcols.iter().position(|&x| x == c).expect("regressor")];
+            let b0 = cs.wmean[0] - xcols.iter().zip(&beta).map(|(&c, b)| cs.wmean[c] * b).sum::<f64>();
+            let jk_beta: Vec<f64> = icpt.then_some(b0).into_iter().chain(ex.iter().map(|&c| b_of(c))).chain(en.iter().map(|&c| b_of(c))).collect();
+            let p = JkProblem {
+                model: JkModel::Linear,
+                n,
+                y: col(0),
+                x: ex.iter().map(|&c| col(c)).collect(),
+                endog: en.iter().map(|&c| col(c)).collect(),
+                inst: iz.iter().map(|&c| col(c)).collect(),
+                intercept: icpt,
+                weights: self.weights.as_deref(),
+                offset: None,
+                fe,
+                beta: &jk_beta,
+                fixef_tol: s.tol,
+                fixef_maxiter: s.maxiter,
+                glm_tol: 1e-10,
+                glm_maxiter: 10_000,
+                collin_tol: crate::fit::FitSpec::default().collin_tol,
+            };
+            let skip = usize::from(icpt);
+            let augment = |_: &[u32], _: usize, betas: Vec<f64>| -> Vec<f64> {
+                betas.chunks_exact(skip + k).flat_map(|b| b[skip + k2..].iter().chain(&b[skip..skip + k2]).copied().collect::<Vec<_>>()).collect()
+            };
+            let meat = stata_vce::crv3_meat(&p, &self.clusters, &beta, &augment, ctx, pool)?;
+            let q = (big_n - 1.0) / nk * g_min / (g_min - 1.0);
+            v = M { r: k, c: k, d: meat.iter().map(|x| q * x).collect() };
+            rank_v = dense::ginv(&v).1;
+        }
         let wmat = zzinv.scale(big_n * big_n / rss);
 
         // Sargan (iid) / Hansen J from two-step efficient GMM residuals (s_gmm1s, s_iegmm).
@@ -394,7 +530,7 @@ impl Session {
             j = f64::NAN;
         }
 
-        // Wald F on all coefficients (ivreg2 `test` on the posted V; `small` → F = χ²/K).
+        // Wald F on all coefficients (ivreg2 `test` on the posted V; `small` -> F = chi^2/K).
         let df_r = match mode {
             Mode::Cluster { g } => g - 1.0,
             _ => nk,
@@ -456,7 +592,9 @@ impl Session {
         if j != 0.0 && j.is_finite() {
             scal(&mut res, "jp", dist::chi2tail(jdf, j));
         }
-        if mode == Mode::Iid {
+        // ivreghdfe.ado 2120: e(sargan*) whenever neither robust nor cluster was requested (AC
+        // kernels included), e(j*) always.
+        if matches!(mode, Mode::Iid | Mode::Ac) {
             scal(&mut res, "sargan", j);
             scal(&mut res, "sargandf", jdf);
             if j != 0.0 && j.is_finite() {
@@ -470,6 +608,19 @@ impl Session {
                 scal(&mut res, "N_clust2", self.clusters[1].g as f64);
             }
         }
+        if let Some(p) = &kplan {
+            scal(&mut res, "bw", p.bw);
+            scal(&mut res, "hac_T", p.span);
+            if matches!(vce, Vce::Dkraay { .. }) {
+                scal(&mut res, "dkraay_bw", p.bw);
+            }
+            res.macros.push(("kernel".into(), p.kernel.name().into()));
+            res.macros.push(("bwchoice".into(), p.bwchoice.clone()));
+            res.notes.extend(p.notes.iter().cloned());
+        }
+        if let Extra::Conley { cutoff, .. } = &passes.extra {
+            scal(&mut res, "cutoff", cutoff.get());
+        }
         scal(&mut res, "df_a", dof.df_a as f64);
         scal(&mut res, "df_a_initial", dof.df_a_initial as f64);
         scal(&mut res, "df_a_redundant", dof.df_a_redundant as f64);
@@ -479,7 +630,7 @@ impl Session {
         // Solver iterations, for the ado's "converged in # iterations" line (not an e() scalar).
         scal(&mut res, "ic", info.iterations as f64);
 
-        // Identification statistics (ranktest) and Stock–Yogo critical values.
+        // Identification statistics (ranktest) and Stock-Yogo critical values.
         if k1 > 0 {
             let id = rank::id_stats(&model, &passes)?;
             scal(&mut res, "idstat", id.idstat);
@@ -496,7 +647,7 @@ impl Session {
             let pad = |v: Vec<f64>| (0..ne).map(|i| v.get(i).copied().unwrap_or(f64::NAN)).collect::<Vec<_>>();
             res.matrices.push(NamedMat { name: "ccev".into(), rows: 1, cols: ne, data: pad(ccev) });
             res.matrices.push(NamedMat { name: "cdev".into(), rows: 1, cols: ne, data: pad(cdev) });
-            // Stock–Yogo critical values for (L1, K1) as `sy_<table>` and for a single
+            // Stock-Yogo critical values for (L1, K1) as `sy_<table>` and for a single
             // endogenous regressor (the `ffirst` summary) as `sy1_<table>`; display only.
             for (name, _, table) in stock_yogo::IV_TABLES {
                 for (prefix, k) in [("sy", k1), ("sy1", 1)] {
@@ -509,7 +660,7 @@ impl Session {
         }
         ctx.check()?;
 
-        // First-stage statistics and regressions, in sent coordinates: e(first) is 21×nendog with
+        // First-stage statistics and regressions, in sent coordinates: e(first) is 21xnendog with
         // missing columns for dropped endogenous regressors; bfirst#/Vfirst#/sfirst# exist for
         // the kept ones only (# = position among the endogenous regressors sent), over Z sent.
         let pos_x: Vec<usize> = xcols.iter().map(|&c| if c > nx { c - 1 - nx } else { ne + c - 1 }).collect();

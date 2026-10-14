@@ -52,7 +52,7 @@ def fit_design(
     design: Any,
     *,
     model: str,
-    vcov: str,
+    vcov: Any,
     ssc: dict | None,
     weights_type: str,
     fixef_rm: str,
@@ -68,7 +68,8 @@ def fit_design(
     threads: int = 0,
     drop: np.ndarray | None = None,
 ) -> Any:
-    """Runs ``fereg_core::fit`` on a :class:`fereg.design.Design` (pyfixest conventions)."""
+    """Runs ``fereg_core::fit`` on a :class:`fereg.design.Design` (pyfixest conventions);
+    ``vcov`` is a :class:`fereg._vcov.VcovSpec`."""
     if drop is None:
         drop = design.drop
     elif design.drop is not None:
@@ -86,10 +87,15 @@ def fit_design(
         None if design.offset is None else _f64(design.offset),
         [list(c) for c in design.cluster],
         None if drop is None else np.ascontiguousarray(drop, dtype=np.bool_),
+        time=design.time,
+        panel=design.panel,
+        lat=None if design.lat is None else _f64(design.lat),
+        lon=None if design.lon is None else _f64(design.lon),
         model=model,
         flavor="pyfixest",
         intercept=bool(design.intercept),
-        vcov=vcov,
+        vcov=vcov.kind,
+        **vcov.core_options(),
         ssc=core_ssc(ssc),
         weights_type=weights_type,
         fixef_rm=fixef_rm,

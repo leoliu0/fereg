@@ -1,14 +1,17 @@
 //! The data a fit retains for post-hoc variance matrices and fixed-effect values
 //! ([`super::FitState`]): the residualized row block with the design and residual combos, the
-//! bread, the weights, the row order, the fixed-effect codes (nesting tests and fixest's
-//! `K.exact`) and the solved fixed-effect values.
+//! bread, the weights, the row order, the fixed-effect codes and slopes (nesting tests, fixest's
+//! `K.exact`, the leverage of HC2/HC3) and the solved fixed-effect values.
+
+use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
+use super::extra::{VcovInputs, fe_leverage};
 use super::fixef::{self, FeLevels};
 use super::input::{factor_missing, interaction_kept_codes};
-use super::vcov::{self, ClusterInfo, FeInfo, Model};
-use super::{FactorCol, FitInput, FixefNorm, FixefValues, Flavor, Ssc, VcovKind, VcovOutput};
+use super::vcov::{self, ClusterInfo, FeInfo, KindVars, Model};
+use super::{FitInput, FixefNorm, FixefValues, Flavor, Ssc, VcovData, VcovKind, VcovOutput};
 use crate::api::Ctx;
 use crate::error::RfError;
 use crate::factor::Codes;
@@ -88,51 +91,72 @@ pub(crate) struct State {
     pub fe: Vec<StateFe>,
     /// Solved fixed-effect values (`None` without fixed-effect terms).
     pub fixef: Option<FeLevels>,
+    /// IV second stage (HC2/HC3 are not defined).
+    pub iv: bool,
+    /// Design index of the intercept, if one is reported.
+    pub intercept: Option<usize>,
+    /// Leverage of the fixed-effect columns (kept order), computed by the first HC2/HC3 request.
+    pub fe_hat: OnceLock<Vec<f64>>,
 }
 
 impl State {
     /// Codes over the estimation rows of the cluster dimension `dim` (factor indices into
-    /// `factors`); a missing value on an estimation row is an error.
-    fn cluster_codes(&self, factors: &[FactorCol], names: &[String], dim: &[usize], pool: &Pool) -> Result<Codes, RfError> {
+    /// `data.factors`); a missing value on an estimation row is an error.
+    fn cluster_codes(&self, data: &VcovData, dim: &[usize], pool: &Pool) -> Result<Codes, RfError> {
         for &f in dim {
-            if pool.install(|| self.obs.par_iter().any(|&i| factor_missing(&factors[f], i as usize))) {
-                return Err(RfError::InvalidInput(format!("the cluster variable {} has missing values on estimation rows", names[f])));
+            if pool.install(|| self.obs.par_iter().any(|&i| factor_missing(&data.factors[f], i as usize))) {
+                return Err(RfError::InvalidInput(format!("the cluster variable {} has missing values on estimation rows", data.factor_names[f])));
             }
         }
-        interaction_kept_codes(factors, dim, &self.obs, pool)
+        interaction_kept_codes(data.factors, dim, &self.obs, pool)
     }
 
-    pub(crate) fn vcov(
-        &self,
-        kind: VcovKind,
-        ssc: &Ssc,
-        factors: &[FactorCol],
-        factor_names: &[String],
-        cluster: &[Vec<usize>],
-        ctx: &Ctx,
-    ) -> Result<VcovOutput, RfError> {
+    /// Leverage of the fixed-effect columns under the variance weights (kept order).
+    fn fe_hat(&self, ctx: &Ctx, pool: &Pool) -> Result<&[f64], RfError> {
+        if let Some(h) = self.fe_hat.get() {
+            return Ok(h);
+        }
+        let terms: Vec<(&[u32], usize, bool, Vec<&[f64]>)> =
+            self.fe.iter().map(|t| (t.codes.as_slice(), t.levels, t.intercept, t.slopes.iter().map(Vec::as_slice).collect())).collect();
+        let h = fe_leverage(&terms, self.weights.as_deref(), self.obs.len(), ctx, pool)?;
+        Ok(self.fe_hat.get_or_init(|| h))
+    }
+
+    pub(crate) fn vcov(&self, kind: VcovKind, ssc: &Ssc, data: &VcovData, ctx: &Ctx) -> Result<VcovOutput, RfError> {
         let nobs = self.obs.len();
         let rows_needed = self.obs.last().map_or(0, |&i| i as usize + 1);
-        if factors.len() != factor_names.len() || factors.iter().any(|f| f.len() < rows_needed) {
-            return Err(RfError::InvalidInput("one name per factor is required, and the factors must have the rows of the original input".into()));
+        let (factors, names, cluster) = (data.factors, data.factor_names, data.cluster);
+        if factors.len() != names.len()
+            || factors.iter().any(|f| f.len() < rows_needed)
+            || data.lat.is_some_and(|c| c.len() < rows_needed)
+            || data.lon.is_some_and(|c| c.len() < rows_needed)
+        {
+            return Err(RfError::InvalidInput("one name per factor is required, and the variables must have the rows of the original input".into()));
         }
         if cluster.len() > 4 || cluster.iter().any(|d| d.is_empty() || d.iter().any(|&f| f >= factors.len())) {
             return Err(RfError::InvalidInput("cluster dimensions must reference between one and four valid factors".into()));
         }
-        if kind == VcovKind::Cluster && cluster.is_empty() {
-            return Err(RfError::InvalidInput("a clustered variance matrix needs cluster dimensions".into()));
+        if data.time.is_some_and(|f| f >= factors.len()) || data.panel.is_some_and(|f| f >= factors.len()) {
+            return Err(RfError::InvalidInput("the time or panel variable references an invalid factor".into()));
+        }
+        let vars = KindVars { cluster: !cluster.is_empty(), time: data.time.is_some(), panel: data.panel.is_some(), coords: data.lat.is_some() && data.lon.is_some() };
+        vcov::check_kind(kind, self.flavor, self.iv, &vars)?;
+        if kind == VcovKind::Crv3 {
+            return Err(RfError::InvalidInput("a CRV3 variance matrix re-estimates the model: estimate it with vcov = CRV3".into()));
         }
         par::with_pool(par::threads_for(ctx.threads, nobs), |pool| {
-            let dims: Vec<Codes> = if kind == VcovKind::Cluster {
-                cluster.iter().map(|d| self.cluster_codes(factors, factor_names, d, pool)).collect::<Result<_, _>>()?
-            } else {
-                Vec::new()
-            };
+            let dims: Vec<Codes> =
+                if kind.is_clustered() { cluster.iter().map(|d| self.cluster_codes(data, d, pool)).collect::<Result<_, _>>()? } else { Vec::new() };
             let cl_info: Vec<ClusterInfo> = dims
                 .iter()
                 .zip(cluster)
-                .map(|(c, d)| ClusterInfo { codes: &c.codes, g: c.n as usize, names: d.iter().map(|&f| factor_names[f].as_str()).collect() })
+                .map(|(c, d)| ClusterInfo { codes: &c.codes, g: c.n as usize, names: d.iter().map(|&f| names[f].as_str()).collect() })
                 .collect();
+            let inputs = VcovInputs::read(kind, self.flavor, data, &self.obs, pool)?;
+            let mut extra = inputs.extra(!self.fe.is_empty(), self.intercept);
+            if matches!(kind, VcovKind::Hc2 | VcovKind::Hc3) && !self.fe.is_empty() {
+                extra.fe_hat = Some(self.fe_hat(ctx, pool)?);
+            }
             let w_rows = match &self.weights {
                 Some(w) => Some(crate::vcov::to_row_order(w, &self.row_order, pool)?),
                 None => None,
@@ -154,7 +178,7 @@ impl State {
             };
             let fe_info: Vec<FeInfo> = self.fe.iter().map(StateFe::info).collect();
             let refs = || term_refs(&fe_info, pool);
-            vcov::compute(&model, kind, ssc, &fe_info, &cl_info, &refs, pool).map(|(v, _)| v)
+            vcov::compute(&model, kind, ssc, &fe_info, &cl_info, &extra, &refs, pool).map(|(v, _)| v)
         })?
     }
 

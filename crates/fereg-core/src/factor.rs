@@ -1,7 +1,7 @@
-//! Factor encoding (plan §1.2): dense codes 0..n in ascending value order.
+//! Factor encoding (plan sec. 1.2): dense codes 0..n in ascending value order.
 //!
 //! Numeric factors take a direct-table path when every value is an integer and the value range
-//! is at most max(2n, 2²⁰); otherwise values are mapped to order-preserving u64 keys, sorted,
+//! is at most max(2n, 2^20); otherwise values are mapped to order-preserving u64 keys, sorted,
 //! deduplicated and looked up by binary search. Every path is deterministic (the codes are a
 //! function of the values only), whatever the thread count.
 
@@ -22,7 +22,7 @@ pub struct Codes {
     pub n: u32,
 }
 
-/// Order-preserving u64 key of a finite f64; −0.0 and 0.0 share a key.
+/// Order-preserving u64 key of a finite f64; -0.0 and 0.0 share a key.
 pub fn f64_key(x: f64) -> u64 {
     let x = if x == 0.0 { 0.0 } else { x };
     let bits = x.to_bits();
@@ -124,7 +124,7 @@ fn ranks(present: &[AtomicBool]) -> Result<(Vec<u32>, u32), RfError> {
     Ok((map, next))
 }
 
-/// [`direct_table`] for integer values `lo..lo + range` (slice loops; x − lo is an exact
+/// [`direct_table`] for integer values `lo..lo + range` (slice loops; x - lo is an exact
 /// nonnegative integer, so the cheap i64 conversion applies).
 fn direct_table_num(x: &[f64], lo: f64, range: usize, pool: &Pool) -> Result<Codes, RfError> {
     let single = pool.threads() == 1;
@@ -452,7 +452,7 @@ mod tests {
         for threads in [1, 3] {
             assert!(with_pool(threads, |pool| factorize(&FactorValues::Num(&nan_end), pool).is_err()).unwrap());
         }
-        // restrict ≡ compact.
+        // restrict == compact.
         let c = Codes { codes: (0..n).map(|_| (s.next_u64() % 3000) as u32).collect(), n: 3000 };
         let keep: Vec<bool> = (0..n).map(|_| s.next_u64() % 7 != 0).collect();
         let kept: Vec<u32> = (0..n as u32).filter(|&i| keep[i as usize]).collect();

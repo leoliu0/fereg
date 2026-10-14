@@ -26,3 +26,10 @@ Named vectors, or the coefficient matrix for \code{coeftable()}.
 \description{
 \code{se()}, \code{tstat()}, \code{pvalue()} and \code{coeftable()} as in fixest.
 }
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+se(m)
+pvalue(m, vcov = "hetero")
+coeftable(m, vcov = ~id)
+}

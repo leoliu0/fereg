@@ -58,7 +58,7 @@ for (fam in c("p", "l")) {
     }
     stopifnot(fit$convStatus)
     # fixest's cov.iid uses the IRLS weights at the start of its last iteration, accurate to about
-    # sqrt(glm.tol) (≈3e-7 relative for these logits); cov_iid_conv is the inverse Hessian at the
+    # sqrt(glm.tol) (~=3e-7 relative for these logits); cov_iid_conv is the inverse Hessian at the
     # converged estimate itself.
     s <- d[obs(fit), ]
     mu <- fitted(fit)

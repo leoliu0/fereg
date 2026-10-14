@@ -9,6 +9,8 @@
 pub mod absorber;
 pub mod api;
 pub mod cg;
+pub mod conley;
+pub mod crv3;
 pub mod dof;
 pub mod error;
 pub mod factor;
@@ -16,7 +18,9 @@ pub mod fe_recovery;
 pub mod fit;
 pub mod gather;
 pub mod glm;
+pub mod hac;
 pub mod iv;
+pub mod leverage;
 pub mod ols;
 pub mod operator;
 pub mod par;

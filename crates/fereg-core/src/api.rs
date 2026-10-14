@@ -71,12 +71,98 @@ impl DofOptions {
     }
 }
 
-/// Variance estimator. Each cluster dimension is an interaction of factor indices into [`Prep::factors`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Variance estimator of the Stata layer (reghdfe / ivreghdfe / ppmlhdfe conventions). Each
+/// cluster dimension is an interaction of factor indices into [`Prep::factors`].
+#[derive(Clone, Debug, PartialEq)]
 pub enum Vce {
     Unadjusted,
     Robust,
     Cluster(Vec<Vec<usize>>),
+    /// Stata `regress` `vce(hc2)` / `vce(hc3)` with the leverage of the full design.
+    Hc2,
+    Hc3,
+    /// Leave-one-cluster-out jackknife over the dimensions (inclusion–exclusion when several).
+    Crv3(Vec<Vec<usize>>),
+    /// reghdfe `vce(dkraay [bw])`; `bw` = lags + 1 (None = reghdfe's default).
+    Dkraay { time: TimeVars, bw: Option<usize> },
+    /// ivreg2 kernel family (ivreghdfe `bw() kernel() kiefer dkraay() psd0 psda`).
+    Kernel(KernelVce),
+    /// fixest Conley: coordinates are [`Prep::slope_vars`] entries `lat`, `lon` (degrees).
+    Conley(ConleyVce),
+}
+
+impl Vce {
+    /// Dimensions treated as clusters by the DoF rules (reghdfe `clusters`) and the cluster
+    /// counts: the cluster dims, the time variable of `dkraay`, the clusters of a kernel VCE.
+    pub fn cluster_dims(&self) -> Vec<Vec<usize>> {
+        match self {
+            Vce::Cluster(d) | Vce::Crv3(d) => d.clone(),
+            Vce::Dkraay { time, .. } => vec![vec![time.time]],
+            Vce::Kernel(k) => k.cluster.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The tsset/xtset variables the estimator needs.
+    pub fn time_vars(&self) -> Option<&TimeVars> {
+        match self {
+            Vce::Dkraay { time, .. } => Some(time),
+            Vce::Kernel(k) => Some(&k.time),
+            _ => None,
+        }
+    }
+}
+
+/// tsset/xtset variables: factor indices of the (numeric) time and panel variables, and the
+/// time step `_dta[_TSdelta]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeVars {
+    pub time: usize,
+    pub panel: Option<usize>,
+    pub delta: f64,
+}
+
+/// ivreg2 bandwidth: a positive real, or `auto` (Newey–West 1994, time series only).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bandwidth {
+    Fixed(f64),
+    Auto,
+}
+
+/// ivreg2 `psd0` / `psda`: make S positive semidefinite (negative eigenvalues set to 0 or to
+/// their absolute value).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Psd {
+    #[default]
+    None,
+    Zero,
+    Abs,
+}
+
+/// ivreg2 kernel-robust variance. Without clusters: HAC (`robust`) or AC (homoskedastic
+/// autocorrelation); clusters `[time]`: Driscoll–Kraay; `[panel], [time]` (either order):
+/// Thompson two-way with kernel. `kiefer`: Truncated kernel, bw = T, AC.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KernelVce {
+    pub kernel: crate::hac::Kernel,
+    /// Ignored with `kiefer` (bw = T).
+    pub bw: Bandwidth,
+    pub robust: bool,
+    pub cluster: Vec<Vec<usize>>,
+    pub kiefer: bool,
+    pub psd: Psd,
+    pub time: TimeVars,
+}
+
+/// fixest Conley options; `lat`/`lon` index [`Prep::slope_vars`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConleyVce {
+    pub lat: usize,
+    pub lon: usize,
+    /// km; None = fixest's deduced cutoff.
+    pub cutoff: Option<f64>,
+    pub pixel: f64,
+    pub spherical: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +191,7 @@ pub struct Prep<'a> {
     pub family: Family,
     /// Depvar, needed by the GLM `fe` separation rule.
     pub y_for_sep: Option<&'a [f64]>,
-    /// Apply the GLM `fe` separation rule (Poisson: Σy = 0; logit: Σy ∈ {0, count}) inside the singleton loop.
+    /// Apply the GLM `fe` separation rule (Poisson: sum y = 0; logit: sum y in {0, count}) inside the singleton loop.
     pub sep_fe: bool,
 }
 
@@ -229,26 +315,45 @@ pub struct GlmOptions {
     pub tol: f64,
     /// IRLS iteration cap (default 10000).
     pub maxiter: usize,
-    /// Final inner (FE solver) tolerance τ_final (default 1e-10).
+    /// Final inner (FE solver) tolerance tau_final (default 1e-10).
     pub itol: f64,
     pub separation: Separation,
     pub guess: Guess,
     /// Print the iteration log through [`Ctx::log`].
     pub log: bool,
+    /// How collinear regressors are found.
+    pub collinear: GlmCollinear,
+}
+
+/// Collinearity rule of a GLM fit. The fixest and pyfixest rules apply fixest's
+/// `cpp_cholesky` (a column is excluded when its pivot is below `tol`, absolute) to the
+/// regressors residualized with the first IRLS weights, on their original scale. The first FE
+/// solve runs at its usual (loose) tolerance and is repeated at the final inner tolerance only
+/// when its error bound could change the outcome. Excluded columns stay out of the fit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GlmCollinear {
+    /// ppmlhdfe `remove_collinears`: a solve of X with the true weights before IRLS.
+    #[default]
+    Ppmlhdfe,
+    /// fixest `feglm`: the IRLS-weighted cross-product X~'WX~ (fixest re-checks in every
+    /// iteration with its current weights and reports the last iteration's set).
+    Fixest { tol: f64 },
+    /// pyfixest `fepois`/`feglm`: the unweighted cross-product X~'X~ of the first iteration.
+    Pyfixest { tol: f64 },
 }
 
 /// Conventions of a GLM fit ([`crate::Session::glm_parts`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GlmConvention {
     /// ppmlhdfe 2.3.3 / Stata `logit` (the Stata plugin): Poisson and pweighted VCE forced to
-    /// robust; stop when ppmlhdfe's eps = |Δdev| / max(min(dev, dev_old), 0.1) < `tol` with the
+    /// robust; stop when ppmlhdfe's eps = |Delta dev| / max(min(dev, dev_old), 0.1) < `tol` with the
     /// inner tolerance at its final value; reaching `maxiter` is error 430.
     #[default]
     Ppmlhdfe,
     /// fixest / pyfixest: the VCE is the session's as requested; fixest's starting values
-    /// (Poisson μ = y + 0.1, logit μ = (w·y + 1/2)/(w + 1)), so `guess` is ignored; fixest's step
-    /// halving for both families (the first iteration compares with the deviance of η = 1e-5 and
-    /// halves toward it at most twice); stop when |Δdev| / (0.1 + |dev|) < `tol` (fixest
+    /// (Poisson mu = y + 0.1, logit mu = (w*y + 1/2)/(w + 1)), so `guess` is ignored; fixest's step
+    /// halving for both families (the first iteration compares with the deviance of eta = 1e-5 and
+    /// halves toward it at most twice); stop when |Delta dev| / (0.1 + |dev|) < `tol` (fixest
     /// `glm.tol`, deviance on the original scale) in an iteration without step halving whose FE
     /// solve was exact or ran at the final inner tolerance max(min(`itol`, `tol`/10), 1e-12); the
     /// inner tolerance follows eps^{3/2} (eps = relative deviance change) instead of ppmlhdfe's
@@ -265,35 +370,35 @@ pub enum GlmConvention {
 /// and of the regressors.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GlmParts {
-    /// One coefficient per regressor sent (layout order); NaN when `status` ≠ 0.
+    /// One coefficient per regressor sent (layout order); NaN when `status` != 0.
     pub coef: Vec<f64>,
     /// Per regressor sent: 0 ok, 2 absorbed by the fixed effects, 3 collinear.
     pub status: Vec<u8>,
     /// ppmlhdfe constant: regression through the means under the final IRLS weights, so that
-    /// η ≈ x'β + cons + offset when there are no FE terms (it is then the intercept). With FE
+    /// eta ~= x'beta + cons + offset when there are no FE terms (it is then the intercept). With FE
     /// terms it is only a normalization, included in `fe_sum`.
     pub cons: f64,
-    /// Linear predictor η (offset included), from the final β.
+    /// Linear predictor eta (offset included), from the final beta.
     pub eta: Vec<f64>,
-    /// Mean μ = g⁻¹(η).
+    /// Mean mu = g^-1 (eta).
     pub mu: Vec<f64>,
-    /// IRLS weights of the final iteration: observation weight × μ (Poisson) or × μ(1 − μ)
-    /// (logit), μ taken at the start of that iteration. `xt` and `working_resid` were computed
-    /// under these weights, so inv(xt'·diag(w)·xt) is the inverse Hessian of the slopes (fixest
+    /// IRLS weights of the final iteration: observation weight x mu (Poisson) or x mu(1 - mu)
+    /// (logit), mu taken at the start of that iteration. `xt` and `working_resid` were computed
+    /// under these weights, so inv(xt'*diag(w)*xt) is the inverse Hessian of the slopes (fixest
     /// `cov.iid`).
     pub w: Vec<f64>,
     /// Number of columns of `xt` = regressors with status 0, in layout order.
     pub k: usize,
-    /// Row-major nobs × `k`: kept regressors residualized on the FE structure under `w` (with no
+    /// Row-major nobs x `k`: kept regressors residualized on the FE structure under `w` (with no
     /// FE terms the structure is the constant, so the columns are `w`-demeaned).
     pub xt: Vec<f64>,
-    /// Working residuals z̃ − x̃'β of the final weighted least squares (fixest
-    /// `working_residuals`); fixest's GLM scores are `working_resid · w · xt`.
+    /// Working residuals z~ - x~'beta of the final weighted least squares (fixest
+    /// `working_residuals`); fixest's GLM scores are `working_resid * w * xt`.
     pub working_resid: Vec<f64>,
-    /// η − offset − x'β per observation: the sum of the fixed effects, constant included.
+    /// eta - offset - x'beta per observation: the sum of the fixed effects, constant included.
     pub fe_sum: Vec<f64>,
     /// For each saved term (absorb order): the intercept slot (if any), then one slot per slope;
-    /// values per observation. When every term is saved, Σ intercepts + Σ slope·x = `fe_sum`.
+    /// values per observation. When every term is saved, sum intercepts + sum slope*x = `fe_sum`.
     pub fe: Vec<Vec<f64>>,
     pub deviance: f64,
     /// IRLS iterations.
@@ -332,7 +437,7 @@ pub struct NamedMat {
 pub struct EstResult {
     /// Named exactly as the Stata e() scalar; the plugin stores each as `__rf_<name>`.
     pub scalars: Vec<(String, f64)>,
-    /// `b` (1×K), `V` (K×K), `dof_table`, `first`, `bfirst1`, …
+    /// `b` (1xK), `V` (K x K), `dof_table`, `first`, `bfirst1`, ...
     pub matrices: Vec<NamedMat>,
     pub macros: Vec<(String, String)>,
     /// One entry per non-y column of the [`Layout`]: 0 ok, 2 absorbed by the FEs, 3 collinear.

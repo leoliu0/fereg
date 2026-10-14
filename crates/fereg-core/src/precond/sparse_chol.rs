@@ -1,5 +1,5 @@
 //! Exact sparse Cholesky of one large block S_bb (plan D5 (b) 1): faer supernodal/simplicial
-//! LDLᵀ with AMD ordering, on the unit-diagonal scaled Laplacian, with the same dynamic
+//! LDL^T with AMD ordering, on the unit-diagonal scaled Laplacian, with the same dynamic
 //! regularization (grounding of null directions) as the dense block.
 
 use faer::dyn_stack::{MemBuffer, MemStack};
@@ -49,7 +49,7 @@ fn lower_scaled(a: &Csr) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>) {
     let mut row_idx = Vec::new();
     let mut vals = Vec::new();
     for i in 0..n {
-        // Row i of the symmetric matrix = column i; keep entries with row index ≥ i.
+        // Row i of the symmetric matrix = column i; keep entries with row index >= i.
         for k in a.ptr[i] as usize..a.ptr[i + 1] as usize {
             let j = a.col[k] as usize;
             if j >= i {
@@ -63,7 +63,7 @@ fn lower_scaled(a: &Csr) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>) {
 }
 
 impl SparseChol {
-    /// Symbolic analysis and, when `len_val ≤ max(8·nnz, 2·10⁷)`, the numeric factorization.
+    /// Symbolic analysis and, when `len_val <= max(8*nnz, 2*10^7)`, the numeric factorization.
     /// Returns `None` when the fill budget is exceeded or the factorization fails.
     pub fn try_factor(a: &Csr, pool: &Pool) -> Result<Option<SparseChol>, RfError> {
         let nnz = a.col.len();
@@ -139,7 +139,7 @@ impl SparseChol {
         self.symbolic.len_val()
     }
 
-    /// Σ_j (entries of column j of L)²: the multiply-add count of the numeric factorization.
+    /// sum_j (entries of column j of L)^2: the multiply-add count of the numeric factorization.
     pub fn flops(&self) -> f64 {
         let sq = |x: f64| x * (x + 1.0) * (2.0 * x + 1.0) / 6.0;
         match self.symbolic.raw() {
@@ -188,7 +188,7 @@ impl SparseChol {
         Ok(ok)
     }
 
-    /// Solves in place for the k × w column-major block `rhs` (kept coordinates of the block).
+    /// Solves in place for the k x w column-major block `rhs` (kept coordinates of the block).
     /// Sequential: faer's parallel triangular solve is several times slower than a sequential
     /// one for the few right-hand sides of a PCG iteration, so callers parallelize across
     /// blocks and column groups instead.

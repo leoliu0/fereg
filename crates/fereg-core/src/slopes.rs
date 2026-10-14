@@ -3,30 +3,30 @@
 //! [`SlopeSolver`] implements [`Absorber`] whenever some absorb term has slopes or no intercept.
 //! It follows plan D5 on an observation-level structure: rows are sorted by the eliminated term
 //! E (FE1 = [`fe1_index`]; without an intercept-only term, the term with the most levels) and
-//! every row is its own "cell". Level g of a term with design row h_i = (1?, x_i…) of width b owns
+//! every row is its own "cell". Level g of a term with design row h_i = (1?, x_i...) of width b owns
 //! b consecutive reduced coordinates.
 //!
-//! - **Elimination.** E is eliminated exactly per level with a generalized inverse M_g⁺ of
-//!   M_g = Σ_{i∈g} w_i h_i h_i'. reghdfe convention: with an intercept, the centered slope block
-//!   is inverted by a symmetric sweep that drops pivots ≤ [`LEVEL_TOL`]·Σw x², so a level whose
+//! - **Elimination.** E is eliminated exactly per level with a generalized inverse M_g^+ of
+//!   M_g = sum_{i in g} w_i h_i h_i'. reghdfe convention: with an intercept, the centered slope block
+//!   is inverted by a symmetric sweep that drops pivots <= [`LEVEL_TOL`]*sum w x^2, so a level whose
 //!   slope has no within variation gets slope 0 and intercept = mean.
-//! - **Reduced operator** (per segment g of E): u_i = Σ_q h_{q,i}'P[q, g_q(i)],
-//!   t = M_g⁺ Σ_i w_i h_{E,i} u_i', z_i = w_i (u_i − h_{E,i}'t), Y[q, g_q(i)] += h_{q,i} z_i'.
+//! - **Reduced operator** (per segment g of E): u_i = sum_q h_{q,i}'P[q, g_q(i)],
+//!   t = M_g^+ sum_i w_i h_{E,i} u_i', z_i = w_i (u_i - h_{E,i}'t), Y[q, g_q(i)] += h_{q,i} z_i'.
 //!   The right-hand side is the same kernel with u_i := v_i; the residualization pass replaces
-//!   v_i by d_i − h_{E,i}'t with d_i = v_i − u_i(x) and t the projection coefficients of d (α_E).
-//! - **Preconditioner.** The exact dense factor of the small blocks (jointly ≤ `small_limit`
+//!   v_i by d_i - h_{E,i}'t with d_i = v_i - u_i(x) and t the projection coefficients of d (alpha_E).
+//! - **Preconditioner.** The exact dense factor of the small blocks (jointly <= `small_limit`
 //!   coordinates, and only while the deterministic cost model of [`small_cost`] finds the dense
-//!   factor cheap next to a few matvecs), per-level b×b block Jacobi on the large blocks,
+//!   factor cheap next to a few matvecs), per-level b x b block Jacobi on the large blocks,
 //!   escalated once (the `cg` probe) to an exact sparse Cholesky of a large block when its
-//!   assembly work Σ_s d_s²·b² and its nonzeros fit the [`SolverConfig`] budgets. approx-chol is
+//!   assembly work sum_s d_s^2*b^2 and its nonzeros fit the [`SolverConfig`] budgets. approx-chol is
 //!   never used here.
-//! - **Kernels.** Row kernels work on column groups of compile-time width W ≤ [`MAX_W`]
+//! - **Kernels.** Row kernels work on column groups of compile-time width W <= [`MAX_W`]
 //!   (`[f64; W]` rows: no per-row heap buffers or dynamic-length loops). Every row stores the
 //!   first reduced coordinate of its level in each block (`coord`), so a row touches P and Y
 //!   with one load/add per design slot. The level permutations of the large blocks (needed only
-//!   by escalation and by the n×W scratch path) are built on first use.
+//!   by escalation and by the n x W scratch path) are built on first use.
 //!
-//! FeCoefs layout: p = m + G_E·b_E rows, `[x (m×R); α_E (G_E·b_E × R)]` (level-major, slots
+//! FeCoefs layout: p = m + G_E*b_E rows, `[x (m x R); alpha_E (G_E*b_E x R)]` (level-major, slots
 //! intercept then slopes). Deterministic for any thread count: fixed task partitions, task-order
 //! combines and level pulls, as the intercept-only solver; every cost-model decision depends on
 //! the data only, never on the thread count.
@@ -43,7 +43,7 @@ use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
 use crate::operator::{Csr, REDUNDANT};
-use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
+use crate::par::{self, CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::dense::Dense;
 use crate::precond::sparse_chol::SparseChol;
 use crate::precond::{SOLVE_COLS, solve_tasks};
@@ -63,12 +63,12 @@ const WIDE_GROUP: usize = 8;
 // 9950X), fitted on the fixest benchmark panels. Independent of the thread count (plan D3).
 /// Matvec cost per row and per (design slot + column).
 const C_ROW: f64 = 1e-9;
-/// Dense small-block assembly cost per unit of Σ_s d_s² + n·b_s² (d_s: small coordinates of
+/// Dense small-block assembly cost per unit of sum_s d_s^2 + n*b_s^2 (d_s: small coordinates of
 /// segment s, b_s: small design slots per row).
 const C_SMALL_ASM: f64 = 1e-9;
 /// Dense factorization cost per multiply-add.
 const C_FLOP: f64 = 1.2e-11;
-/// The small set is factored densely while its cost is at most max(SMALL_FLOOR, SMALL_ITERS ×
+/// The small set is factored densely while its cost is at most max(SMALL_FLOOR, SMALL_ITERS x
 /// matvec): cheap in absolute terms, or cheaper than the few iterations exactness can save.
 const SMALL_FLOOR: f64 = 1e-3;
 const SMALL_ITERS: f64 = 8.0;
@@ -94,9 +94,9 @@ fn at_mut<const W: usize>(v: &mut [f64], c: usize) -> &mut [f64; W] {
     (&mut v[c..c + W]).try_into().expect("W-wide slice")
 }
 
-/// Generalized inverse of the symmetric PSD k×k row-major `a`, in place, by the symmetric sweep.
+/// Generalized inverse of the symmetric PSD k x k row-major `a`, in place, by the symmetric sweep.
 /// Pivot p is dropped (row and column p of the result are 0) unless its Schur complement given
-/// the earlier kept pivots exceeds `tol·refd[p]`.
+/// the earlier kept pivots exceeds `tol*refd[p]`.
 pub fn sweep_ginv(a: &mut [f64], k: usize, refd: &[f64], tol: f64) {
     for p in 0..k {
         let d = a[p * k + p];
@@ -128,7 +128,7 @@ pub fn sweep_ginv(a: &mut [f64], k: usize, refd: &[f64], tol: f64) {
     }
 }
 
-/// Design row (1?, x…) of a term.
+/// Design row (1?, x...) of a term.
 #[inline]
 fn design(icpt: bool, x: &[f64], out: &mut [f64]) {
     if icpt {
@@ -160,7 +160,7 @@ pub struct SBlock {
 }
 
 /// Level-sorted row lists of the large blocks and the E level of every row (built on first use:
-/// escalation, diagonal blocks too large for accumulators, and the n×W scratch path).
+/// escalation, diagonal blocks too large for accumulators, and the n x W scratch path).
 pub struct LevelIndex {
     /// Level of E of every row.
     pub row_seg: Vec<u32>,
@@ -184,24 +184,24 @@ pub struct SlopeStructure {
     /// Number of blocks.
     pub nb: usize,
     /// Design slots per row: every block of width b owns b consecutive slots (intercept, then
-    /// slopes), small blocks first. Slot j of row i has reduced coordinate `sc[i·k + j]`
-    /// (level coordinate off + g·b plus the slot within the level) and value `sv[i·k + j]` (1
+    /// slopes), small blocks first. Slot j of row i has reduced coordinate `sc[i*k + j]`
+    /// (level coordinate off + g*b plus the slot within the level) and value `sv[i*k + j]` (1
     /// for intercepts). The small blocks own the first `nslots_small` slots.
     pub k: usize,
     pub sc: Vec<u32>,
     pub sv: Vec<f64>,
     pub nslots_small: usize,
-    /// Slope values of E per row (n × e_ns).
+    /// Slope values of E per row (n x e_ns).
     pub he: Vec<f64>,
     /// Small blocks first, then large ones, each in term order.
     pub blocks: Vec<SBlock>,
     pub nsmall: usize,
-    /// Reduced dimension Σ g·b and the small coordinates `0..m_small`.
+    /// Reduced dimension sum g*b and the small coordinates `0..m_small`.
     pub m: usize,
     pub m_small: usize,
     /// Rows of the longest segment of E.
     pub max_seg: usize,
-    /// Fixed partition of the segments into parts of ≳ [`CHUNK`] rows (boundaries).
+    /// Fixed partition of the segments into parts of >~ [`CHUNK`] rows (boundaries).
     pub parts: Vec<u32>,
     /// Largest reduced vector (bytes, one column group) scattered entirely through accumulators.
     pub acc_bytes_max: usize,
@@ -226,7 +226,7 @@ impl SlopeStructure {
         &self.sv[base..base + blk.ns]
     }
 
-    /// First reduced coordinate (off + g·b) of row i's level in block q.
+    /// First reduced coordinate (off + g*b) of row i's level in block q.
     #[inline]
     fn coord(&self, i: usize, q: usize) -> usize {
         self.sc[i * self.k + self.blocks[q].s0] as usize
@@ -243,7 +243,7 @@ impl SlopeStructure {
         self.nsmall < self.nb
     }
 
-    /// Groups the parts so that `ntasks × acc_len ≤ 2²²` (segment boundaries).
+    /// Groups the parts so that `ntasks x acc_len <= 2^22` (segment boundaries).
     fn tasks(&self, acc_len: usize) -> Vec<u32> {
         let np = self.parts.len() - 1;
         let per = if acc_len == 0 { 1 } else { (np * acc_len).div_ceil(1 << 22).max(1) };
@@ -341,7 +341,7 @@ fn sorted_offsets(codes: &[u32], g: usize, pool: &Pool) -> Result<Option<Vec<u32
 }
 
 /// Dense-factor cost of a small set with `ms` coordinates and `bs` design slots per row:
-/// assembly Σ_s min(rows_s·bs, ms)² + n·bs² plus the factorization.
+/// assembly sum_s min(rows_s*bs, ms)^2 + n*bs^2 plus the factorization.
 fn small_cost(seg_off: &[u32], ms: usize, bs: usize) -> f64 {
     let n = *seg_off.last().expect("nonempty") as u64;
     let work: u64 = seg_off.windows(2).map(|w| (u64::from(w[1] - w[0]) * bs as u64).min(ms as u64).pow(2)).sum::<u64>() + n * (bs * bs) as u64;
@@ -387,7 +387,7 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
     };
     let parts = obs_groups(&seg_off);
 
-    // Blocks: small (ascending coordinates while the total stays ≤ small_limit and the dense
+    // Blocks: small (ascending coordinates while the total stays <= small_limit and the dense
     // factor stays cheap, see `small_cost`) first.
     let others: Vec<usize> = (0..terms.len()).filter(|&q| q != e).collect();
     let width = |q: usize| usize::from(terms[q].intercept) + terms[q].slopes.len();
@@ -520,9 +520,9 @@ fn build_index(st: &SlopeStructure, pool: &Pool) -> Result<LevelIndex, RfError> 
 pub struct SlopeWeights {
     /// Row weights (`None` = all ones).
     pub w_rows: Option<Vec<f64>>,
-    /// M_g⁺ of every level of E (ge × be², row-major blocks).
+    /// M_g^+ of every level of E (ge x be^2, row-major blocks).
     pub minv: Vec<f64>,
-    /// Per block: the diagonal b×b blocks of S per level (g × b²).
+    /// Per block: the diagonal b x b blocks of S per level (g x b^2).
     pub dblk: Vec<Vec<f64>>,
     /// Per block: their generalized inverses (block Jacobi).
     pub jinv: Vec<Vec<f64>>,
@@ -578,7 +578,7 @@ fn level_minv(st: &SlopeStructure, ws_w: &Option<Vec<f64>>, s: usize, out: &mut 
             }
         }
         sweep_ginv(g, ns, refd, LEVEL_TOL);
-        // [[1/W + x̄'G x̄, −(G x̄)'], [−G x̄, G]].
+        // [[1/W + xbar'G xbar, -(G xbar)'], [-G xbar, G]].
         let mut gx = vec![0.0; ns];
         for k in 0..ns {
             gx[k] = (0..ns).map(|l| g[k * ns + l] * xbar[l]).sum();
@@ -621,7 +621,7 @@ pub fn slope_weights(st: &SlopeStructure, w_rows: Option<Vec<f64>>, pool: &Pool)
     };
     let mut minv = alloc_vec(st.ge * be2, 0.0)?;
     if st.e_icpt && st.be == 1 {
-        // Intercept-only E: M_s⁺ = 1/Σw.
+        // Intercept-only E: M_s^+ = 1/sum w.
         pool.install(|| {
             minv.par_chunks_mut(4096).enumerate().for_each(|(c, out)| {
                 for (k, o) in out.iter_mut().enumerate() {
@@ -659,7 +659,7 @@ pub fn slope_weights(st: &SlopeStructure, w_rows: Option<Vec<f64>>, pool: &Pool)
             d.par_chunks_mut(b2).zip(j.par_chunks_mut(b2)).zip(red.par_chunks_mut(b)).zip(gram.par_chunks(b2)).with_min_len(64).for_each_init(
                 || vec![0.0; b],
                 |refd, (((dl, jl), rl), gl)| {
-                    // On input dl = Σ_s C' M_s⁺ C; the diagonal block is gram − dl.
+                    // On input dl = sum_s C' M_s^+ C; the diagonal block is gram - dl.
                     for (dv, gv) in dl.iter_mut().zip(gl) {
                         *dv = gv - *dv;
                     }
@@ -686,7 +686,7 @@ pub fn slope_weights(st: &SlopeStructure, w_rows: Option<Vec<f64>>, pool: &Pool)
     Ok(SlopeWeights { w_rows, minv, dblk, jinv, redundant, sw })
 }
 
-/// cmc += C' M⁺ C for C (be × b) and M⁺ (be × be).
+/// cmc += C' M^+ C for C (be x b) and M^+ (be x be).
 #[inline]
 fn add_cmc(c: &[f64], mv: &[f64], be: usize, b: usize, cmc: &mut [f64]) {
     for a in 0..b {
@@ -704,9 +704,9 @@ fn add_cmc(c: &[f64], mv: &[f64], be: usize, b: usize, cmc: &mut [f64]) {
     }
 }
 
-/// Per level of large block `q`: (Σ w h h', Σ_s C_s' M_s⁺ C_s) (g × b² each), accumulated in row
+/// Per level of large block `q`: (sum w h h', sum_s C_s' M_s^+ C_s) (g x b^2 each), accumulated in row
 /// order through per-task accumulators combined in task order. The task count depends on n and
-/// the accumulator size only (≥ 4 accumulator lengths of rows per task, ≤ 64 MiB in total).
+/// the accumulator size only (>= 4 accumulator lengths of rows per task, <= 64 MiB in total).
 fn diag_rows(st: &SlopeStructure, w_rows: &Option<Vec<f64>>, minv: &[f64], q: usize, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
     let blk = &st.blocks[q];
     let (be, b) = (st.be, blk.b);
@@ -714,7 +714,7 @@ fn diag_rows(st: &SlopeStructure, w_rows: &Option<Vec<f64>>, minv: &[f64], q: us
     let len = blk.g * b2;
     let nt_want = (st.n / (4 * len).max(1)).min((1 << 23) / (2 * len).max(1)).clamp(1, 64);
     let tb = st.even_tasks(nt_want);
-    // Intercept-only E: h_E = 1, so C = Σ w h_q.
+    // Intercept-only E: h_E = 1, so C = sum w h_q.
     let simple_e = st.e_icpt && be == 1;
     let accs: Vec<Vec<f64>> = pool.install(|| {
         (0..tb.len() - 1)
@@ -743,14 +743,14 @@ fn diag_rows(st: &SlopeStructure, w_rows: &Option<Vec<f64>>, minv: &[f64], q: us
                     let mut k = 0;
                     while k < items.len() {
                         let c0 = items[k].0;
-                        // g·b² = (c0 − off)·b.
+                        // g*b^2 = (c0 - off)*b.
                         let gb2 = (c0 as usize - blk.off) * b;
                         c.iter_mut().for_each(|v| *v = 0.0);
                         let gl = &mut gram[gb2..gb2 + b2];
                         while k < items.len() && items[k].0 == c0 {
                             let i = items[k].1 as usize;
                             let wi = w_rows.as_ref().map_or(1.0, |v| v[i]);
-                            // The block's slot values are its design row (1?, x…).
+                            // The block's slot values are its design row (1?, x...).
                             let hq = &st.sv[i * st.k + blk.s0..i * st.k + blk.s0 + b];
                             for a in 0..b {
                                 let wa = wi * hq[a];
@@ -794,9 +794,9 @@ fn diag_rows(st: &SlopeStructure, w_rows: &Option<Vec<f64>>, minv: &[f64], q: us
     Ok((out, cmc))
 }
 
-/// [`diag_rows`] task for an intercept-only E (M_s⁺ = 1/W_s) and a block of width `B`: the same
+/// [`diag_rows`] task for an intercept-only E (M_s^+ = 1/W_s) and a block of width `B`: the same
 /// sums as the general loop, with the per-level vectors in registers. Rows of a level are
-/// grouped by a quadratic scan in segments of ≤ 64 rows (no sort), by sorting otherwise; either
+/// grouped by a quadratic scan in segments of <= 64 rows (no sort), by sorting otherwise; either
 /// way a level's rows are summed in row order.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -806,7 +806,7 @@ fn diag_task_simple<const B: usize>(st: &SlopeStructure, blk: &SBlock, wr: Optio
     let (k, s0, off) = (st.k, blk.s0, blk.off);
     let sv = &st.sv[..];
     let mut items: Vec<(u32, u32)> = Vec::with_capacity(st.max_seg);
-    // One level of a segment: gram += Σ w h h', cmc += C C'/W_s with C = Σ w h.
+    // One level of a segment: gram += sum w h h', cmc += C C'/W_s with C = sum w h.
     let mut level = |c0: u32, rows: &[usize], mv: f64| {
         let gb2 = (c0 as usize - off) * B;
         let mut c = [0.0; B];
@@ -822,7 +822,7 @@ fn diag_task_simple<const B: usize>(st: &SlopeStructure, blk: &SBlock, wr: Optio
                 c[a] += wa;
             }
         }
-        // C' M_s⁺ C as `add_cmc` with be = 1.
+        // C' M_s^+ C as `add_cmc` with be = 1.
         let cl = &mut cmc[gb2..gb2 + B * B];
         for a in 0..B {
             for bb in 0..B {
@@ -917,13 +917,13 @@ fn diag_levels(st: &SlopeStructure, w_rows: &Option<Vec<f64>>, minv: &[f64], q: 
 }
 
 /// Per-segment aggregation of one block: for segment s, entries `off[s]..off[s+1]` hold the
-/// distinct levels (ascending), C = Σ w h_E h_q' (be × b) and M_s⁺C.
+/// distinct levels (ascending), C = sum w h_E h_q' (be x b) and M_s^+ C.
 struct BlockAgg {
     off: Vec<u32>,
     codes: Vec<u32>,
     c: Vec<f64>,
     mc: Vec<f64>,
-    /// Σ_s d_s².
+    /// sum_s d_s^2.
     work: u64,
 }
 
@@ -934,7 +934,7 @@ pub struct SOps<'a> {
     pub ws: &'a SlopeWeights,
 }
 
-/// Reusable buffers of the scatter passes: the per-task accumulators and the n × W scratch of
+/// Reusable buffers of the scatter passes: the per-task accumulators and the n x W scratch of
 /// the level pulls (kept across the PCG iterations so no pass allocates or page-faults them).
 #[derive(Default)]
 pub struct PassScratch {
@@ -953,7 +953,7 @@ fn grow(v: &mut Vec<f64>, len: usize) -> Result<(), RfError> {
 
 /// Per-task scratch of the segment kernels: the segment rows `d` (sized for the longest
 /// segment, so the row loops contain no allocation call and keep their accumulators in
-/// registers) and the E projection accumulators `a`, `t` (be × W).
+/// registers) and the E projection accumulators `a`, `t` (be x W).
 struct Seg<const W: usize> {
     d: Vec<[f64; W]>,
     a: Vec<[f64; W]>,
@@ -982,7 +982,7 @@ struct TaskIn<'a> {
 }
 
 /// One task of [`SOps::scatter_pass`] over the segments `segs`: returns the per-column
-/// [Σwv², Σwv, Σw·e²] when `STATS`. A separate non-inlined function with the accumulator as its
+/// [sum wv^2, sum wv, sum w*e^2] when `STATS`. A separate non-inlined function with the accumulator as its
 /// own `&mut` argument, so the compiler knows the accumulator stores never touch the slot
 /// arrays or the inputs (they stay in registers instead of being reloaded after every store).
 #[inline(never)]
@@ -1099,8 +1099,8 @@ fn seg_task<const W: usize, const K: usize, const APPLY: bool, const STATS: bool
 }
 
 /// One task of [`SOps::residualize_rows`] over the segments `segs` (rows of `vs`, columns
-/// j0..j0+W of r): v_i ← d_i − h_{E,i}'t with d = v − u(x); writes α_E into `alpha` (segment
-/// rows of be × r) when given. Not inlined, for the same aliasing reason as [`seg_task`].
+/// j0..j0+W of r): v_i <- d_i - h_{E,i}'t with d = v - u(x); writes alpha_E into `alpha` (segment
+/// rows of be x r) when given. Not inlined, for the same aliasing reason as [`seg_task`].
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn resid_task<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs: &mut [f64], r: usize, j0: usize, x: &[f64], mut alpha: Option<&mut [f64]>) {
@@ -1132,7 +1132,7 @@ fn resid_task<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs:
         let rows = seg_off[s] as usize..seg_off[s + 1] as usize;
         let d = &mut dbuf[..rows.len()];
         if fused {
-            // Intercept-only E: t = Σ w d / Σ w.
+            // Intercept-only E: t = sum w d / sum w.
             let mut m = [0.0; W];
             for (kk, i) in rows.clone().enumerate() {
                 let dv = load(vs, i);
@@ -1171,7 +1171,7 @@ fn resid_task<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs:
     }
 }
 
-/// Calls `$s.$f::<W, K>(args)` with the column-group width W = `$w` ∈ 1..=[`MAX_W`] as a
+/// Calls `$s.$f::<W, K>(args)` with the column-group width W = `$w` in 1..=[`MAX_W`] as a
 /// compile-time constant (the per-row loops unroll into registers).
 macro_rules! by_width {
     ($w:expr, $k:tt, $s:ident . $f:ident ( $($a:expr),* )) => {
@@ -1193,7 +1193,7 @@ macro_rules! by_width {
     };
 }
 
-/// [`by_width`] with K = `$k` design slots as a compile-time constant for 1 ≤ K ≤ 4 (K = 0:
+/// [`by_width`] with K = `$k` design slots as a compile-time constant for 1 <= K <= 4 (K = 0:
 /// the slot count is read at run time).
 macro_rules! by_shape {
     ($w:expr, $k:expr, $s:ident . $f:ident ( $($a:expr),* )) => {
@@ -1222,7 +1222,7 @@ impl SOps<'_> {
         }
     }
 
-    /// u = Σ_q h_{q,i}'P[q, g_q(i)] for the columns j0..j0+W of the m × r block `p`.
+    /// u = sum_q h_{q,i}'P[q, g_q(i)] for the columns j0..j0+W of the m x r block `p`.
     #[inline(always)]
     fn u_row<const W: usize, const K: usize>(&self, i: usize, p: &[f64], r: usize, j0: usize) -> [f64; W] {
         let st = self.st;
@@ -1238,14 +1238,14 @@ impl SOps<'_> {
         u
     }
 
-    /// Projects E out of the rows `d` of segment s: t = M_s⁺ Σ_i w_i h_{E,i} d_i' (be × W, in
-    /// `t`) and d_i −= h_{E,i}'t. `a` is scratch (be × W).
+    /// Projects E out of the rows `d` of segment s: t = M_s^+ sum_i w_i h_{E,i} d_i' (be x W, in
+    /// `t`) and d_i -= h_{E,i}'t. `a` is scratch (be x W).
     #[inline(always)]
     fn seg_project<const W: usize>(&self, s: usize, rows: Range<usize>, d: &mut [[f64; W]], a: &mut [[f64; W]], t: &mut [[f64; W]]) {
         let (st, ws) = (self.st, self.ws);
         let be = st.be;
         if st.e_icpt && be == 1 {
-            // Intercept-only E: t = Σ w d / Σ w, d_i −= t.
+            // Intercept-only E: t = sum w d / sum w, d_i -= t.
             let mut m = [0.0; W];
             match &ws.w_rows {
                 None => {
@@ -1319,9 +1319,9 @@ impl SOps<'_> {
     }
 
     /// Fused pass over the columns j0..j0+W: per segment, row i is loaded (APPLY: u_i from the
-    /// m × r block P = `src`; else row i of the n × r block `src`), E is projected out and
-    /// z_i = w_i d_i is scattered into those columns of `y` (m × r; fully overwritten there).
-    /// With `STATS`, returns [Σwv² (W), Σwv (W), Σw·e² (W)] of the loaded values v and the
+    /// m x r block P = `src`; else row i of the n x r block `src`), E is projected out and
+    /// z_i = w_i d_i is scattered into those columns of `y` (m x r; fully overwritten there).
+    /// With `STATS`, returns [sum wv^2 (W), sum wv (W), sum w*e^2 (W)] of the loaded values v and the
     /// E-residuals e.
     #[allow(clippy::too_many_arguments)]
     fn scatter_pass<const W: usize, const K: usize, const APPLY: bool, const STATS: bool>(
@@ -1396,8 +1396,8 @@ impl SOps<'_> {
         Ok(extra)
     }
 
-    /// Y[q, g] = Σ_{i ∈ rows of g} h_{q,i} z_i (columns j0..j0+W) for every large block, by
-    /// level pulls from the n × W scratch.
+    /// Y[q, g] = sum_{i in rows of g} h_{q,i} z_i (columns j0..j0+W) for every large block, by
+    /// level pulls from the n x W scratch.
     fn pull_large<const W: usize>(&self, zbuf: &[f64], r: usize, j0: usize, y: &mut [f64], pool: &Pool) {
         let st = self.st;
         let ix = st.built_index();
@@ -1436,7 +1436,7 @@ impl SOps<'_> {
         }
     }
 
-    /// Y = S·P (m × r row-major).
+    /// Y = S*P (m x r row-major).
     pub fn apply(&self, p: &[f64], r: usize, y: &mut [f64], sc: &mut PassScratch, pool: &Pool) -> Result<(), RfError> {
         if !self.st.accumulates_all(r) {
             self.st.index(pool)?;
@@ -1451,7 +1451,7 @@ impl SOps<'_> {
         self.scatter_pass::<W, K, true, false>(r, j0, p, y, sc, pool)
     }
 
-    /// Reduced right-hand side of the row block `v` (n × r): (rhs, [Σwv², Σwv, Σw e²] per column)
+    /// Reduced right-hand side of the row block `v` (n x r): (rhs, [sum wv^2, sum wv, sum w e^2] per column)
     /// with e the residual after E alone.
     pub fn rhs(&self, v: &[f64], r: usize, sc: &mut PassScratch, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
         if !self.st.accumulates_all(r) {
@@ -1473,7 +1473,7 @@ impl SOps<'_> {
         self.scatter_pass::<W, K, false, true>(r, j0, v, y, sc, pool)
     }
 
-    /// In place: v_i ← d_i − h_{E,i}'t with d = v − u(x); writes α_E (ge·be × r) when given.
+    /// In place: v_i <- d_i - h_{E,i}'t with d = v - u(x); writes alpha_E (ge*be x r) when given.
     pub fn residualize_rows(&self, v: &mut [f64], r: usize, x: &[f64], mut alpha: Option<&mut [f64]>, pool: &Pool) {
         for g in col_groups(r) {
             by_shape!(g.len(), self.st.k, self.residualize_rows_n(v, r, g.start, x, alpha.as_deref_mut(), pool));
@@ -1500,7 +1500,7 @@ impl SOps<'_> {
         });
     }
 
-    /// FE fit per row for one coefficient column (x: m, alpha: ge·be).
+    /// FE fit per row for one coefficient column (x: m, alpha: ge*be).
     pub fn fit_rows(&self, x: &[f64], alpha: &[f64], pool: &Pool) -> Vec<f64> {
         let st = self.st;
         let be = st.be;
@@ -1523,8 +1523,8 @@ impl SOps<'_> {
         out
     }
 
-    /// Dense S restricted to the small coordinates (m_s × m_s, row-major) and the diagonal of
-    /// the level Gram Σ w h_c² of every small coordinate (the redundancy reference).
+    /// Dense S restricted to the small coordinates (m_s x m_s, row-major) and the diagonal of
+    /// the level Gram sum w h_c^2 of every small coordinate (the redundancy reference).
     pub fn assemble_small(&self, pool: &Pool) -> Result<(Vec<f64>, Vec<f64>), RfError> {
         let (st, ws) = (self.st, self.ws);
         let ms = st.m_small;
@@ -1545,7 +1545,7 @@ impl SOps<'_> {
                     let k1 = ((rbk + 1) * rows_per).min(ms);
                     let mut acc = vec![0.0; (k1 - k0) * ms];
                     let mut gd = vec![0.0; k1 - k0];
-                    // Per segment: C = Σ w h_E h_c (be values per touched small coordinate c),
+                    // Per segment: C = sum w h_E h_c (be values per touched small coordinate c),
                     // in a dense scratch reset on first touch (marked by the segment index).
                     let mut cs = vec![0.0; ms * be];
                     let mut mark = vec![u32::MAX; ms];
@@ -1587,7 +1587,7 @@ impl SOps<'_> {
                                 }
                             }
                         }
-                        // Subtract C' M_s⁺ C.
+                        // Subtract C' M_s^+ C.
                         let mv = &ws.minv[s * be * be..(s + 1) * be * be];
                         for &c in &touched {
                             let cu = c as usize;
@@ -1873,7 +1873,7 @@ impl SOps<'_> {
 
 /// Preconditioner of one large block.
 pub enum LargePre {
-    /// Per-level b×b block Jacobi.
+    /// Per-level b x b block Jacobi.
     Jacobi,
     /// Exact sparse Cholesky of the block over its kept coordinates.
     Chol { keep: Vec<u32>, f: Box<SparseChol> },
@@ -2177,12 +2177,13 @@ impl Absorber for SlopeSolver {
         self.ws.w_rows.as_deref()
     }
 
-    fn set_weights(&mut self, w: Option<Vec<f64>>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
-        if w.as_ref().is_some_and(|v| v.len() != self.st.n || v.iter().any(|x| !(x.is_finite() && *x > 0.0))) {
+    fn set_weights(&mut self, w: Option<&[f64]>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
+        if w.is_some_and(|v| v.len() != self.st.n || !par::all_positive(v, pool)) {
             return Err(RfError::InvalidInput("weights must be positive and finite".into()));
         }
         ctx.check()?;
-        self.ws = slope_weights(&self.st, w, pool)?;
+        let w_rows = w.map(|v| par::copy_into(self.ws.w_rows.take(), v, pool)).transpose()?;
+        self.ws = slope_weights(&self.st, w_rows, pool)?;
         self.basic_fresh = false;
         if self.escalated {
             self.large_fresh = false;
@@ -2202,7 +2203,7 @@ impl Absorber for SlopeSolver {
         let (n, m) = (self.st.n, self.st.m);
         let pe = self.st.ge * self.st.be;
         if z.len() != n * r {
-            return Err(RfError::InvalidInput("residualize: block size differs from n·R".into()));
+            return Err(RfError::InvalidInput("residualize: block size differs from n*R".into()));
         }
         if warm.is_some_and(|wc| wc.r != r || wc.p != m + pe) {
             return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
@@ -2345,7 +2346,7 @@ mod tests {
         for i in 0..k {
             for j in 0..k {
                 let v: f64 = (0..k).map(|l| a[i * k + l] * g[l * k + j]).sum();
-                assert!((v - f64::from(u8::from(i == j))).abs() < 1e-10, "A·A⁻¹ ({i},{j}) = {v}");
+                assert!((v - f64::from(u8::from(i == j))).abs() < 1e-10, "A*A^-1 ({i},{j}) = {v}");
             }
         }
         // Column 2 = column 0 + column 1: dropped, A G A = A.

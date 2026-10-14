@@ -8,7 +8,7 @@
 * simulated gravity panel.
 *
 *   The ppmlhdfe test data blocks below are ported from the ppmlhdfe repository:
-*   MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimarães, and Thomas Zylkin.
+*   MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimaraes, and Thomas Zylkin.
 *   ppmlhdfe_collinear.dta and ppmlhdfe_problem6.dta are test/datasets/{collinear,problem6}.dta.
 *
 * Every ppmlhdfe call passes sep(fe relu): fereg treats `simplex` as an alias of `relu`, and

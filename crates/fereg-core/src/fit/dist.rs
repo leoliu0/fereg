@@ -1,6 +1,6 @@
 //! Distribution functions for p-values and confidence intervals (hosts call these so Python and
 //! R report identical inference without depending on SciPy). Accuracy target: 1e-14 relative
-//! in the body of each distribution; ±inf and NaN inputs follow R's `pnorm`/`qnorm`/`pt`/`qt`.
+//! in the body of each distribution; +/-inf and NaN inputs follow R's `pnorm`/`qnorm`/`pt`/`qt`.
 //!
 //! The regularized incomplete gamma and beta functions use continued fractions (Lentz) or power
 //! series with prefactors computed as R computes them (Stirling corrections, `bd0`, a stable log
@@ -8,7 +8,7 @@
 
 use std::f64::consts::PI;
 
-/// ln √(2π).
+/// ln sqrt(2*pi).
 const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_7;
 const EPS: f64 = 1e-16;
 const TINY: f64 = 1e-300;
@@ -22,7 +22,7 @@ pub fn pnorm(x: f64) -> f64 {
     if x.is_infinite() {
         return if x > 0.0 { 1.0 } else { 0.0 };
     }
-    // Φ(x) = ½·(1 ± P(½, x²/2)); the smaller tail is ½·Q(½, x²/2).
+    // Phi(x) = 1/2*(1 +/- P(1/2, x^2/2)); the smaller tail is 1/2*Q(1/2, x^2/2).
     let (p, q) = gamma_pq(0.5, 0.5 * x * x);
     if x < 0.0 { 0.5 * q } else { 0.5 + 0.5 * p }
 }
@@ -114,7 +114,7 @@ pub fn pt(t: f64, df: f64) -> f64 {
     if df.is_infinite() {
         return pnorm(t);
     }
-    // P(|T| > |t|) = I_{df/(df+t²)}(df/2, ½); both arguments of the beta are computed directly.
+    // P(|T| > |t|) = I_{df/(df+t^2)}(df/2, 1/2); both arguments of the beta are computed directly.
     let tt = t * t;
     let (x, y) = (df / (df + tt), tt / (df + tt));
     let (two_sided, inner) = beta_lower_upper(0.5 * df, 0.5, x, y);
@@ -145,7 +145,7 @@ pub fn qt(p: f64, df: f64) -> f64 {
     if !(q < 0.0) || !q.is_finite() {
         q = z;
     }
-    // Bracket [lo, hi] with pt(lo) ≤ pp ≤ pt(hi), hi ≤ 0.
+    // Bracket [lo, hi] with pt(lo) <= pp <= pt(hi), hi <= 0.
     let (mut lo, mut hi) = (q, 0.0f64);
     while pt(lo, df) > pp {
         hi = lo;
@@ -202,7 +202,7 @@ pub fn pf_upper(f: f64, df1: f64, df2: f64) -> f64 {
     if df1 * f > df2 { beta_lower_upper(0.5 * df2, 0.5 * df1, x, y).0 } else { beta_lower_upper(0.5 * df1, 0.5 * df2, y, x).1 }
 }
 
-/// χ² upper tail P(X > x).
+/// chi^2 upper tail P(X > x).
 pub fn pchisq_upper(x: f64, df: f64) -> f64 {
     if x.is_nan() || df.is_nan() || df < 0.0 {
         return f64::NAN;
@@ -216,7 +216,7 @@ pub fn pchisq_upper(x: f64, df: f64) -> f64 {
     gamma_pq(0.5 * df, 0.5 * x).1
 }
 
-/// ln Γ(x) for x > 0 (Lanczos, g = 7, n = 9; relative error < 1e-15).
+/// ln Gamma(x) for x > 0 (Lanczos, g = 7, n = 9; relative error < 1e-15).
 pub(crate) fn ln_gamma(x: f64) -> f64 {
     const C: [f64; 9] = [
         0.999_999_999_999_809_9,
@@ -238,7 +238,7 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
     LN_SQRT_2PI + (x + 0.5) * t.ln() - t + a.ln()
 }
 
-/// Stirling correction ln Γ(x) − ((x − ½)·ln x − x + ln √(2π)) for x ≥ 10 (asymptotic series;
+/// Stirling correction ln Gamma(x) - ((x - 1/2)*ln x - x + ln sqrt(2*pi)) for x >= 10 (asymptotic series;
 /// R's `lgammacor`, equal to `stirlerr`).
 fn stirling_corr(x: f64) -> f64 {
     const S: [f64; 7] = [1.0 / 12.0, 1.0 / 360.0, 1.0 / 1260.0, 1.0 / 1680.0, 1.0 / 1188.0, 691.0 / 360_360.0, 1.0 / 156.0];
@@ -250,7 +250,7 @@ fn stirling_corr(x: f64) -> f64 {
     s / x
 }
 
-/// R's `bd0(x, np) = x·ln(x/np) + np − x`, without cancellation when x ≈ np.
+/// R's `bd0(x, np) = x*ln(x/np) + np - x`, without cancellation when x ~= np.
 fn bd0(x: f64, np: f64) -> f64 {
     if (x - np).abs() < 0.1 * (x + np) {
         let v = (x - np) / (x + np);
@@ -271,7 +271,7 @@ fn bd0(x: f64, np: f64) -> f64 {
     }
 }
 
-/// ln B(a, b) (R's `lbeta`): Stirling corrections instead of differences of large ln Γ values.
+/// ln B(a, b) (R's `lbeta`): Stirling corrections instead of differences of large ln Gamma values.
 fn lbeta(a: f64, b: f64) -> f64 {
     let (p, q) = if a < b { (a, b) } else { (b, a) };
     if p >= 10.0 {
@@ -285,13 +285,13 @@ fn lbeta(a: f64, b: f64) -> f64 {
     }
 }
 
-/// x^a·e^{−x}/Γ(a), the prefactor of the incomplete gamma function.
+/// x^a*e^{-x}/Gamma(a), the prefactor of the incomplete gamma function.
 fn gamma_prefactor(a: f64, x: f64) -> f64 {
     if a == 0.5 {
         return x.sqrt() * (-x).exp() / PI.sqrt();
     }
     if a >= 10.0 {
-        // a·x^a·e^{−x}/Γ(a+1) with Γ(a+1) by Stirling (R's dpois_raw).
+        // a*x^a*e^{-x}/Gamma(a+1) with Gamma(a+1) by Stirling (R's dpois_raw).
         return a * (-stirling_corr(a) - bd0(a, x)).exp() / (2.0 * PI * a).sqrt();
     }
     (a * x.ln() - x - ln_gamma(a)).exp()
@@ -371,10 +371,10 @@ fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
     h
 }
 
-/// Regularized incomplete beta (I_x(a, b), 1 − I_x(a, b)) given x and y = 1 − x (both computed
+/// Regularized incomplete beta (I_x(a, b), 1 - I_x(a, b)) given x and y = 1 - x (both computed
 /// by the caller without cancellation). A tail that is not close to 1 is computed directly, so
 /// the smaller tail has full relative accuracy. Tails come from the positive series
-/// I_z(p, q) = z^p·(1−z)^q / (p·B(p, q)) · ₂F₁(p+q, 1; p+1; z), first on the side of the smaller
+/// I_z(p, q) = z^p*(1-z)^q / (p*B(p, q)) * _2F_1(p+q, 1; p+1; z), first on the side of the smaller
 /// argument (fast convergence), then, if that tail is close to 1, on the other side; the
 /// continued fraction is the fallback when the series would need too many terms (both parameters
 /// large, argument near the mean). The continued fraction alone loses digits near its
@@ -397,11 +397,11 @@ fn beta_lower_upper(a: f64, b: f64, x: f64, y: f64) -> (f64, f64) {
     if let Some(t) = beta_series(q, p, 1.0 - z, front) {
         return if lower_first { (1.0 - t, t) } else { (t, 1.0 - t) };
     }
-    // The other tail I_{1−z}(q, p) for a large q (e.g. `pt` and `pf` with a large df).
-    if q >= 15.0
-        && let Some(t) = bgrat_up(q, p, 1.0 - z, z)
-    {
-        return if lower_first { (1.0 - t, t) } else { (t, 1.0 - t) };
+    // The other tail I_{1-z}(q, p) for a large q (e.g. `pt` and `pf` with a large df).
+    if q >= 15.0 {
+        if let Some(t) = bgrat_up(q, p, 1.0 - z, z) {
+            return if lower_first { (1.0 - t, t) } else { (t, 1.0 - t) };
+        }
     }
     // The complement costs at most 4 digits here, less than the continued fraction can.
     if let Some(t) = first.filter(|t| *t <= 0.9999) {
@@ -416,11 +416,11 @@ fn beta_lower_upper(a: f64, b: f64, x: f64, y: f64) -> (f64, f64) {
     }
 }
 
-/// x^a·y^b / B(a, b). With n = a + b, s the Stirling correction and the large logarithms
-/// cancelled exactly instead of in floating point (which costs ≈ |b·ln y| ulps):
-/// - both parameters ≥ 10: √(ab/(2πn))·exp(s(n) − s(a) − s(b) − bd0(a, nx) − bd0(b, ny))
+/// x^a*y^b / B(a, b). With n = a + b, s the Stirling correction and the large logarithms
+/// cancelled exactly instead of in floating point (which costs ~= |b*ln y| ulps):
+/// - both parameters >= 10: sqrt(ab/(2*pi n))*exp(s(n) - s(a) - s(b) - bd0(a, nx) - bd0(b, ny))
 ///   (R's `dbinom_raw`);
-/// - only b ≥ 10: (nx)^a·e^{−nx}/Γ(a) · √(b/n)·exp(s(n) − s(b) − bd0(b, ny)), and symmetrically.
+/// - only b >= 10: (nx)^a*e^{-nx}/Gamma(a) * sqrt(b/n)*exp(s(n) - s(b) - bd0(b, ny)), and symmetrically.
 fn beta_prefactor(a: f64, b: f64, x: f64, y: f64) -> f64 {
     let n = a + b;
     if a >= 10.0 && b >= 10.0 {
@@ -438,8 +438,8 @@ fn beta_prefactor(a: f64, b: f64, x: f64, y: f64) -> f64 {
     (a * ln_x + b * ln_y - lbeta(a, b)).exp()
 }
 
-/// I_z(p, q) by its positive hypergeometric series given `front` = z^p·(1−z)^q / B(p, q);
-/// `None` when the terms would take too long to peak and decay (≈ 10⁴ terms; rounding then
+/// I_z(p, q) by its positive hypergeometric series given `front` = z^p*(1-z)^q / B(p, q);
+/// `None` when the terms would take too long to peak and decay (~= 10^4 terms; rounding then
 /// accumulates beyond the target accuracy).
 fn beta_series(p: f64, q: f64, z: f64, front: f64) -> Option<f64> {
     let peak = (((p + q) * z - p - 1.0) / (1.0 - z)).max(0.0);
@@ -458,9 +458,9 @@ fn beta_series(p: f64, q: f64, z: f64, front: f64) -> Option<f64> {
     Some(front * sum / p)
 }
 
-/// I_x(a, b) for a ≥ 15 given x and y = 1 − x: [`bgrat`] at b₀ = b − n ∈ (0, 1], plus the n
-/// positive terms of the recurrence I_x(a, c + 1) = I_x(a, c) + x^a·y^c / (c·B(a, c)) (TOMS 708
-/// reduces b the same way). `None` for more than 10⁴ terms or when `bgrat` fails.
+/// I_x(a, b) for a >= 15 given x and y = 1 - x: [`bgrat`] at b_0 = b - n in (0, 1], plus the n
+/// positive terms of the recurrence I_x(a, c + 1) = I_x(a, c) + x^a*y^c / (c*B(a, c)) (TOMS 708
+/// reduces b the same way). `None` for more than 10^4 terms or when `bgrat` fails.
 fn bgrat_up(a: f64, b: f64, x: f64, y: f64) -> Option<f64> {
     let n = (b.ceil() - 1.0).max(0.0);
     if n > 1e4 {
@@ -478,8 +478,8 @@ fn bgrat_up(a: f64, b: f64, x: f64, y: f64) -> Option<f64> {
     Some(sum)
 }
 
-/// I_x(a, b) for a ≥ 15 and b ≤ 1 given x and y = 1 − x: the asymptotic expansion of
-/// DiDonato & Morris (1992, §9), as `bgrat` of TOMS 708 (R's `pbeta`). `None` when it cannot be
+/// I_x(a, b) for a >= 15 and b <= 1 given x and y = 1 - x: the asymptotic expansion of
+/// DiDonato & Morris (1992, sec. 9), as `bgrat` of TOMS 708 (R's `pbeta`). `None` when it cannot be
 /// evaluated (underflow) or does not converge in 30 terms.
 fn bgrat(a: f64, b: f64, x: f64, y: f64) -> Option<f64> {
     let bm1 = b - 1.0;
@@ -489,7 +489,7 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64) -> Option<f64> {
     if b * z == 0.0 {
         return None;
     }
-    // r = e^{−z}·z^b/Γ(b); u = r·Γ(a+b)/(Γ(a)·ν^b), with ln(Γ(a)/Γ(a+b)) by Stirling.
+    // r = e^{-z}*z^b/Gamma(b); u = r*Gamma(a+b)/(Gamma(a)*nu^b), with ln(Gamma(a)/Gamma(a+b)) by Stirling.
     let log_r = -ln_gamma(b) + b * z.ln() - z;
     let ln_ga_gab = -b * a.ln() - (a + b - 0.5) * (b / a).ln_1p() + b + stirling_corr(a) - stirling_corr(a + b);
     let log_u = log_r - (ln_ga_gab + b * nu.ln());

@@ -1,13 +1,14 @@
 //! Regressions on one residualized row block. Every regressor, target and residual of a linear
 //! model (OLS, both IV stages, the auxiliary F, Wu-Hausman and Sargan regressions) is a linear
 //! combination ("combo", one coefficient per block column) of the R columns of the block, so all
-//! of them come from the block's weighted Gram matrix G = Σ w·r r' and one further pass over the
+//! of them come from the block's weighted Gram matrix G = sum w*r r' and one further pass over the
 //! rows evaluates every residual sum of squares at once.
 
 use rayon::prelude::*;
 
 use crate::error::RfError;
 use crate::par::{self, CHUNK, Pool};
+use crate::vcov::chol_collin;
 
 /// Column `c` of an R-column block as a combo.
 pub(crate) fn unit(r: usize, c: usize) -> Vec<f64> {
@@ -16,7 +17,7 @@ pub(crate) fn unit(r: usize, c: usize) -> Vec<f64> {
     v
 }
 
-/// a'·G·b for combos a, b over the R×R Gram G.
+/// a'*G*b for combos a, b over the R x R Gram G.
 pub(crate) fn cross(g: &[f64], r: usize, a: &[f64], b: &[f64]) -> f64 {
     let mut s = 0.0;
     for (i, &ai) in a.iter().enumerate().filter(|(_, v)| **v != 0.0) {
@@ -26,62 +27,7 @@ pub(crate) fn cross(g: &[f64], r: usize, a: &[f64], b: &[f64]) -> f64 {
     s
 }
 
-/// fixest `cpp_cholesky(XtX, tol)` (lm_related.cpp): Cholesky in column order where column j is
-/// excluded when its pivot X_jj − Σ_{kept i<j} R_ij² is below `tol` (absolute, unscaled).
-/// Returns the exclusion flags and the inverse of the kept block (kept order, row-major).
-pub(crate) fn chol_collin(a: &[f64], k: usize, tol: f64) -> (Vec<bool>, Vec<f64>) {
-    let mut r = vec![0.0; k * k];
-    let mut excluded = vec![false; k];
-    for j in 0..k {
-        let mut rjj = a[j * k + j];
-        for i in (0..j).filter(|&i| !excluded[i]) {
-            rjj -= r[i * k + j] * r[i * k + j];
-        }
-        if !(rjj >= tol) {
-            excluded[j] = true;
-            continue;
-        }
-        let d = rjj.sqrt();
-        r[j * k + j] = d;
-        for c in j + 1..k {
-            let mut v = a[c * k + j];
-            for i in (0..j).filter(|&i| !excluded[i]) {
-                v -= r[i * k + c] * r[i * k + j];
-            }
-            r[j * k + c] = v / d;
-        }
-    }
-    let kept: Vec<usize> = (0..k).filter(|&j| !excluded[j]).collect();
-    (excluded, inverse_from_chol(&r, k, &kept))
-}
-
-/// (RᵀR)⁻¹ = R⁻¹R⁻ᵀ over the `kept` rows/columns of the upper-triangular `r` (k×k).
-fn inverse_from_chol(r: &[f64], k: usize, kept: &[usize]) -> Vec<f64> {
-    let m = kept.len();
-    // R⁻¹ (upper triangular, m×m) by back substitution, column by column.
-    let mut ri = vec![0.0; m * m];
-    for c in 0..m {
-        ri[c * m + c] = 1.0 / r[kept[c] * k + kept[c]];
-        for row in (0..c).rev() {
-            let mut s = 0.0;
-            for l in row + 1..=c {
-                s += r[kept[row] * k + kept[l]] * ri[l * m + c];
-            }
-            ri[row * m + c] = -s / r[kept[row] * k + kept[row]];
-        }
-    }
-    let mut inv = vec![0.0; m * m];
-    for i in 0..m {
-        for j in i..m {
-            let s: f64 = (j..m).map(|l| ri[i * m + l] * ri[j * m + l]).sum();
-            inv[i * m + j] = s;
-            inv[j * m + i] = s;
-        }
-    }
-    inv
-}
-
-/// Moore-Penrose inverse of a symmetric k×k matrix (numpy `pinv`: eigenvalues below 1e-15 × the
+/// Moore-Penrose inverse of a symmetric k x k matrix (numpy `pinv`: eigenvalues below 1e-15 x the
 /// largest magnitude count as zero).
 pub(crate) fn pinv_sym(a: &[f64], k: usize) -> Vec<f64> {
     let (lambda, u) = crate::vcov::sym_eigen(a, k);
@@ -104,11 +50,11 @@ pub(crate) struct Reg {
     pub excluded: Vec<bool>,
     /// Indices of the kept design columns.
     pub kept: Vec<usize>,
-    /// (D'WD)⁻¹ over the kept columns (kept order, row-major).
+    /// (D'WD)^-1 over the kept columns (kept order, row-major).
     pub inv: Vec<f64>,
     /// Coefficients of the kept columns.
     pub coef: Vec<f64>,
-    /// Residual combo: target − Σ coef·design.
+    /// Residual combo: target - sum coef*design.
     pub resid: Vec<f64>,
 }
 
@@ -147,7 +93,7 @@ pub(crate) fn sparse(a: &[f64]) -> Vec<(usize, f64)> {
     a.iter().enumerate().filter(|(_, v)| **v != 0.0).map(|(j, &v)| (j, v)).collect()
 }
 
-/// row·a for a sparse combo.
+/// row*a for a sparse combo.
 #[inline]
 pub(crate) fn eval(row: &[f64], a: &[(usize, f64)]) -> f64 {
     a.iter().map(|&(j, v)| v * row[j]).sum()
@@ -155,11 +101,11 @@ pub(crate) fn eval(row: &[f64], a: &[(usize, f64)]) -> f64 {
 
 /// Sums of one residual pass.
 pub(crate) struct PassSums {
-    /// Σ w·v² per combo.
+    /// sum w*v^2 per combo.
     pub wss: Vec<f64>,
-    /// Σ v² per combo (unweighted).
+    /// sum v^2 per combo (unweighted).
     pub uss: Vec<f64>,
-    /// Σ (v − v̄)² (unweighted) of the `centered` combo.
+    /// sum (v - vbar)^2 (unweighted) of the `centered` combo.
     pub centered: f64,
 }
 
@@ -210,7 +156,7 @@ fn chunk_part(rows: &[f64], r: usize, row0: usize, w: Option<&[f64]>, combos: &[
     p
 }
 
-/// One pass over the row block (row order): Σw·v² and Σv² for every combo v, the centered
+/// One pass over the row block (row order): sum w*v^2 and sum v^2 for every combo v, the centered
 /// unweighted sum of squares of combo `centered`, and the values of the `store` combos (combo
 /// index, output buffer of n entries) written in kept order (row k goes to `row_order[k]`).
 /// Fixed chunks, combined in chunk order.

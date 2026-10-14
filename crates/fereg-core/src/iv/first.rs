@@ -15,7 +15,7 @@ pub(crate) struct FirstEq {
 }
 
 pub(crate) struct FirstStage {
-    /// 21×K1, rows rmse sheapr2 pr2 F df df_r pvalue SWF SWFdf1 SWFdf2 SWFp SWchi2 SWchi2p SWr2
+    /// 21xK1, rows rmse sheapr2 pr2 F df df_r pvalue SWF SWFdf1 SWFdf2 SWFp SWchi2 SWchi2p SWr2
     /// APF APFdf1 APFdf2 APFp APchi2 APchi2p APr2.
     pub firstmat: M,
     pub arf: f64,
@@ -27,7 +27,7 @@ pub(crate) struct FirstStage {
     pub eqs: Vec<FirstEq>,
 }
 
-/// Wald statistic Rb'·RVR⁻¹·Rb (Mata `cholsolve`).
+/// Wald statistic Rb'*RVR^-1*Rb (Mata `cholsolve`).
 fn wald(rb: &[f64], rvr: &M) -> f64 {
     dense::spd_inv(rvr).quad(rb)
 }
@@ -45,12 +45,12 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     let robust = m.mode != Mode::Iid;
     let nl = n - l as f64 - m.sdof;
     let (fdf_r, scale_f) = match m.mode {
-        // F = Wald/N·df_r/df, or Wald/(N−1)·(N−L−sdof)·(G−1)/G/df when clustered.
+        // F = Wald/N*df_r/df, or Wald/(N-1)*(N-L-sdof)*(G-1)/G/df when clustered.
         Mode::Cluster { g } => (g - 1.0, (nl) * (g - 1.0) / g / (n - 1.0)),
         _ => (nl, nl / n),
     };
 
-    // Reduced form (col 0) and first stages: bz = (Z'Z)⁻¹Z'[y, X1].
+    // Reduced form (col 0) and first stages: bz = (Z'Z)^-1 Z'[y, X1].
     let zz = g.pick(&zcols, &zcols);
     let zzinv = dense::spd_inv(&zz);
     let zyall = g.pick(&zcols, &ycols);
@@ -66,7 +66,7 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     let ee = passes.cross(&call);
     let sigmasqall = ee.scale(1.0 / n);
     let rmseall: Vec<f64> = ee.diag().iter().map(|v| (v / nl).sqrt()).collect();
-    // Vr: (I ⊗ (Z'Z)⁻¹)·S·(I ⊗ (Z'Z)⁻¹), S the (robust) meat of eall ⊗ z; iid: (ee/N) ⊗ (Z'Z)⁻¹.
+    // Vr: (I (x) (Z'Z)^-1)*S*(I (x) (Z'Z)^-1), S the (robust) meat of eall (x) z; iid: (ee/N) (x) (Z'Z)^-1.
     let vr = if robust {
         let s = passes.meat(&call, &sz)?;
         let kz = M::eye(m1).kron(&zzinv);
@@ -78,7 +78,7 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     };
     let vblock = |eq: usize, len: usize| vr.block(eq * l, eq * l + len, eq * l, eq * l + len);
 
-    // Anderson–Rubin test from the reduced form.
+    // Anderson-Rubin test from the reduced form.
     let rb: Vec<f64> = (0..l1).map(|a| bz.at(a, 0)).collect();
     let archi2 = wald(&rb, &vblock(0, l1));
     let ardf = l1 as f64;
@@ -87,7 +87,7 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
         _ => (nl, archi2 / n * nl / ardf),
     };
 
-    // Stock–Wright S: J of the model with zero endog coefficients, exog partialled out.
+    // Stock-Wright S: J of the model with zero endog coefficients, exog partialled out.
     let cs = if k2 > 0 {
         let x2x2 = g.pick(m.ex, m.ex);
         let by = dense::spd_solve(&x2x2, &g.pick(m.ex, &[0]));
@@ -123,9 +123,9 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
             let chi2p = super::dist::chi2tail(df, wd);
             [rmseall[i + 1], shea(i), pr2, f, df, fdf_r, pvalue, f, df, fdf_r, pvalue, wd, chi2p, pr2, f, df, fdf_r, pvalue, wd, chi2p, pr2]
         } else {
-            // Angrist–Pischke and Sanderson–Windmeijer conditional statistics.
+            // Angrist-Pischke and Sanderson-Windmeijer conditional statistics.
             let sel: Vec<usize> = (0..k).filter(|&a| a != i).collect();
-            // Fitted X: Xhat = Z·Bx with Bx = [bz endog columns, selectors of the exog in Z].
+            // Fitted X: Xhat = Z*Bx with Bx = [bz endog columns, selectors of the exog in Z].
             let bx = M::from_fn(l, k, |a, c| if c < k1 { bz.at(a, c + 1) } else { f64::from(u8::from(a == l1 + c - k1)) });
             let zx1i: Vec<f64> = (0..l).map(|a| zyall.at(a, i + 1)).collect();
             let qxhxh = bx.t().mul(&zz).mul(&bx);

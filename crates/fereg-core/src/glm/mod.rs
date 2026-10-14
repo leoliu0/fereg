@@ -5,8 +5,8 @@
 //! 1. y (Poisson, when the absorbed space holds the constant) and X are divided by their
 //!    unweighted sample sd (reghdfe `reghdfe_standardize`, floored at 1e-3); results are scaled
 //!    back at the end.
-//! 2. Regressors collinear with the fixed effects (Σx̃² / Σx² ≤ min(1e-6, itol/10)) or with each
-//!    other (sweep of X̃'WX̃ with the true weights) are dropped (ppmlhdfe `remove_collinears`).
+//! 2. Regressors collinear with the fixed effects (sum x~^2 / sum x^2 <= min(1e-6, itol/10)) or with each
+//!    other (sweep of X~'WX~ with the true weights) are dropped (ppmlhdfe `remove_collinears`).
 //! 3. Poisson `relu` separation (`simplex` is an alias), in rounds ([`Session::glm_separate`]):
 //!    the `fe` rule when prepare did not apply it, then the ReLU check; drop, re-run singletons
 //!    (and the `fe` rule when prepare applied it, [`Session::drop_obs`]), remap the rows, re-run
@@ -14,10 +14,10 @@
 //!    check cannot certify its result, the `mu` rule runs in step 4 as a fallback and the fit
 //!    reports `separation_complete` = 0 with a note.
 //! 4. IRLS ([`irls::irls`]); with the `mu` rule, separated observations are dropped as in 3 and
-//!    IRLS is re-run from the current μ.
+//!    IRLS is re-run from the current mu.
 //! 5. Final VCE on the last IRLS weights (reghdfe5 `reghdfe_solve_ols(..., "vce_asymptotic")`):
-//!    w_v = w·N/Σw; robust multiplier (e·w_v)² (÷ fw with fweights) and factor N/(N−1);
-//!    cluster scores e·w_v and factor G/(G−1); multiway PSD fix on the whole matrix. Logit `oim`
+//!    w_v = w*N/sum w; robust multiplier (e*w_v)^2 (/ fw with fweights) and factor N/(N-1);
+//!    cluster scores e*w_v and factor G/(G-1); multiway PSD fix on the whole matrix. Logit `oim`
 //!    is the inverse Hessian. `_cons` is the regression-through-the-means constant.
 
 pub mod family;
@@ -28,7 +28,12 @@ pub(crate) mod wls;
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
-use crate::api::{Ctx, EstResult, Family, GlmConvention, GlmOptions, GlmParts, Guess, Layout, NamedMat, SeparationCheck, Spec, Vce, WeightKind};
+use crate::api::{
+    Ctx, EstResult, Family, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, NamedMat, Psd, SeparationCheck, Spec, Vce, WeightKind,
+};
+use crate::crv3::{JkModel, JkProblem};
+use crate::leverage::FeCols;
+use crate::ols::stata_vce;
 use crate::dof;
 use crate::error::RfError;
 use crate::fe_recovery;
@@ -49,7 +54,7 @@ pub(crate) struct GlmData {
     pub y: Vec<f64>,
     /// Number of regressors still in the model.
     pub k: usize,
-    /// n×k row-major, each column divided by its sd.
+    /// n x k row-major, each column divided by its sd.
     pub x: Vec<f64>,
     /// Original regressor index (0-based) of each column of `x`.
     pub cols: Vec<usize>,
@@ -103,6 +108,26 @@ fn col_sumsq(x: &[f64], k: usize, pool: &Pool) -> Vec<f64> {
     })
 }
 
+/// Keeps the columns `keep` (ascending) of the regressors of `d`.
+fn keep_columns(d: &mut GlmData, keep: &[usize], pool: &Pool) -> Result<(), RfError> {
+    let (n, k, kk) = (d.n, d.k, keep.len());
+    let mut x = par::alloc_vec(n * kk, 0.0)?;
+    if kk > 0 {
+        pool.install(|| {
+            x.par_chunks_mut(kk).enumerate().for_each(|(i, row)| {
+                for (o, &j) in row.iter_mut().zip(keep) {
+                    *o = d.x[i * k + j];
+                }
+            })
+        });
+    }
+    d.x = x;
+    d.cols = keep.iter().map(|&j| d.cols[j]).collect();
+    d.sd_x = keep.iter().map(|&j| d.sd_x[j]).collect();
+    d.k = kk;
+    Ok(())
+}
+
 fn plural(n: usize) -> &'static str {
     if n > 1 { "s" } else { "" }
 }
@@ -131,7 +156,7 @@ fn validate(se: &Session, rows: &[f64], lay: &Layout, offset: Option<&[f64]>, s:
         return Err(RfError::InvalidInput("glm: layout has endogenous variables or instruments".into()));
     }
     if rows.len() != se.n() * lay.ncols() {
-        return Err(RfError::InvalidInput("glm: data block size differs from N·R".into()));
+        return Err(RfError::InvalidInput("glm: data block size differs from N*R".into()));
     }
     if offset.is_some_and(|o| o.len() != se.n()) {
         return Err(RfError::InvalidInput("glm: offset length differs from N".into()));
@@ -155,7 +180,7 @@ fn validate(se: &Session, rows: &[f64], lay: &Layout, offset: Option<&[f64]>, s:
 }
 
 impl Session {
-    /// GLM on `rows` (N×R row-major in [`Session::row_order`], layout `[y, x...]`); `offset` in row
+    /// GLM on `rows` (N x R row-major in [`Session::row_order`], layout `[y, x...]`); `offset` in row
     /// order. Observations dropped by separation are removed from the session (see
     /// [`Session::keep`]); per-observation outputs refer to the final kept sample. ppmlhdfe /
     /// Stata `logit` conventions ([`GlmConvention::Ppmlhdfe`]).
@@ -243,7 +268,7 @@ impl Session {
         if k == 0 {
             return Ok(());
         }
-        self.absorber.set_weights(d.tw.clone(), pool, ctx)?;
+        self.absorber.set_weights(d.tw.as_deref(), pool, ctx)?;
         let mut xt = d.x.clone();
         let opts = SolveOpts { tol: itol, maxiter: inner_maxiter, want_coefs: false };
         self.absorber.residualize(&mut xt, k, &opts, None, pool, ctx)?;
@@ -271,22 +296,7 @@ impl Session {
             }
         }
         if keep.len() < k {
-            let n = d.n;
-            let mut x = par::alloc_vec(n * keep.len(), 0.0)?;
-            let kk = keep.len();
-            if kk > 0 {
-                pool.install(|| {
-                    x.par_chunks_mut(kk).enumerate().for_each(|(i, row)| {
-                        for (o, &j) in row.iter_mut().zip(&keep) {
-                            *o = d.x[i * k + j];
-                        }
-                    })
-                });
-            }
-            d.x = x;
-            d.cols = keep.iter().map(|&j| d.cols[j]).collect();
-            d.sd_x = keep.iter().map(|&j| d.sd_x[j]).collect();
-            d.k = kk;
+            keep_columns(d, &keep, pool)?;
         }
         Ok(())
     }
@@ -410,7 +420,7 @@ impl Session {
         Ok(rep)
     }
 
-    /// Splits [y, x…] (row order), validates and standardizes them (y for Poisson, x always),
+    /// Splits [y, x...] (row order), validates and standardizes them (y for Poisson, x always),
     /// and drops regressors collinear with the fixed effects or each other. Returns the working
     /// data, the status per regressor sent, and sd_y.
     #[allow(clippy::too_many_arguments)]
@@ -428,7 +438,7 @@ impl Session {
         let n0 = self.n();
         let r0 = 1 + nx;
 
-        // Split [y, x…] and standardize.
+        // Split [y, x...] and standardize.
         let mut y: Vec<f64> = rows.iter().step_by(r0).copied().collect();
         let mut x = par::alloc_vec(n0 * nx, 0.0)?;
         if nx > 0 {
@@ -446,7 +456,7 @@ impl Session {
             }
             _ => y.iter_mut().for_each(|v| *v = f64::from(u8::from(*v != 0.0))),
         }
-        // Dividing y by sd_y shifts η by −ln sd_y, which only a free constant absorbs: without
+        // Dividing y by sd_y shifts eta by -ln sd_y, which only a free constant absorbs: without
         // one in the absorbed space (slope-only terms) y keeps its scale.
         let sd_y = if fam == Family::Poisson && self.has_intercept() { standardize_sd(y.iter().copied()) } else { 1.0 };
         if sd_y != 1.0 {
@@ -469,7 +479,11 @@ impl Session {
         let tw = self.weights.as_deref().map(|w| vcov::to_row_order(w, self.row_order(), pool)).transpose()?;
         let mut d = GlmData { family: fam, n: n0, y, k: nx, x, cols: (0..nx).collect(), sd_x, off: offset, tw };
         let mut status = vec![STATUS_OK; nx];
-        self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+        // fixest / pyfixest rules: collinearity is decided in the first IRLS iteration, unless the
+        // ReLU separation check (pyfixest `ir`) runs first, on full-rank columns.
+        if g.collinear == GlmCollinear::Ppmlhdfe || g.separation.relu {
+            self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+        }
         ctx.check()?;
         Ok((d, status, sd_y))
     }
@@ -502,8 +516,8 @@ impl Session {
             num_sep += rounds.tagged.len() as u64;
         }
 
-        // Initial values of μ: fixest's `family$initialize` in fixest mode (Poisson y + 0.1, on
-        // the standardized scale; binomial (w·y + 1/2)/(w + 1) with the prior weights), else
+        // Initial values of mu: fixest's `family$initialize` in fixest mode (Poisson y + 0.1, on
+        // the standardized scale; binomial (w*y + 1/2)/(w + 1) with the prior weights), else
         // ppmlhdfe `guess()` and, for logit, (y + 1/2)/2.
         let fixest = conv == GlmConvention::Fixest;
         let mut mu: Vec<f64> = match (fam, g.guess) {
@@ -533,6 +547,7 @@ impl Session {
             sd_y,
             check_sep: g.separation.mu || !sep_complete,
             fixest,
+            collinear: g.collinear,
         };
         let mut eta = vec![0.0; d.n];
         let mut out: IrlsOut = irls::irls(self.absorber.as_mut(), &d, &mut mu, &mut eta, &cfg, pool, ctx)?;
@@ -543,10 +558,20 @@ impl Session {
             ctx.log(&format!("{{txt}}(IRLS step detected {n_sep} separated observation{})", plural(n_sep)));
             num_sep += n_sep as u64;
             let sep = std::mem::take(&mut out.separated);
+            let excluded = std::mem::take(&mut out.excluded);
             cfg.start_tol = out.tol_in;
             drop(out);
             self.glm_drop(&mut d, &sep, &mut [&mut mu, &mut eta], pool, ctx)?;
-            self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+            if g.collinear == GlmCollinear::Ppmlhdfe {
+                self.glm_collinear(&mut d, &mut status, g.itol, inner_maxiter, pool, ctx)?;
+            } else if excluded.iter().any(|e| *e) {
+                // The columns the first run excluded stay out; the re-run decides on the others.
+                for (j, _) in excluded.iter().enumerate().filter(|(_, e)| **e) {
+                    status[d.cols[j]] = STATUS_COLLINEAR;
+                }
+                let keep: Vec<usize> = (0..d.k).filter(|&j| !excluded[j]).collect();
+                keep_columns(&mut d, &keep, pool)?;
+            }
             cfg.check_sep = false;
             cfg.exact = map_exact(&self.terms);
             out = irls::irls(self.absorber.as_mut(), &d, &mut mu, &mut eta, &cfg, pool, ctx)?;
@@ -560,16 +585,16 @@ impl Session {
         ctx.log(&format!("{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})", fmt_e(g.tol, 1)));
         ctx.check()?;
         let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts };
-        self.glm_finish(&fin, status, s, g, pool)
+        self.glm_finish(&fin, status, s, g, pool, ctx)
     }
 
-    /// ppmlhdfe `guess(ols)`: OLS of ln(y + ȳ/100) on X and the fixed effects (true weights,
-    /// tolerance max(1e-4, tol)); μ = exp(ln(y + 1) − residual).
+    /// ppmlhdfe `guess(ols)`: OLS of ln(y + ybar/100) on X and the fixed effects (true weights,
+    /// tolerance max(1e-4, tol)); mu = exp(ln(y + 1) - residual).
     fn glm_ols_guess(&mut self, d: &GlmData, g: &GlmOptions, inner_maxiter: usize, pool: &Pool, ctx: &Ctx) -> Result<Vec<f64>, RfError> {
         let (n, k) = (d.n, d.k);
         let r = 1 + k;
         let ybar = wmean(&d.y, d.tw.as_deref(), pool);
-        self.absorber.set_weights(d.tw.clone(), pool, ctx)?;
+        self.absorber.set_weights(d.tw.as_deref(), pool, ctx)?;
         let mut block = par::alloc_vec(n * r, 0.0)?;
         pool.install(|| {
             block.par_chunks_mut(r).enumerate().for_each(|(i, row)| {
@@ -590,7 +615,7 @@ impl Session {
             .collect())
     }
 
-    /// Final β, VCE, statistics and outputs (ppmlhdfe `GLM::solve` after IRLS).
+    /// Final beta, VCE, statistics and outputs (ppmlhdfe `GLM::solve` after IRLS).
     fn glm_finish(
         &mut self,
         f: &Finish,
@@ -598,6 +623,7 @@ impl Session {
         s: &Spec,
         g: &GlmOptions,
         pool: &Pool,
+        ctx: &Ctx,
     ) -> Result<(EstResult, Option<GlmParts>), RfError> {
         let Finish { d, out, mu, eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts } = *f;
         let fam = d.family;
@@ -615,13 +641,20 @@ impl Session {
         let wv: Vec<f64> = w.iter().map(|v| v * cw).collect();
         let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true);
 
-        // reghdfe_rmcoll on the final weighted Gram (normally drops nothing).
+        // reghdfe_rmcoll on the final weighted Gram (normally drops nothing); the columns the
+        // fixest / pyfixest rule excluded during IRLS are out of it.
         let gfull = stats::gram(block, r, Some(&wv), pool).0;
-        let gxx: Vec<f64> = (0..k * k).map(|ab| gfull[(1 + ab / k) * r + 1 + ab % k]).collect();
+        let mut gxx: Vec<f64> = (0..k * k).map(|ab| gfull[(1 + ab / k) * r + 1 + ab % k]).collect();
+        for j in (0..k).filter(|&j| out.excluded[j]) {
+            for l in 0..k {
+                gxx[j * k + l] = 0.0;
+                gxx[l * k + j] = 0.0;
+            }
+        }
         let (inv_xx, dropped) = vcov::invsym(&gxx, k, INVSYM_TOL);
         let mut beta = out.beta.clone();
         let mut resid_owned: Option<Vec<f64>> = None;
-        if dropped.iter().any(|v| *v) {
+        if dropped.iter().zip(&out.excluded).any(|(&dr, &ex)| dr && !ex) {
             let kept_cols: Vec<usize> = (0..k).filter(|&j| !dropped[j]).map(|j| j + 1).collect();
             let bk = wls::qr_coefs(block, r, 0, &kept_cols, Some(w), pool);
             beta = vec![0.0; k];
@@ -636,11 +669,9 @@ impl Session {
                     })
                     .collect(),
             );
-            for j in 0..k {
-                if dropped[j] {
-                    status[d.cols[j]] = STATUS_COLLINEAR;
-                }
-            }
+        }
+        for j in (0..k).filter(|&j| dropped[j]) {
+            status[d.cols[j]] = STATUS_COLLINEAR;
         }
         let e: &[f64] = resid_owned.as_deref().unwrap_or(&out.resid);
         let rank = (0..k).filter(|&j| !dropped[j]).count();
@@ -660,7 +691,7 @@ impl Session {
             acc.iter().map(|a| a / sumw).collect()
         };
         let lin_mean = match fam {
-            // ppmlhdfe: mean(log(mu)) − mean(offset).
+            // ppmlhdfe: mean(log(mu)) - mean(offset).
             Family::Poisson => {
                 let lm: Vec<f64> = mu.iter().map(|m| m.ln()).collect();
                 wmean(&lm, Some(w), pool) - d.off.as_deref().map_or(0.0, |o| wmean(o, Some(w), pool))
@@ -705,6 +736,15 @@ impl Session {
         }
         let mut df_r = big_n - dof.df_a as f64 - df_m;
         let mut n_clust: Option<(f64, Vec<f64>)> = None;
+        let row_order = self.absorber.row_order();
+        let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
+        let cluster_list = || self.clusters.iter().map(|c| c.g as f64).collect::<Vec<f64>>();
+        let mut extra: Vec<(&str, f64)> = Vec::new();
+        let mut macros: Vec<(String, String)> = Vec::new();
+        let score = |i: usize, a: &mut [f64]| {
+            fill_row(i, a);
+            e[i] * wv[i]
+        };
         let mut v_s = match &vce {
             Vce::Unadjusted => bread.iter().map(|v| v * cw).collect::<Vec<f64>>(),
             Vce::Robust => {
@@ -717,20 +757,142 @@ impl Session {
             }
             Vce::Cluster(_) => {
                 let dims: Vec<ClusterCodes> = self.clusters.iter().map(|c| ClusterCodes { codes: &c.codes, g: c.g }).collect();
-                let meat = vcov::multiway_meat(&dims, self.absorber.row_order(), msize, pool, |i, a| {
-                    fill_row(i, a);
-                    e[i] * wv[i]
-                })?;
-                let g_min = self.clusters.iter().map(|c| c.g).min().unwrap_or(0) as f64;
+                let meat = vcov::multiway_meat(&dims, row_order, msize, pool, score)?;
                 let mut v = vcov::sandwich(&bread, &meat, msize, g_min / (g_min - 1.0));
                 if self.clusters.len() > 1 && vcov::fix_psd(&mut v, msize, false) {
                     notes.push("Warning: VCV matrix was non-positive semi-definite; adjustment from Cameron, Gelbach & Miller applied.".to_string());
                 }
-                df_r = df_r.min(g_min - 1.0);
-                n_clust = Some((g_min, self.clusters.iter().map(|c| c.g as f64).collect()));
                 v
             }
+            Vce::Hc2 | Vce::Hc3 => {
+                // IRLS leverage of the full design; Stata regress eq. (10)/(12), no factor.
+                let hc3 = vce == Vce::Hc3;
+                let w_kept = fe_recovery::to_kept_order(w, row_order, pool)?;
+                let h_fe = stata_vce::fe_leverage(&self.terms, self.has_intercept(), Some(&w_kept), n, ctx, pool)?;
+                let h_fe = vcov::to_row_order(&h_fe, row_order, pool)?;
+                let meat = vcov::robust_meat(n, msize, pool, |i, a| {
+                    let row = &block[i * r..(i + 1) * r];
+                    let q: f64 = (0..k).map(|p| row[1 + p] * (0..k).map(|c| inv_xx[p * k + c] * row[1 + c]).sum::<f64>()).sum();
+                    fill_row(i, a);
+                    let tau = if fw { tw.map_or(1.0, |t| t[i]) } else { 1.0 };
+                    stata_vce::hc_mult(hc3, e[i] * wv[i], tau, h_fe[i] + wv[i] * q)
+                });
+                vcov::sandwich(&bread, &meat, msize, 1.0)
+            }
+            Vce::Crv3(_) => {
+                let kept: Vec<usize> = (0..k).filter(|&j| !dropped[j]).collect();
+                let kc = |v: &[f64]| fe_recovery::to_kept_order(v, row_order, pool);
+                let y = kc(&d.y)?;
+                let xs: Vec<Vec<f64>> = kept.iter().map(|&j| kc(&(0..n).map(|i| d.x[i * k + j]).collect::<Vec<_>>())).collect::<Result<_, _>>()?;
+                let xr: Vec<&[f64]> = xs.iter().map(Vec::as_slice).collect();
+                let off = d.off.as_deref().map(kc).transpose()?;
+                let twk = tw.map(kc).transpose()?;
+                let wk = kc(w)?;
+                // Working response z = eta - offset + e: its IRLS-weighted mean minus xbar'b is the
+                // reported constant.
+                let zr: Vec<f64> = (0..n).map(|i| eta[i] - d.off.as_deref().map_or(0.0, |o| o[i]) + e[i]).collect();
+                let zk = kc(&zr)?;
+                let fe: Vec<FeCols> =
+                    self.terms.iter().map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() }).collect();
+                let icpt = self.terms.is_empty();
+                let bk: Vec<f64> = kept.iter().map(|&j| beta[j]).collect();
+                let jk_beta: Vec<f64> = icpt.then_some(b0_s).into_iter().chain(bk.iter().copied()).collect();
+                let p = JkProblem {
+                    model: if fam == Family::Poisson { JkModel::Poisson } else { JkModel::Logit },
+                    n,
+                    y: &y,
+                    x: xr.clone(),
+                    endog: Vec::new(),
+                    inst: Vec::new(),
+                    intercept: icpt,
+                    weights: twk.as_deref(),
+                    offset: off.as_deref(),
+                    fe,
+                    beta: &jk_beta,
+                    fixef_tol: g.itol.min(1e-10),
+                    fixef_maxiter: s.maxiter,
+                    glm_tol: g.tol.min(1e-10),
+                    glm_maxiter: g.maxiter,
+                    collin_tol: crate::fit::FitSpec::default().collin_tol,
+                };
+                let kk = kept.len();
+                let target: Vec<f64> = bk.iter().copied().chain(std::iter::once(b0_s)).collect();
+                let augment = |codes: &[u32], gc: usize, betas: Vec<f64>| -> Vec<f64> {
+                    if icpt {
+                        betas.chunks_exact(kk + 1).flat_map(|b| b[1..].iter().copied().chain(std::iter::once(b[0]))).collect()
+                    } else {
+                        stata_vce::add_constant(codes, gc, betas, Some(&wk), &zk, &xr)
+                    }
+                };
+                let meat = stata_vce::crv3_meat(&p, &self.clusters, &target, &augment, ctx, pool)?;
+                let pos: Vec<usize> = kept.iter().copied().chain(std::iter::once(k)).collect();
+                let q = g_min / (g_min - 1.0);
+                let mut v = vec![0.0; msize * msize];
+                for (a, &pa) in pos.iter().enumerate() {
+                    for (b, &pb) in pos.iter().enumerate() {
+                        v[pa * msize + pb] = q * meat[a * (kk + 1) + b];
+                    }
+                }
+                if self.clusters.len() > 1 && vcov::fix_psd(&mut v, msize, false) {
+                    notes.push("Warning: VCV matrix was non-positive semi-definite; adjustment from Cameron, Gelbach & Miller applied.".to_string());
+                }
+                v
+            }
+            Vce::Dkraay { bw, .. } => {
+                // reghdfe's formula with ppmlhdfe's asymptotic factor T/(T-1).
+                let (meat, bw_used, dk_notes) = stata_vce::dkraay_reghdfe(&self.clusters[0], *bw, row_order, msize, pool, score)?;
+                notes.extend(dk_notes);
+                let mut v = vcov::sandwich(&bread, &meat, msize, g_min / (g_min - 1.0));
+                vcov::fix_psd(&mut v, msize, false);
+                extra.push(("dkraay_bw", bw_used as f64));
+                v
+            }
+            Vce::Kernel(kv) => {
+                let mut plan = stata_vce::KernelPlan::new(kv, &self.vdata, self.weight_kind, row_order, pool)?;
+                if plan.auto_pending {
+                    let f: Vec<f64> = (0..n).map(|i| e[i] * block[i * r + 1..(i + 1) * r].iter().sum::<f64>()).collect();
+                    plan.resolve_auto(&f, big_n, pool);
+                }
+                // ivreg2's meat with Z = X~ on b_i = (x~_i, 1); psd0/psda on the x~ block.
+                let mut meat = plan.meat(1, msize, big_n, false, pool, |i, bz| {
+                    bz[0] = e[i];
+                    bz[1..=k].copy_from_slice(&block[i * r + 1..(i + 1) * r]);
+                    bz[1 + k] = 1.0;
+                    wv[i]
+                })?;
+                if plan.psd != Psd::None {
+                    let mut sx: Vec<f64> = (0..k * k).map(|ab| meat[(ab / k) * msize + ab % k]).collect();
+                    stata_vce::apply_psd(&mut sx, k, plan.psd);
+                    for ab in 0..k * k {
+                        meat[(ab / k) * msize + ab % k] = sx[ab];
+                    }
+                }
+                let meat = ols::shift_constant(&meat, msize, &xbar);
+                let adj = match plan.n_clust() {
+                    Some(gc) => gc / (gc - 1.0),
+                    None => big_n / (big_n - 1.0),
+                };
+                if plan.n_clust().is_some() {
+                    df_r = df_r.min(g_min - 1.0);
+                    n_clust = Some((g_min, cluster_list()));
+                }
+                extra.push(("bw", plan.bw));
+                extra.push(("hac_T", plan.span));
+                macros.push(("kernel".into(), plan.kernel.name().into()));
+                macros.push(("bwchoice".into(), plan.bwchoice.clone()));
+                notes.append(&mut plan.notes);
+                vcov::sandwich(&bread, &meat, msize, adj)
+            }
+            Vce::Conley(cv) => {
+                let (meat, cutoff) = stata_vce::conley_meat(cv, &self.vdata, row_order, msize, pool, score)?;
+                extra.push(("cutoff", cutoff));
+                vcov::sandwich(&bread, &meat, msize, big_n / (big_n - 1.0))
+            }
         };
+        if matches!(vce, Vce::Cluster(_) | Vce::Crv3(_) | Vce::Dkraay { .. }) {
+            df_r = df_r.min(g_min - 1.0);
+            n_clust = Some((g_min, cluster_list()));
+        }
 
         // Wald test on the non-constant coefficients.
         let kept_idx: Vec<usize> = (0..k).filter(|&j| !dropped[j]).collect();
@@ -857,6 +1019,10 @@ impl Session {
                 scal(&mut res, &format!("N_clust{}", i + 1), *v);
             }
         }
+        for (name, v) in extra {
+            scal(&mut res, name, v);
+        }
+        res.macros.extend(macros);
         scal(&mut res, "df_a", dof.df_a as f64);
         scal(&mut res, "df_a_initial", dof.df_a_initial as f64);
         scal(&mut res, "df_a_redundant", dof.df_a_redundant as f64);
@@ -866,7 +1032,7 @@ impl Session {
         res.matrices.push(NamedMat { name: "V".into(), rows: k_all, cols: k_all, data: v_out });
         res.matrices.push(NamedMat { name: "dof_table".into(), rows: dof.slots.len(), cols: 5, data: dof.table() });
 
-        // d = Σ FE (weighted mean 0 under the final IRLS weights) and saved FEs.
+        // d = sum FE (weighted mean 0 under the final IRLS weights) and saved FEs.
         let want_coefs = s.want_d || (s.want_fe && self.terms.iter().any(|t| t.save));
         if want_coefs {
             let coefs = out.coefs.as_ref().ok_or_else(|| RfError::Internal("absorber returned no FE coefficients".into()))?;
@@ -912,8 +1078,8 @@ impl Session {
         let (n, k) = (d.n, d.k);
         let r = 1 + k;
         let order = self.absorber.row_order();
-        // y was divided by sd_y (Poisson): μ, the IRLS weights and the deviance scale by sd_y and
-        // η shifts by ln sd_y; x'β, the offset and the working residuals are scale-free.
+        // y was divided by sd_y (Poisson): mu, the IRLS weights and the deviance scale by sd_y and
+        // eta shifts by ln sd_y; x'beta, the offset and the working residuals are scale-free.
         let ln_sd = sd_y.ln();
         let kept: Vec<usize> = (0..k).filter(|&j| !dropped[j]).collect();
         let kk = kept.len();

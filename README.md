@@ -11,8 +11,9 @@ Fast high-dimensional fixed-effects regressions for Stata, Python and R, on one 
 Each front end follows the syntax, defaults, small-sample corrections and output of the package
 it mirrors, so results match that package's to numerical precision. All three cover OLS, IV/2SLS,
 Poisson and logit with any number of fixed effects, interactions of fixed effects, varying slopes,
-weights, and iid, robust or multi-way clustered standard errors, plus residuals, `predict` and
-fixed-effect values.
+weights, and iid, heteroskedasticity-robust (HC1; HC2/HC3 except for IV), multiway clustered
+(CRV1, CRV3), Newey–West, Driscoll–Kraay and Conley standard errors, plus residuals, `predict`
+and fixed-effect values.
 
 The solver eliminates the largest fixed effect exactly and solves the remaining system with a
 preconditioned conjugate-gradient method on cell-compressed sufficient statistics.
@@ -61,12 +62,17 @@ felogit default x1, absorb(firm year)
 ```
 
 Binaries are provided for Linux (x86-64), macOS (Apple Silicon and Intel) and Windows (x86-64).
+Variances follow reghdfe and ivreghdfe: `vce(unadjusted)`, `vce(robust)`, `vce(cluster ...)`
+(multiway), reghdfe's Driscoll–Kraay `vce(dkraay #)`, and ivreghdfe's HAC options `bw(#|auto)`,
+`kernel()`, `kiefer`, `dkraay()`, `psd0`/`psda` (Newey–West and the other kernels, within panels on
+`xtset` data). fereg extensions: `vce(hc2)`/`vce(hc3)` (Stata `regress` formulas, exact leverage
+with absorbed fixed effects), `vce(crv3 clustvars)` and `vce(conley latvar lonvar, cutoff(#))`.
 See `help fereg`, `help feppml` and `help felogit`.
 
 ## Python
 
 ```sh
-pip install fereg --find-links https://github.com/leoliu0/fereg/releases/expanded_assets/v0.3.0
+pip install fereg --find-links https://github.com/leoliu0/fereg/releases/expanded_assets/v0.4.0
 ```
 
 Wheels are provided for CPython 3.10–3.14 on Linux (x86-64, aarch64), macOS (Apple Silicon,
@@ -87,21 +93,26 @@ m.fixef()
 Data can be pandas or polars. The result classes (`Feols`, `Feiv`, `Fepois`, `Felogit`,
 `FixestMulti`) have pyfixest's methods: `summary`, `tidy`, `coef`, `se`, `tstat`, `pvalue`,
 `confint`, `vcov` (post hoc), `predict`, `resid` and `fixef`; `fereg.etable` and
-`fereg.summary` take lists of models. Not implemented: probit; HC2/HC3, CRV3, Newey–West,
-Driscoll–Kraay and `nid` variances (these raise `NotImplementedError`); pyfixest's wild
-bootstrap, `ccv`, `decompose`, `ritest`, plotting and DiD helpers.
+`fereg.summary` take lists of models. Variances as in pyfixest: `"iid"`, `"hetero"`/`"HC1"`,
+`"HC2"`, `"HC3"`, `{"CRV1": "a+b"}`, `{"CRV3": "a+b"}` (up to four ways), `"NW"` and `"DK"`
+with `vcov_kwargs={"time_id": ..., "panel_id": ..., "lag": ...}`, at estimation or post hoc.
+fereg extensions: HC2/HC3 with fixed effects, CRV3 for IV and logit, Newey–West /
+Driscoll–Kraay for IV, and fixest's Conley estimator (`vcov="conley"`,
+`vcov_kwargs={"lat": ..., "lon": ..., "cutoff": "100km"}`). Not implemented: probit; `nid`
+variances (`NotImplementedError`); pyfixest's wild bootstrap, `ccv`, `decompose`, `ritest`,
+plotting and DiD helpers.
 
 ## R
 
 ```r
 # Linux, or any R >= 4.2 with Rust (cargo, rustc >= 1.85) installed:
-install.packages("https://github.com/leoliu0/fereg/releases/download/v0.3.0/fereg_0.3.0.tar.gz",
+install.packages("https://github.com/leoliu0/fereg/releases/download/v0.4.0/fereg_0.4.0.tar.gz",
                  repos = NULL, type = "source")
 ```
 
-Binaries for R 4.6 on macOS (`fereg_0.3.0_R4.6_macos-arm64.tgz`,
-`fereg_0.3.0_R4.6_macos-x86_64.tgz`) and Windows (`fereg_0.3.0.zip`) are on the
-[release page](https://github.com/leoliu0/fereg/releases/tag/v0.3.0); download one and run
+Binaries for R 4.6 on macOS (`fereg_0.4.0_R4.6_macos-arm64.tgz`,
+`fereg_0.4.0_R4.6_macos-x86_64.tgz`) and Windows (`fereg_0.4.0.zip`) are on the
+[release page](https://github.com/leoliu0/fereg/releases/tag/v0.4.0); download one and run
 `install.packages("<path to file>", repos = NULL, type = "binary")`.
 
 ```r
@@ -118,10 +129,17 @@ fixef(m)
 The formula grammar is fixest's (`fe1^fe2`, `fe[x]`, `fe[[x]]`, `i()`, `factor()`, `c(y1, y2)`,
 `sw()`/`csw()`), and so are the methods: `summary`, `coef`, `vcov`, `se`, `tstat`, `pvalue`,
 `coeftable`, `confint`, `predict`, `resid`, `fitted`, `fixef`, `fitstat`, `r2`, `etable`,
-`tidy`/`glance`. Not implemented: HC2/HC3, Newey–West, Driscoll–Kraay and Conley variances,
-`fixef.rm = "infinite_coef"`, panel operators `l()`/`f()`/`d()`, `mvsw()` and the `.[]`/`..ctrl`
-formula macros. `fixef.tol` and `fixef.iter` are the settings of fereg's solver (defaults 1e-8
-and 16000), which stops on a different criterion than fixest's (defaults 1e-6 and 10000).
+`tidy`/`glance`. Variances follow fixest's syntax, labels and `ssc()`, at estimation and post
+hoc: `"iid"`, `"hetero"`, `"hc2"`/`"hc3"` (exact leverage with fixed effects; not for IV),
+clustering (`~firm`, `~firm + year`, `"twoway"`), Newey–West (`NW(2) ~ firm + year`,
+`NW ~ year` for a time series, or `"NW"` with `panel.id = ~firm + year`), Driscoll–Kraay
+(`DK(2) ~ year`), Conley (`conley(100) ~ lat + lon`, `conley("60mi")`) and fixest's request
+objects (`NW()`, `vcov_NW()`, `vcov_conley()`, `vcov_hetero(type = "hc3")`, ...). CRV3
+(`vcov = crv3 ~ firm`, `vcov_crv3()`) is a fereg extension with fixest's cluster correction.
+Not implemented: `fixef.rm = "infinite_coef"`, panel operators `l()`/`f()`/`d()`, `mvsw()`, the
+`.[]`/`..ctrl` formula macros, and variances given as functions or matrices. `fixef.tol` and
+`fixef.iter` are the settings of fereg's solver (defaults 1e-8 and 16000), which stops on a
+different criterion than fixest's (defaults 1e-6 and 10000).
 
 ## Build from source
 

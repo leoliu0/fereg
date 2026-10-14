@@ -1,11 +1,11 @@
-//! Upper-tail probabilities of the χ² and F distributions (Stata `chi2tail()` / `chiprob()` and
+//! Upper-tail probabilities of the chi^2 and F distributions (Stata `chi2tail()` / `chiprob()` and
 //! `Ftail()`), via the regularized incomplete gamma and beta functions (Lentz continued
-//! fractions, relative accuracy ≈ 1e-14 including far tails).
+//! fractions, relative accuracy ~= 1e-14 including far tails).
 
 const EPS: f64 = 1e-16;
 const TINY: f64 = 1e-300;
 
-/// ln Γ(x) for x > 0 (Lanczos, g = 7, n = 9; relative error < 1e-15).
+/// ln Gamma(x) for x > 0 (Lanczos, g = 7, n = 9; relative error < 1e-15).
 pub(crate) fn ln_gamma(x: f64) -> f64 {
     const C: [f64; 9] = [
         0.999_999_999_999_809_9,
@@ -47,7 +47,7 @@ fn gamma_p_series(a: f64, x: f64) -> f64 {
     sum * (-x + a * x.ln() - ln_gamma(a)).exp()
 }
 
-/// Regularized upper incomplete gamma Q(a, x) by its continued fraction (x ≥ a + 1).
+/// Regularized upper incomplete gamma Q(a, x) by its continued fraction (x >= a + 1).
 fn gamma_q_cf(a: f64, x: f64) -> f64 {
     let mut b = x + 1.0 - a;
     let mut c = 1.0 / TINY;
@@ -155,7 +155,7 @@ pub(crate) fn ftail(df1: f64, df2: f64, f: f64) -> f64 {
     if f <= 0.0 {
         return 1.0;
     }
-    // P(F > f) = I_{df2/(df2 + df1·f)}(df2/2, df1/2), evaluated on the side that avoids cancellation.
+    // P(F > f) = I_{df2/(df2 + df1*f)}(df2/2, df1/2), evaluated on the side that avoids cancellation.
     let x = df2 / (df2 + df1 * f);
     if x < (0.5 * df2 + 1.0) / (0.5 * (df1 + df2) + 2.0) {
         beta_inc(0.5 * df2, 0.5 * df1, x)

@@ -16,6 +16,7 @@ feols(
   cluster,
   se,
   ssc,
+  panel.id,
   fixef.rm = "perfect_fit",
   fixef.tol = 1e-08,
   fixef.iter = 16000,
@@ -36,9 +37,18 @@ estimations.}
 
 \item{data}{A data frame (or a list of equal-length vectors).}
 
-\item{vcov}{Variance type: \code{"iid"} (default), \code{"hetero"}, \code{"cluster"} (first fixed effect),
-\code{"twoway"}, or a formula such as \code{~cl} or \code{~cl1 + cl2} (multiway clustering, up to four
-dimensions; \code{~cl1^cl2} clusters on the interaction).}
+\item{vcov}{Variance type, as in fixest: a string (\code{"iid"}, the default; \code{"hetero"} (HC1),
+\code{"hc2"}, \code{"hc3"}, \code{"cluster"} (first \code{panel.id} variable, else first fixed effect),
+\code{"twoway"}, \code{"threeway"}, \code{"fourway"}, \code{"NW"} / \code{"newey_west"}, \code{"DK"} /
+\code{"driscoll_kraay"}, \code{"conley"}, and fereg's extension \code{"crv3"}; case and unique
+abbreviations are accepted), a one-sided formula (\code{~cl}, \code{~cl1 + cl2}, up to four
+dimensions, \code{~cl1^cl2} clusters on the interaction), a formula \code{type ~ variables}
+(\code{NW ~ id + period}, \code{NW(2) ~ id + period}, \code{NW ~ period} (time series without
+\code{panel.id}), \code{DK(2) ~ period}, \code{conley(100) ~ lat + lon}, \code{conley("60mi") ~ lat + lon},
+\code{crv3 ~ g1 + g2}; \code{+ ssc(...)} among the variables sets the small-sample correction) or a
+request object (see \link{vcov_requests}). Variables of Newey-West and Driscoll-Kraay variances
+default to \code{panel.id}, Conley coordinates are guessed from the column names. Rows with
+missing values in a variance variable are removed (counted as "vcov" in the NA note).}
 
 \item{weights}{Observation weights: a one-sided formula (\code{~w}), a column name or a vector.}
 
@@ -54,6 +64,10 @@ variable; \code{fsplit} adds the full sample first.}
 
 \item{ssc}{Small-sample correction, see \code{\link[=ssc]{ssc()}}.}
 
+\item{panel.id}{Panel identifiers, as in fixest: a formula \code{~unit + time} or a string
+\code{"unit,time"}. They are the default unit and time of Newey-West / Driscoll-Kraay variances
+and the default cluster of \code{vcov = "cluster"}. (fereg has no lag operators.)}
+
 \item{fixef.rm}{\code{"perfect_fit"} (default; singletons, plus fixed-effect groups with a
 perfectly fitted outcome in GLMs), \code{"singleton"} or \code{"none"}.}
 
@@ -62,7 +76,8 @@ perfectly fitted outcome in GLMs), \code{"singleton"} or \code{"none"}.}
 \item{collin.tol}{Collinearity tolerance (fixest rule).}
 
 \item{nthreads}{Number of threads; \code{0} = all logical cores. Defaults to option
-\code{fereg.nthreads}, else all cores (2 when \verb{_R_CHECK_LIMIT_CORES_} is set).}
+\code{fereg.nthreads}, else all cores, capped at \code{OMP_THREAD_LIMIT} when set (2 under R CMD
+check, i.e. when \verb{_R_CHECK_LIMIT_CORES_} is set).}
 
 \item{lean}{If \code{TRUE}, residuals, fitted values and the estimation state are not kept
 (post-hoc variances then need a new estimation).}

@@ -1,5 +1,5 @@
-*! version 0.3.0  fereg: header of feppml and felogit results
-*! feppml layout from ppmlhdfe_header.ado of ppmlhdfe 2.3.3 (MIT, (c) Sergio Correia, Paulo Guimarães, Thomas Zylkin)
+*! version 0.4.0  fereg: header of feppml and felogit results
+*! feppml layout from ppmlhdfe_header.ado of ppmlhdfe 2.3.3 (MIT, (c) Sergio Correia, Paulo Guimaraes, Thomas Zylkin)
 program _rf_glm_header
 	version 16
 
@@ -60,11 +60,27 @@ Number of clusters (#)    = ######
 
 	local N_clustervars = e(N_clustervars)
 	if (`N_clustervars' == .) local N_clustervars 0
-	if (`N_clustervars' > 0) di as text ""
+	* fereg: the second title line of dkraay/conley and the kernel lines (ivreghdfe's)
+	local extra = (`"`e(title4)'"' != "" | "`e(kernel)'" != "" | "`e(vce)'" == "dkraay" | "`e(vce)'" == "conley")
+	if (`N_clustervars' > 0 | `extra') di as text ""
+	if (`"`e(title4)'"' != "") di as text `"`e(title4)'"'
 	forval i = 1/`N_clustervars' {
 		local cluster "`e(clustvar`i')'"
 		local num = "`e(N_clust`i')'"
 		di as text "Number of clusters (" as res "`cluster'" as text ")" _col(29) as text "=" _c
 		di as text _col(31) as res %10.0fc `num'
+	}
+	if ("`e(vce)'" == "dkraay" & e(dkraay_bw) < .) {
+		di as text "DK Bandwidth" _col(29) "=" _col(31) as res %10.0fc e(dkraay_bw)
+	}
+	if ("`e(vce)'" == "conley" & e(conley_cutoff) < .) {
+		di as text "Conley cutoff (km)" _col(29) "=" _col(31) as res %10.0g e(conley_cutoff)
+	}
+	if ("`e(kernel)'" != "") {
+		if (`"`e(hacsubtitleV2)'"' != "") di as text `"`e(hacsubtitleV2)'"'
+		di as text "  kernel=`e(kernel)'; bandwidth=" `e(bw)'
+		if ("`e(bwchoice)'" != "") di as text "  `e(bwchoice)'"
+		di as text "  time variable (t):  " as res e(tvar)
+		if ("`e(ivar)'" != "") di as text "  group variable (i): " as res e(ivar)
 	}
 end

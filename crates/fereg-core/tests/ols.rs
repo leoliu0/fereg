@@ -2,7 +2,7 @@
 //!
 //! A. An independent explicit-dummy dense reference (eigen pseudo-inverse projections, plain
 //!    inverses, brute-force cluster sums, rank-based dof) implementing reghdfe's formulas,
-//!    compared at rtol 1e-9 over VCE × weight combinations and special cases.
+//!    compared at rtol 1e-9 over VCE x weight combinations and special cases.
 //! B. Ground truth: reghdfe 6.13.1 results (tol 1e-14) saved by `tests/data/gen_ols_fixtures.do`.
 //!
 //! Every test runs over [`KINDS`].
@@ -234,7 +234,7 @@ fn mat_from(rows: usize, cols: usize, f: impl Fn(usize, usize) -> f64) -> Mat<f6
     Mat::<f64>::from_fn(rows, cols, f)
 }
 
-/// Moore–Penrose pseudo-inverse of a symmetric PSD matrix via its eigendecomposition; also
+/// Moore-Penrose pseudo-inverse of a symmetric PSD matrix via its eigendecomposition; also
 /// returns the numerical rank.
 fn pinv_sym(a: &Mat<f64>) -> (Mat<f64>, usize) {
     let p = a.nrows();
@@ -309,7 +309,7 @@ struct RefOut {
 }
 
 /// Reference OLS on the kept sample (kept order). `keep_cols` are the regressors expected to
-/// survive collinearity checks; `nested_k` is Σ levels of intercept terms nested in a cluster.
+/// survive collinearity checks; `nested_k` is sum levels of intercept terms nested in a cluster.
 fn reference(s: &Session, m: &Model, keep_cols: &[usize], nested_k: f64) -> RefOut {
     let kept: Vec<usize> = s.kept_index().iter().map(|&i| i as usize).collect();
     let n = kept.len();
@@ -376,7 +376,7 @@ fn reference(s: &Session, m: &Model, keep_cols: &[usize], nested_k: f64) -> RefO
         _ => sumw,
     };
     let ms = k + usize::from(rc);
-    // Bordered matrix [[X̃'WX̃ + n_c x̄x̄', n_c x̄], [n_c x̄', n_c]]; its inverse is reghdfe's inv_ext.
+    // Bordered matrix [[X~'WX~ + n_c xbar xbar', n_c xbar], [n_c xbar', n_c]]; its inverse is reghdfe's inv_ext.
     let bread = if rc {
         let a = mat_from(ms, ms, |i, j| match (i < k, j < k) {
             (true, true) => xx[(i, j)] + n_c * xbar[i] * xbar[j],
@@ -396,8 +396,8 @@ fn reference(s: &Session, m: &Model, keep_cols: &[usize], nested_k: f64) -> RefO
         a
     };
 
-    // Exact for ≤ 2 intercept terms; nested terms are fully redundant (when every term is nested,
-    // reghdfe's df_a is 0 while rank − Σ nested would be −1).
+    // Exact for <= 2 intercept terms; nested terms are fully redundant (when every term is nested,
+    // reghdfe's df_a is 0 while rank - sum nested would be -1).
     let df_a = (rank_d as f64 - nested_k).max(0.0);
     let df_m = k as f64;
     let mut df_r = big_n - df_a - df_m;
@@ -459,6 +459,8 @@ fn reference(s: &Session, m: &Model, keep_cols: &[usize], nested_k: f64) -> RefO
             df_r = df_r.min(g_min - 1.0);
             v
         }
+        // The other estimators have their own ground truth in tests/vce.rs.
+        other => unreachable!("dense OLS reference: {other:?} is tested in tests/vce.rs"),
     };
     if (0..ms).any(|i| (0..ms).any(|j| v[(i, j)].is_nan())) {
         v = Mat::<f64>::zeros(ms, ms);
@@ -677,7 +679,7 @@ fn a_slopes_savefe_and_d() {
         let slope = &s.terms()[1].slopes[0];
         for i in 0..s.n() {
             let sum = res.fe[0][i] + res.fe[1][i] + res.fe[2][i] * slope[i];
-            assert!((sum - d[i]).abs() < 1e-8 * (1.0 + d[i].abs()), "Σ saved FE != d at {i}");
+            assert!((sum - d[i]).abs() < 1e-8 * (1.0 + d[i].abs()), "sum saved FE != d at {i}");
         }
         // dof table: id exact, firm intercept redundant = mobility groups, slope slot 0.
         let dt = mat(&res, "dof_table");
@@ -933,7 +935,7 @@ fn b_reghdfe_ground_truth() {
             }
             assert_eq!(scalar(&res, "y_absorbed"), f64::from(u8::from(f.name == "s17_y_absorbed")), "{what}: y_absorbed");
 
-            // Per-observation outputs (kept order ↔ sample obs).
+            // Per-observation outputs (kept order <-> sample obs).
             let kept_vals = |key: &str| -> Option<Vec<f64>> {
                 j.get(key).map(|v| v.nums().into_iter().zip(&sample).filter(|(_, s)| **s == 1.0).map(|(v, _)| v).collect())
             };

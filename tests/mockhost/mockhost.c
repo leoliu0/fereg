@@ -1,5 +1,5 @@
 /*
-    mockhost.c — a fake Stata host for ABI tests of the fereg plugin on every OS (plan §9.2).
+    mockhost.c -- a fake Stata host for ABI tests of the fereg plugin on every OS (plan sec. 9.2).
 
     Implements the SPI 3.0 ST_plugin table over an in-memory 1000-observation dataset with two
     fixed effects (numeric fe1, string fe2), plus scalar/matrix/macro registries, loads the

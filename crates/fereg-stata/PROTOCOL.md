@@ -3,7 +3,7 @@
 The ado files in `stata/` drive the plugin through `plugin call`. This file is the contract
 between them; change both sides together.
 
-Version: `fereg_core::VERSION` (`0.3.0`). Every ado sets `local rf_version 0.3.0`, and
+Version: `fereg_core::VERSION` (`0.4.0`). Every ado sets `local rf_version 0.4.0`, and
 `_rf_load` (no arguments) compares it with `cmd=version`.
 
 ## Calling convention
@@ -50,7 +50,7 @@ Keys:
 - `absorb=none` (only the constant) or `;`-separated terms `<factors>|<icpt>|<slopes>|<save>`:
   1-based factor positions joined by `*` (interaction), intercept 0/1, 1-based slope positions
   joined by `*` or `-` for none, save 0/1. Example: `1|1|-|0;2*3|1|-|1;4|0|1*2|1`.
-- `vce=unadjusted|robust|cluster`, with `cluster=<dims>` (`;`-separated, each `f1*f2`).
+- `vce=…` and its companion keys: section "Variance estimators" below.
 - `wtype=none|fw|aw|pw`, `singletons=0|1`.
 - `sample=touse|all` (default touse): `all` asserts that touse is 1 at every observation of
   the range (no `if`, `in`, weights or ado markouts), so the scan does not read it.
@@ -63,6 +63,94 @@ Effects: writes 0 into touse for dropped observations (missing values, singleton
 local `_rf_token` names the stored session (a new prepare discards the previous one); scalars
 `__rf_N_full` (after the missing-value exclusion), `__rf_N`, `__rf_num_singletons`,
 `__rf_num_fe_separated`. The session keeps the model variables for the estimation command.
+
+### Variance estimators (prepare keys)
+
+The VCE is fixed at prepare (it decides the cluster dimensions of the DoF rules) and applies to
+the estimation command that consumes the session. The prepare varlist gains the Conley
+coordinates: factors, slopes, **coordinates** (`ncoord` = 0 or 2: lat then lon, degrees,
+numeric; missing values drop the observation), weight, model variables, touse. The tsset
+time and panel variables are sent as numeric factors (missing values drop the observation, as
+the markout of ivreghdfe/reghdfe); a variable used both as a factor (absorb, cluster) and as
+tvar/ivar is sent once and referenced by the same position.
+
+| key | values | meaning |
+|---|---|---|
+| `vce` | `unadjusted robust cluster hc2 hc3 crv3 dkraay conley` | base estimator |
+| `cluster` | `;`-separated dims `f1*f2` | with `vce=cluster` and `vce=crv3` (also the kernel clusters) |
+| `tvar` | factor position | `_dta[_TStvar]`; required by `dkraay`, `kernel`, `kiefer` |
+| `ivar` | factor position | `_dta[_TSpanel]` when xtset (kernel lags stay within panel) |
+| `tdelta` | real (default 1) | `_dta[_TSdelta]` |
+| `dkbw` | integer ≥ 1 | `vce(dkraay #)` bandwidth (= lags + 1); absent = reghdfe default `floor(4(T/100)^(2/9))+1` |
+| `kernel` | `bartlett parzen truncated tukey-hanning tukey-hamming quadratic-spectral danielle tent` | ivreg2 HAC kernel (any `s_vkernel` spelling is accepted) |
+| `bw` | real > 0 or `auto` | ivreg2 `bw()`; required with `kernel` unless `kiefer=1` |
+| `kiefer` | 0/1 | ivreg2 `kiefer`: kernel Truncated, bw = T (computed by the plugin); send `kernel=truncated` or no kernel, no `bw` |
+| `psd` | `none psd0 psda` | ivreg2 `psd0`/`psda` on S |
+| `ncoord` | 0 or 2 | Conley coordinates in the varlist |
+| `cutoff` | real > 0, km | Conley cutoff; absent = fixest's deduced cutoff |
+| `pixel` | real ≥ 0, km (default 0) | Conley pixel |
+| `distance` | `triangular spherical` (default triangular) | Conley distance |
+
+The ado resolves syntax (abbreviations, option combinations, ms_parse_vce / ivparse /
+s_vkernel / regress messages) before calling; the plugin re-checks with the same texts.
+
+ivreg2 kernel family (`kernel=` or `kiefer=1` present), by `vce`:
+- `unadjusted`: AC (no robust; kiefer sends this). `robust`: HAC (ivreghdfe `robust`; the ado
+  also sends `robust` for pweights, as ivreghdfe forces robust after ivparse).
+- `cluster` with `cluster=<tvar>`: Driscoll–Kraay (ivreghdfe `dkraay(#)` = `vce=cluster
+  cluster=<tvar> kernel=bartlett bw=#`); `cluster=<ivar>;<tvar>` (either order): Thompson
+  two-way + kernel. Other dims: r(198) `Error: cluster kernel-robust requires clustering on tsset
+  time variable.` / `… on tsset panel & time vars.`
+- Lags are calendar lags on tvar (step tdelta), within ivar when sent. T = max(t) − min(t) + 1
+  over the estimation sample. The plugin errors r(198) `invalid bandwidth in option bw() -
+  cannot exceed timespan of data` when bw > (T−1)/tdelta, r(198) `Automatic bandwidth selection
+  not available for panel data` for `bw=auto` with ivar, r(102) `bandwidth option bw() required
+  for HAC-robust estimation`, r(451) `repeated time values within panel` / `repeated time values
+  in sample` (kernel lags on duplicate (ivar, t)). `bw=auto` with a kernel other than Bartlett,
+  Parzen, QS prints `Error: kernel <K> not compatible with bw(auto)` and uses bw = 1 (as
+  ivreghdfe's `abw`). The ado prints the s_vkernel bw = 1 note, the tsreport gap warning and
+  the kiefer/dkraay option errors.
+- Small sample (ivreghdfe, sdofminus = df_a): no cluster ×N/(N−K−df_a); cluster
+  ×(N−1)/(N−K−df_a)·G/(G−1), G = #periods (DK) or min(#panels, #periods) (Thompson);
+  df_r = N − K − df_a, or G − 1 with a cluster. On `cmd=ols` K counts the reported constant
+  (reghdfe's design rows with `_cons`; the slope block equals ivreghdfe's). On `cmd=glm`
+  (borrowed) the meat uses the IRLS-weighted working residuals; factor N/(N−1) without a
+  cluster, G/(G−1) with one.
+- The DoF clusters (reghdfe `clusters` rule) are the `cluster=` dims, as ivreghdfe creates the
+  HDFE with `vce(cluster …)`.
+
+`vce=dkraay`: `cmd=ols` = reghdfe 6.13.1 `vce(dkraay)` (positional periods, Bartlett, bw =
+dkbw or the default, DoF clusters = tvar, no nested adjustment, PSD fix, df_r = min(df_r,
+T−1)); prints `Warning: bandwidth %g too large for %g time periods; reducing to %g`.
+`cmd=iv` = ivreghdfe `dkraay(dkbw)` (calendar lags, Bartlett, cluster tvar). `cmd=glm` =
+reghdfe's formula with the asymptotic factor T/(T−1).
+
+`vce=hc2|hc3`: Stata `regress` eq. (10)/(12) with the leverage of the full [X, FE dummies,
+slopes] design (no N/(N−k) factor; fweights τ_i = w_i; df_r as robust). `cmd=iv`: r(198)
+`vce() only supports cluster, robust, and unadjusted`. `wtype=pw` with hc3: r(198)
+`pweights not allowed with option vce(hc3)` (regress); pweights with hc2 are treated as
+aweights. Observations with leverage 1 − h ≤ √ε (residual 0 in exact arithmetic; regress
+returns arbitrary numbers there) contribute nothing [fereg rule]. GLM: IRLS leverage, no
+factor.
+
+`vce=crv3`: leave-one-cluster-out jackknife Σ_g(β₍₋g₎−β̂)(β₍₋g₎−β̂)' centered at β̂, times the
+reghdfe cluster factor (`cmd=ols`), ivreghdfe's (`cmd=iv`, ≤ 2 dims) or G/(G−1) (`cmd=glm`);
+multiway by inclusion–exclusion over the dims with the PSD fix; df_r = min(df_r, G_min − 1).
+A refit that loses a coefficient is r(498) naming the cluster level (1-based code) and the
+coefficient position.
+
+`vce=conley`: fixest 0.14.2 Conley meat (uniform kernel, its constants and range errors);
+factor N/(N−df_m−df_a), df_r = N−df_m−df_a (`cmd=ols`, `cmd=iv` with K for df_m); `cmd=glm`
+N/(N−1).
+
+Results added by the estimation commands:
+- scalars `__rf_bw` (kernel bandwidth used: bw, the auto result or kiefer's T),
+  `__rf_dkraay_bw` (`vce=dkraay` on ols/glm: lags + 1 after the reduction; on iv equal to
+  `__rf_bw`), `__rf_N_clust` (DK: T), `__rf_N_clust1`/`2`, `__rf_N_clustervars`,
+  `__rf_cutoff` (Conley km used), `__rf_hac_T` (time span T used by the kernel).
+- locals `_rf_kernel` (ivreg2 proper name: `Bartlett`, `Quadratic Spectral`, `Danielle`, …),
+  `_rf_bwchoice` (`Automatic bw selection according to Newey-West (1994)` or the abw
+  incompatibility text; empty otherwise).
 
 ## Estimation commands (cmd=ols, iv, glm)
 - `token=<_rf_token>` is required and the session is consumed either way. A wrong token or a
@@ -120,6 +208,8 @@ G/(G−1); multiway gets the PSD fix. Errors: Poisson y < 0 r(459), no convergen
 everything separated r(2001). Scalar `separation_complete` is 0 when the ReLU check stopped
 without certifying its result (no convergence; the `mu` rule then runs as a fallback and a
 warning note is printed), else 1.
+Every `vce=` of prepare is accepted (section "Variance estimators"); unadjusted means
+Poisson robust and logit oim, as before.
 
 `sepcheck=1` (Poisson only; feppml `tagsep()` / `zvarname()`, ppmlhdfe's secret options): runs
 the separation check on the prepared sample and stores nothing else; no estimation, no

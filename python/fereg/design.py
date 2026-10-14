@@ -83,6 +83,12 @@ class Design:
     coefnames: list[str] = field(default_factory=list)
     # encoding state (categorical levels per factor) reused by `build_design(like=...)`
     levels: dict = field(default_factory=dict)
+    # Newey-West / Driscoll-Kraay time and panel variables (factor indices) and Conley
+    # coordinates (degrees) of the variance matrix; None = not used
+    time: int | None = None
+    panel: int | None = None
+    lat: np.ndarray | None = None
+    lon: np.ndarray | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +291,55 @@ def factor_column(data, name: str) -> FactorColumn:
     return FactorColumn(
         name, "codes", combined.astype(np.int32), len(labels), 0, labels
     )
+
+
+def _is_time_like(frame: _Frame, name: str) -> bool:
+    """pyfixest `_vcov_hac`: the time variable must be numeric (not boolean) or a date."""
+    if frame.polars:
+        import polars as pl
+
+        dt = frame.data.get_column(name).dtype
+        return (dt.is_numeric() and dt != pl.Boolean) or dt == pl.Date or dt == pl.Datetime
+    s = frame.data[name]
+    return _is_numeric_series(s) or pd.api.types.is_datetime64_any_dtype(s.dtype)
+
+
+def _time_factor(frame: _Frame, name: str) -> FactorColumn:
+    frame.require(name)
+    if not _is_time_like(frame, name):
+        raise ValueError(
+            "The time variable must be numeric or date, else we cannot sort by time."
+        )
+    return _factor_from_frame(frame, name)
+
+
+def _coordinate(frame: _Frame, name: str) -> np.ndarray:
+    values = frame.numeric(name)
+    if values is None:
+        raise TypeError(f"The coordinate variable '{name}' must be numeric (degrees).")
+    return values
+
+
+def vcov_inputs(data, cluster: list[str], columns: dict[str, str | None]) -> dict:
+    """Post-hoc variance inputs over the rows of `data`: keyword arguments of the
+    core's `FitState.vcov` (`factors`, `factor_names`, `cluster`, `time`,
+    `panel`, `lat`, `lon`). `cluster` dimensions may be interactions "a^b";
+    `columns` names the time / panel / coordinate columns (None = not used)."""
+    frame = _Frame(data)
+    factors: list[FactorColumn] = [factor_column(data, name) for name in cluster]
+    out = {"cluster": [[i] for i in range(len(cluster))], "time": None, "panel": None}
+    if columns.get("time") is not None:
+        out["time"] = len(factors)
+        factors.append(_time_factor(frame, columns["time"]))
+    if columns.get("panel") is not None:
+        out["panel"] = len(factors)
+        factors.append(_factor_from_frame(frame, columns["panel"]))
+    out["factors"] = factors
+    for key in ("lat", "lon"):
+        name = columns.get(key)
+        out[key] = None if name is None else _coordinate(frame, name)
+    return out
+
 
 
 def term_labels(design: Design, k: int, rows: np.ndarray) -> list[str | None]:
@@ -891,6 +946,7 @@ def build_design(
     weights: str | None = None,
     offset: str | None = None,
     cluster: list[str] = (),
+    vcov_columns: dict[str, str | None] | None = None,
     drop_intercept: bool = False,
     like: Design | None = None,
 ) -> Design:
@@ -900,6 +956,8 @@ def build_design(
     come from `like`, so x columns align with `like.x_names` (newdata for
     predict); `y` may then be absent, instruments are not built, and rows
     with a categorical value unseen in training are flagged in `drop`.
+    `vcov_columns` names the time / panel / coordinate columns of the variance
+    matrix (`VcovSpec.columns()`; None = not used).
     """
     frame = _Frame(data)
     n = frame.n
@@ -964,6 +1022,15 @@ def build_design(
     cluster_dims = []
     for c in cluster:
         cluster_dims.append([factor_index(p.strip()) for p in c.split("^")])
+    vcols = vcov_columns or {}
+    time_idx = panel_idx = None
+    if vcols.get("time") is not None:
+        _time_factor(frame, vcols["time"])
+        time_idx = factor_index(vcols["time"])
+    if vcols.get("panel") is not None:
+        panel_idx = factor_index(vcols["panel"])
+    lat = None if vcols.get("lat") is None else _coordinate(frame, vcols["lat"])
+    lon = None if vcols.get("lon") is None else _coordinate(frame, vcols["lon"])
 
     w = None
     if weights is not None and (like is None or weights in frame.columns):
@@ -1117,6 +1184,10 @@ def build_design(
         drop=drop,
         coefnames=coefnames,
         levels=levels_state,
+        time=time_idx,
+        panel=panel_idx,
+        lat=lat,
+        lon=lon,
     )
 
 

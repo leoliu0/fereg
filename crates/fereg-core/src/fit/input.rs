@@ -3,7 +3,7 @@
 
 use rayon::prelude::*;
 
-use super::{Dropped, FactorCol, FitInput, FitSpec, FixefRm, Flavor, Model, NaCounts};
+use super::{Dropped, FactorCol, FitInput, FitSpec, FixefRm, Flavor, Model, NaCounts, VcovKind};
 use crate::api::{AbsorbTerm, Ctx, Family, Vce, WeightKind};
 use crate::error::RfError;
 use crate::factor::{self, Codes};
@@ -21,6 +21,8 @@ const CLUSTER: u16 = 1 << 5;
 const WEIGHTS: u16 = 1 << 6;
 const OFFSET: u16 = 1 << 7;
 const EXTRA: u16 = 1 << 8;
+/// Time, panel, latitude or longitude of the requested variance matrix (counted with `CLUSTER`).
+const VCOV: u16 = 1 << 9;
 const GROUPS: usize = 9;
 
 /// The kept sample and its session.
@@ -37,7 +39,7 @@ pub(crate) struct Sample {
 /// Rows of the reported sample left out of the session (Pyfixest-flavor logit): those of the
 /// levels whose remaining outcomes are all 0 or all 1 (recursively, as fixest's perfect-fit
 /// rule). pyfixest keeps them, but their linear predictor diverges in its IRLS and they carry
-/// no information on β: IRLS runs without them (exactly the limit pyfixest approaches) and the
+/// no information on beta: IRLS runs without them (exactly the limit pyfixest approaches) and the
 /// outputs report them at the bound.
 pub(crate) struct Excluded {
     /// Input rows left out (ascending).
@@ -85,9 +87,19 @@ pub(crate) fn validate(input: &FitInput, spec: &FitSpec) -> Result<(), RfError> 
     if input.cluster.len() > 4 {
         return bad("at most four cluster dimensions are supported".into());
     }
-    if spec.vcov == super::VcovKind::Cluster && input.cluster.is_empty() {
-        return bad("a clustered variance matrix needs cluster dimensions".into());
+    if input.time.is_some_and(|f| f >= input.factors.len()) || input.panel.is_some_and(|f| f >= input.factors.len()) {
+        return bad("the time or panel variable references an invalid factor".into());
     }
+    if input.lat.is_some_and(|c| c.len() != n) || input.lon.is_some_and(|c| c.len() != n) {
+        return bad("every input column must have n rows".into());
+    }
+    let vars = super::vcov::KindVars {
+        cluster: !input.cluster.is_empty(),
+        time: input.time.is_some(),
+        panel: input.panel.is_some(),
+        coords: input.lat.is_some() && input.lon.is_some(),
+    };
+    super::vcov::check_kind(spec.vcov, spec.flavor, !input.endog.is_empty(), &vars)?;
     if spec.model == Model::Ols && input.offset.is_some() {
         return bad("an offset is only supported for Poisson and logit models".into());
     }
@@ -145,10 +157,42 @@ struct ChunkCounts {
     negative_weight: bool,
     /// Rows missing only their cluster value (Pyfixest flavor: an error).
     cluster_only: bool,
+    /// Rows missing only variance-matrix variables, at least one of time / panel / coordinates.
+    vcov_only: bool,
+}
+
+/// The time / panel factors and the coordinates the requested variance matrix reads (fixest
+/// drops rows missing them at estimation; a variable the request does not use is not checked).
+struct VcovVars<'a> {
+    factors: Vec<(usize, &'static str)>,
+    coords: Vec<(&'a [f64], &'static str)>,
+}
+
+fn vcov_vars<'a>(input: &FitInput<'a>, spec: &FitSpec) -> VcovVars<'a> {
+    let mut factors = Vec::new();
+    let mut coords = Vec::new();
+    match spec.vcov {
+        VcovKind::NeweyWest { .. } | VcovKind::DriscollKraay { .. } => {
+            let nw = matches!(spec.vcov, VcovKind::NeweyWest { .. });
+            // pyfixest's Driscoll-Kraay reads the panel variable for its duplicate check.
+            if let Some(p) = input.panel.filter(|_| nw || spec.flavor == Flavor::Pyfixest) {
+                factors.push((p, "panel ID"));
+            }
+            factors.extend(input.time.map(|t| (t, "time")));
+        }
+        VcovKind::Conley { .. } => {
+            coords.extend(input.lat.map(|c| (c, "latitude")));
+            coords.extend(input.lon.map(|c| (c, "longitude")));
+        }
+        _ => {}
+    }
+    VcovVars { factors, coords }
 }
 
 /// Missing-value and zero-weight scan: returns the keep mask over the input rows and the counts.
-fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dropped), RfError> {
+fn scan(input: &FitInput, spec: &FitSpec, pool: &Pool) -> Result<(Vec<bool>, Dropped), RfError> {
+    let flavor = spec.flavor;
+    let vv = vcov_vars(input, spec);
     let n = input.n;
     let mut fe_factors: Vec<usize> = input.fe.iter().flat_map(|t| t.factors.iter().copied()).collect();
     fe_factors.sort_unstable();
@@ -174,6 +218,8 @@ fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dro
                 fe_factors.iter().for_each(|&f| mark_factor(&input.factors[f], range.clone(), &mut mask, FE));
                 fe_slopes.iter().for_each(|&s| mark_values(input.slopes[s], range.clone(), &mut mask, FE));
                 cl_factors.iter().for_each(|&f| mark_factor(&input.factors[f], range.clone(), &mut mask, CLUSTER));
+                vv.factors.iter().for_each(|&(f, _)| mark_factor(&input.factors[f], range.clone(), &mut mask, VCOV));
+                vv.coords.iter().for_each(|&(c, _)| mark_values(c, range.clone(), &mut mask, VCOV));
                 if let Some(w) = input.weights {
                     mark_values(w, range.clone(), &mut mask, WEIGHTS);
                 }
@@ -185,7 +231,8 @@ fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dro
                 }
                 let mut out = ChunkCounts::default();
                 for (g, count) in out.groups.iter_mut().enumerate() {
-                    *count = mask.iter().filter(|&&m| m & (1 << g) != 0).count();
+                    let bits = if 1 << g == CLUSTER { CLUSTER | VCOV } else { 1 << g };
+                    *count = mask.iter().filter(|&&m| m & bits != 0).count();
                 }
                 let w = input.weights.map(|w| &w[range.clone()]);
                 for (k, (a, &m)) in al.iter_mut().zip(&mask).enumerate() {
@@ -194,6 +241,7 @@ fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dro
                     if m != 0 {
                         out.na += 1;
                         out.cluster_only |= m == CLUSTER;
+                        out.vcov_only |= m & VCOV != 0 && m & !(CLUSTER | VCOV) == 0;
                     } else if wk == 0.0 {
                         out.zero_weight += 1;
                     } else {
@@ -206,12 +254,13 @@ fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dro
     });
     let mut d = Dropped::default();
     let mut g = [0usize; GROUPS];
-    let (mut negative, mut cluster_only) = (false, false);
+    let (mut negative, mut cluster_only, mut vcov_only) = (false, false, false);
     for p in &parts {
         d.na += p.na;
         d.zero_weight += p.zero_weight;
         negative |= p.negative_weight;
         cluster_only |= p.cluster_only;
+        vcov_only |= p.vcov_only;
         g.iter_mut().zip(&p.groups).for_each(|(a, b)| *a += b);
     }
     if negative {
@@ -222,6 +271,17 @@ fn scan(input: &FitInput, flavor: Flavor, pool: &Pool) -> Result<(Vec<bool>, Dro
         return Err(RfError::InvalidInput(format!(
             "missing values in the cluster variable {name}: clustered inference does not support missing cluster values"
         )));
+    }
+    if flavor == Flavor::Pyfixest && vcov_only {
+        let n = input.n;
+        let name = vv
+            .factors
+            .iter()
+            .find(|&&(f, _)| (0..n).any(|i| factor_missing(&input.factors[f], i)))
+            .map(|&(f, label)| format!("the {label} variable {}", input.factor_names[f]))
+            .or_else(|| vv.coords.iter().find(|(c, _)| c.iter().any(|x| !x.is_finite())).map(|(_, label)| format!("the {label}")))
+            .unwrap_or_default();
+        return Err(RfError::InvalidInput(format!("missing values in {name}: the variance matrix does not support missing values")));
     }
     d.na_by = NaCounts { y: g[0], x: g[1], endog: g[2], inst: g[3], fe: g[4], cluster: g[5], weights: g[6], offset: g[7], extra: g[8] };
     Ok((alive, d))
@@ -240,7 +300,7 @@ fn cluster_missing_name(input: &FitInput) -> Option<String> {
 /// perfect-fit removal over the intercept terms (fixest skips slope-only terms), then the session.
 pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) -> Result<Sample, RfError> {
     let mut t = std::time::Instant::now();
-    let (mut alive, mut dropped) = scan(input, spec.flavor, pool)?;
+    let (mut alive, mut dropped) = scan(input, spec, pool)?;
     crate::solve::log_phase(ctx, &mut t, "fit: missing values");
     ctx.check()?;
 

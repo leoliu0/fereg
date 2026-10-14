@@ -52,7 +52,7 @@ static int copy_mat(const char *src, const char *dst) {
 }
 STDLL stata_call(int argc, char *argv[]) {
   if (argc < 1) return 198;
-  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.3.0"); return 0; }
+  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.4.0"); return 0; }
   if (!strcmp(argv[0], "prepare")) {
     record("rfmock_prepare", argc, argv);
     int tv = SF_nvars(); double n = 0; ST_double t, z; char s[2048];
@@ -83,7 +83,7 @@ STDLL stata_call(int argc, char *argv[]) {
     if ((rc = copy_mat("__mock_b", key(argc, argv, "b")))) return rc;
     if ((rc = copy_mat("__mock_V", key(argc, argv, "V")))) return rc;
     if ((rc = copy_mat("__mock_doft", key(argc, argv, "doft")))) return rc;
-    const char *names[] = {"N","rank","df_r","df_m","tss","tss_within","rss","mss","rmse","F","ll","ll_0","r2","r2_within","r2_a","r2_a_within","sumweights","ic","converged","report_constant","N_clust","N_clustervars","N_clust1","N_clust2","N_clust3","df_a","df_a_initial","df_a_redundant","df_a_nested","num_singletons","N_full","y_absorbed",NULL};
+    const char *names[] = {"N","rank","df_r","df_m","tss","tss_within","rss","mss","rmse","F","ll","ll_0","r2","r2_within","r2_a","r2_a_within","sumweights","ic","converged","report_constant","N_clust","N_clustervars","N_clust1","N_clust2","N_clust3","df_a","df_a_initial","df_a_redundant","df_a_nested","num_singletons","N_full","y_absorbed","dkraay_bw","bw","cutoff","hac_T",NULL};
     for (int i = 0; names[i]; i++) copy_scalar(names[i]);
     char st[4000] = ""; SF_macro_use("rfmock_status", st, 4000); SF_macro_save("__rf_status", st);
     char nv[32]; snprintf(nv, 32, "%d", SF_nvars()); SF_macro_save("rfmock_ols_nvars", nv);

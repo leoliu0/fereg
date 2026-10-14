@@ -24,7 +24,7 @@ fn normal(rng: &mut SplitMix64) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * rng.next_f64()).cos()
 }
 
-/// indiv × year panel; firm random (or a band on a ring); slopes x (constant within every 7th
+/// indiv x year panel; firm random (or a band on a ring); slopes x (constant within every 7th
 /// indiv: degenerate levels) and z.
 fn panel(nindiv: usize, nyear: usize, nfirm: usize, band: bool, weighted: bool, seed: u64) -> Design {
     let mut rng = SplitMix64::new(seed);
@@ -136,7 +136,7 @@ fn max_rel(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Checks `cfg` and the same configuration with large blocks pulled through the n×R scratch.
+/// Checks `cfg` and the same configuration with large blocks pulled through the n x R scratch.
 fn check(d: &Design, cfg: SolverConfig, r: usize) -> SolveInfo {
     let mut first = None;
     for c in [cfg, SolverConfig { acc_bytes_max: 0, ..cfg }] {
@@ -236,9 +236,9 @@ fn set_weights_warm_start_and_refactor() {
             let ctx = Ctx::quiet(4);
             with_pool(4, |pool| {
                 let wf: Vec<f64> = p.fast.row_order().iter().map(|&k| wk[k as usize]).collect();
-                p.fast.set_weights(Some(wf), pool, &ctx).unwrap();
+                p.fast.set_weights(Some(&wf), pool, &ctx).unwrap();
                 let wd: Vec<f64> = p.dense.row_order().iter().map(|&k| wk[k as usize]).collect();
-                p.dense.absorber_mut().set_weights(Some(wd), pool, &ctx).unwrap();
+                p.dense.absorber_mut().set_weights(Some(&wd), pool, &ctx).unwrap();
             })
             .unwrap();
             if round == 2 {

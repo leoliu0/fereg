@@ -23,3 +23,8 @@ Same types and names as fixest's \code{fitstat()}: \code{n}, \code{rmse}, \code{
 \code{pr2}, \code{apr2}, \code{cor2} (\code{sq.cor}), \code{aic}, \code{bic}, \code{f}, \code{my}, \code{g} and, for IV, \code{ivf1}
 (\code{ivf}), \code{ivwald1} (\code{ivwald}), \code{wh} and \code{sargan}.
 }
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+fitstat(m, ~ n + r2 + wr2)
+}

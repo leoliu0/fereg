@@ -32,7 +32,7 @@ fn label_numbers(s: &str) -> Vec<f64> {
     s.split('_').map(|p| p.parse::<f64>().unwrap_or_else(|_| panic!("label {s}"))).collect()
 }
 
-/// Per-row sum of the fixed effects (intercepts plus slope × variable) over the estimation rows.
+/// Per-row sum of the fixed effects (intercepts plus slope x variable) over the estimation rows.
 fn fe_sum(case: &Case, out: &FitOutput, fixef: &[(usize, Option<usize>, Vec<f64>, Vec<Vec<f64>>)]) -> Vec<f64> {
     out.obs
         .iter()
@@ -198,14 +198,18 @@ fn posthoc_requests() {
     assert_eq!(state.nobs(), out.nobs);
     let h = FactorData::new(case.csv.col("h"), FactorKind::F64);
     let names = vec!["h".to_string()];
-    let err = state.vcov(VcovKind::Cluster, &Default::default(), &[h.col()], &names, &[vec![0]], &Ctx::quiet(2)).err().unwrap().to_string();
+    let hcol = [h.col()];
+    let data = fit::VcovData { factors: &hcol, factor_names: &names, cluster: &[vec![0]], ..Default::default() };
+    let err = state.vcov(VcovKind::Cluster, &Default::default(), &data, &Ctx::quiet(2)).err().unwrap().to_string();
     assert!(err.contains("missing values"), "{err}");
     let c3 = FactorData::new(case.csv.col("c3"), FactorKind::Codes);
     let k = FactorData::new(case.csv.col("k"), FactorKind::I32);
     let names = vec!["c3".to_string(), "k".to_string()];
     let cols = [c3.col(), k.col()];
-    let a = state.vcov(VcovKind::Cluster, &Default::default(), &cols, &names, &[vec![0], vec![1], vec![0, 1]], &Ctx::quiet(1)).unwrap();
-    let b = state.vcov(VcovKind::Cluster, &Default::default(), &cols, &names, &[vec![0], vec![1], vec![0, 1]], &Ctx::quiet(16)).unwrap();
+    let cl = [vec![0], vec![1], vec![0, 1]];
+    let data = fit::VcovData { factors: &cols, factor_names: &names, cluster: &cl, ..Default::default() };
+    let a = state.vcov(VcovKind::Cluster, &Default::default(), &data, &Ctx::quiet(1)).unwrap();
+    let b = state.vcov(VcovKind::Cluster, &Default::default(), &data, &Ctx::quiet(16)).unwrap();
     assert_eq!(a, b);
     assert_eq!(a.n_clusters.len(), 3);
 }

@@ -1,12 +1,12 @@
 //! Lockstep preconditioned conjugate gradient over R columns (plan D5).
 //!
-//! Each column keeps its own scalars. Column j stops when the Hestenes–Stiefel window estimate
-//! Σ_{i=k−d}^{k−1} γ_iρ_i (a lower bound on ‖x* − x_{k−d}‖²_S = W-norm error of the residualized
-//! column) falls below max(tol²·SS_k, (1e-13)²·SS₀). With an exact preconditioner (M = S on the
-//! whole reduced space, a reflexive generalized inverse) the solution is x + M⁻¹(rhs − S x): it
+//! Each column keeps its own scalars. Column j stops when the Hestenes-Stiefel window estimate
+//! sum_{i=k-d}^{k-1} gamma_i rho_i (a lower bound on ||x* - x_{k-d}||^2_S = W-norm error of the residualized
+//! column) falls below max(tol^2*SS_k, (1e-13)^2*SS_0). With an exact preconditioner (M = S on the
+//! whole reduced space, a reflexive generalized inverse) the solution is x + M^-1 (rhs - S x): it
 //! is applied directly, with no matvec or stopping check. Independently, a
-//! column stops once ρ_k ≤ (1e-13)²·SS₀: the recursive residual has reached roundoff, and further
-//! steps break down (γ explodes) before a tight window could be satisfied. At iterations 6 and
+//! column stops once rho_k <= (1e-13)^2*SS_0: the recursive residual has reached roundoff, and further
+//! steps break down (gamma explodes) before a tight window could be satisfied. At iterations 6 and
 //! 12 after the start and after every restart the system is probed ([`CgSystem::probe`]) with
 //! the observed contraction and the projected remaining iterations, and may strengthen the
 //! preconditioner (default rule at iteration 12: escalate once when the contraction is slow),
@@ -23,15 +23,15 @@ use crate::par::{CHUNK, Pool, sum_chunks};
 /// Window length d of the stopping rule.
 pub const WINDOW: usize = 5;
 /// Iteration of the escalation probe, and the reference iteration of the contraction estimate
-/// ρ̂ = (ρ_12/ρ_7)^{1/5}. (The plan's ρ_2 reference overstates the asymptotic rate: the first
-/// iterations remove the high-frequency error, e.g. ρ drops 800× from k = 2 to 12 on a band
+/// rhohat = (rho_12/rho_7)^{1/5}. (The plan's rho_2 reference overstates the asymptotic rate: the first
+/// iterations remove the high-frequency error, e.g. rho drops 800x from k = 2 to 12 on a band
 /// graph that then needs 270 Jacobi iterations.)
 pub const PROBE_AT: usize = 12;
 pub const PROBE_FROM: usize = 7;
-/// Escalate when the per-iteration contraction ρ̂ of some active column exceeds this.
+/// Escalate when the per-iteration contraction rhohat of some active column exceeds this.
 pub const PROBE_RATIO: f64 = 0.6;
 /// Earlier probe (no default rule; only systems with a cost model act on it), with
-/// ρ̂ = (ρ_6/ρ_3)^{1/3}. The early contraction is faster than the asymptotic one, so the
+/// rhohat = (rho_6/rho_3)^{1/3}. The early contraction is faster than the asymptotic one, so the
 /// remaining-iteration estimate is low (conservative): ~33 instead of 56 on the AKM panels.
 pub const EARLY_PROBE_AT: usize = 6;
 pub const EARLY_PROBE_FROM: usize = 3;
@@ -40,20 +40,20 @@ pub const EARLY_PROBE_FROM: usize = 3;
 pub struct Probe {
     /// Iterations done since the start: [`EARLY_PROBE_AT`] or [`PROBE_AT`].
     pub k: usize,
-    /// Largest contraction estimate ρ̂ = (ρ_k/ρ_from)^{1/(k−from)} over the active columns
+    /// Largest contraction estimate rhohat = (rho_k/rho_from)^{1/(k-from)} over the active columns
     /// (from = [`EARLY_PROBE_FROM`] or [`PROBE_FROM`]).
     pub rho_hat: f64,
     /// Estimated further iterations with the current preconditioner:
-    /// max_j ln(ρ_k,j / thr_j) / ln(1/ρ̂_j) over the active columns (thr_j the stopping
+    /// max_j ln(rho_k,j / thr_j) / ln(1/rhohat_j) over the active columns (thr_j the stopping
     /// threshold; capped by the remaining `maxiter`).
     pub remaining: f64,
 }
 
 /// The reduced system as seen by PCG.
 pub trait CgSystem {
-    /// q = S p (m × w row-major).
+    /// q = S p (m x w row-major).
     fn matvec(&mut self, p: &[f64], q: &mut [f64], pool: &Pool) -> Result<(), RfError>;
-    /// z = M⁻¹ r.
+    /// z = M^-1 r.
     fn precond(&mut self, r: &[f64], z: &mut [f64], pool: &Pool);
     /// M = S exactly (the preconditioner residual norm is the error).
     fn exact(&self) -> bool;
@@ -63,7 +63,7 @@ pub trait CgSystem {
     fn escalate(&mut self, pool: &Pool, ctx: &Ctx) -> Result<bool, RfError>;
     /// Policy hook at k = [`EARLY_PROBE_AT`] and k = [`PROBE_AT`] after the start and after
     /// every restart. `Ok(Some(changed))` is the system's own decision; `Ok(None)` applies the
-    /// default rule (at [`PROBE_AT`] only: [`CgSystem::escalate`] when ρ̂ > [`PROBE_RATIO`] and
+    /// default rule (at [`PROBE_AT`] only: [`CgSystem::escalate`] when rhohat > [`PROBE_RATIO`] and
     /// [`CgSystem::can_escalate`]). Implementations must not report a change indefinitely.
     fn probe(&mut self, _p: &Probe, _pool: &Pool, _ctx: &Ctx) -> Result<Option<bool>, RfError> {
         Ok(None)
@@ -77,7 +77,7 @@ pub struct CgOutcome {
     pub exact: bool,
 }
 
-/// Per-column dot products of two m × w row-major blocks.
+/// Per-column dot products of two m x w row-major blocks.
 pub fn dots(a: &[f64], b: &[f64], w: usize, pool: &Pool) -> Vec<f64> {
     let m = a.len() / w.max(1);
     sum_chunks(pool, m, CHUNK, w, |range, acc| {
@@ -90,7 +90,7 @@ pub fn dots(a: &[f64], b: &[f64], w: usize, pool: &Pool) -> Vec<f64> {
     })
 }
 
-/// Solves S x = rhs for the w columns of `rhs` (m × w); `x` holds the start (warm or zero).
+/// Solves S x = rhs for the w columns of `rhs` (m x w); `x` holds the start (warm or zero).
 /// `ss1`: per-column sum of squares after removing FE1 only; `ss0`: centered sum of squares
 /// (0 = constant column, stops at once).
 #[allow(clippy::too_many_arguments)]
@@ -119,7 +119,7 @@ pub fn pcg(
     let mut thr = vec![0.0; w];
 
     'restart: loop {
-        // r = rhs − S x, z = M⁻¹ r, p = z, ρ = r'z.
+        // r = rhs - S x, z = M^-1 r, p = z, rho = r'z.
         let x_nonzero = x.iter().any(|v| *v != 0.0);
         if x_nonzero {
             sys.matvec(x, &mut q, pool)?;
@@ -130,7 +130,7 @@ pub fn pcg(
         ctx.check()?;
         sys.precond(&r, &mut z, pool);
         if sys.exact() {
-            // x* = x + M⁻¹(rhs − S x) for the active columns (the others stay frozen).
+            // x* = x + M^-1 (rhs - S x) for the active columns (the others stay frozen).
             let act = &active;
             pool.install(|| {
                 x.par_chunks_mut(CHUNK * w).zip(z.par_chunks(CHUNK * w)).for_each(|(xc, zc)| {
@@ -179,7 +179,7 @@ pub fn pcg(
                     }
                 }
             }
-            // x += γp, r −= γq (active columns only; γ = 0 elsewhere).
+            // x += gamma p, r -= gamma q (active columns only; gamma = 0 elsewhere).
             update_xr(x, &mut r, &p, &q, &gamma, w, pool);
             sys.precond(&r, &mut z, pool);
             let rho_new = dots(&r, &z, w, pool);
@@ -228,7 +228,7 @@ pub fn pcg(
                     continue 'restart;
                 }
             }
-            // p = z + β p.
+            // p = z + beta p.
             let mut beta = vec![0.0; w];
             for j in 0..w {
                 if active[j] {

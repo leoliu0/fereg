@@ -92,7 +92,19 @@ fe_header_lines <- function(x) {
 estimation_title <- function(x) {
   if (x$method_type == "feols") return("OLS estimation")
   if (identical(x$method, "fepois")) return("Poisson estimation")
-  paste0("GLM estimation, family = ", if (x$family$family == "poisson") "poisson" else "binomial(link = \"logit\")")
+  paste0("GLM estimation, family = ", glm_family_label(x))
+}
+
+# fixest prints the family as given in the call when it has named arguments
+# (`binomial(link = "logit")`, which is also what the string "logit" becomes), else the family
+# name (`binomial()`, "binomial", a variable holding a family).
+glm_family_label <- function(x) {
+  fam_call <- x$call$family
+  if (is.null(fam_call) || identical(fam_call, "logit")) {
+    if (x$family$family == "binomial") return("binomial(link = \"logit\")")
+  }
+  if (is.call(fam_call) && !is.null(names(fam_call))) return(deparse1l(fam_call))
+  x$family$family
 }
 
 #' @export

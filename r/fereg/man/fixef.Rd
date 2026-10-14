@@ -19,3 +19,10 @@ Fixed-effect coefficients with fixest's normalization: the first fixed effect is
 every connected component one level of each other fixed effect is set to 0 (counted in the
 \code{references} attribute). Varying slopes are listed as \code{fe[[x]]}.
 }
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+fe <- fixef(m)
+summary(fe)
+head(fe$year)
+}

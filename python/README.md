@@ -22,11 +22,20 @@ m.fixef()
 ```
 
 Supported: OLS, IV/2SLS (several endogenous regressors), Poisson, logit; any number of fixed
-effects, `fe1^fe2` interactions and varying slopes `fe[x]`; weights; iid, hetero and up to
-four-way clustered variances (`ssc()` as in pyfixest); `i()`, `C()`, multiple estimation
-(`sw`, `csw`, several left-hand sides, `split`/`fsplit`); `predict`, `resid`, `fixef`, `tidy`,
-`etable`. Data can be pandas or polars. Not implemented: probit; HC2/HC3, CRV3, Newey–West,
-Driscoll–Kraay and `nid` variances (these raise `NotImplementedError`); wild bootstrap,
+effects, `fe1^fe2` interactions and varying slopes `fe[x]`; weights; `i()`, `C()`, multiple
+estimation (`sw`, `csw`, several left-hand sides, `split`/`fsplit`); `predict`, `resid`,
+`fixef`, `tidy`, `etable`. Data can be pandas or polars.
+
+Variances (`vcov=` at estimation, or post hoc with `m.vcov(...)`), as in pyfixest with `ssc()`:
+`"iid"`, `"hetero"`/`"HC1"`, `"HC2"`, `"HC3"`; `{"CRV1": "a+b"}` and `{"CRV3": "a+b"}` (up to
+four-way); Newey–West `"NW"` and Driscoll–Kraay `"DK"` with
+`vcov_kwargs={"time_id": "year", "panel_id": "firm", "lag": 2}`. fereg extensions (pyfixest
+raises): HC2/HC3 with fixed effects, CRV3 for IV and logit (logit refits), Newey–West /
+Driscoll–Kraay for IV and Driscoll–Kraay without `panel_id`, and fixest's Conley spatial HAC:
+`vcov="conley", vcov_kwargs={"lat": "lat", "lon": "lon", "cutoff": "100km"}` (`cutoff` in km
+or `"60mi"`, default deduced as fixest; `pixel`, `distance="triangular"|"spherical"`).
+
+Not implemented: probit; `nid` variances (raise `NotImplementedError`); wild bootstrap,
 `ccv`, `decompose`, `ritest`, plotting and DiD helpers.
 
 `nthreads` (default: all cores) sets the number of threads. Results do not depend on it.

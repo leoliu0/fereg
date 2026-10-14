@@ -6,6 +6,7 @@ design columns and presents the results with pyfixest 0.60.0 names and conventio
 """
 
 from ._core import __version__
+from ._vcov import VcovTypeNotSupportedError
 from .estimation import feglm, feols, fepois, ssc
 from .etable import etable
 from .results import Fegaussian, Feglm, Feiv, Felogit, Feols, Fepois, FixestMulti
@@ -26,4 +27,5 @@ __all__ = [
     "Felogit",
     "Fegaussian",
     "FixestMulti",
+    "VcovTypeNotSupportedError",
 ]

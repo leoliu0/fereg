@@ -1,4 +1,4 @@
-* test_plugin.do — plugin ABI/protocol tests (cmd=version, selftest, prepare, ols plumbing).
+* test_plugin.do -- plugin ABI/protocol tests (cmd=version, selftest, prepare, ols plumbing).
 * Run from tests/stata after scripts/build_plugin.sh:   stata-mp -b do test_plugin.do
 * Needs reghdfe 6.13.1 and ppmlhdfe 2.3.3 (sample/singleton parity).
 * Steps that depend on estimators still being stubs in fereg-core print "PENDING:".
@@ -48,7 +48,7 @@ end
 
 * ---------------------------------------------------------------- version
 plugin call _rf_plugin, version
-assert "`_rf_version'" == "0.3.0"
+assert "`_rf_version'" == "0.4.0"
 di as txt "version: `_rf_version'"
 
 * ---------------------------------------------------------------- selftest

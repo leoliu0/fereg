@@ -1,5 +1,7 @@
 ^bootstrap\.R$
-^tools/vendor-crates\.sh$
+^tools/vendor-crates\.py$
+^cran-comments\.md$
+^src/rust/vendor$
 ^src/rust/target$
 ^src/rust/lib$
 ^src/\.cargo$

@@ -25,26 +25,68 @@ def test_version():
         ({"CRV1": "a"}, VcovSpec("cluster", "CRV", "CRV1", ("a",))),
         ({"CRV1": "a + b"}, VcovSpec("cluster", "CRV", "CRV1", ("a", "b"))),
         ({"CRV1": "a^b+c+d+e"}, VcovSpec("cluster", "CRV", "CRV1", ("a^b", "c", "d", "e"))),
+        ("HC2", VcovSpec("hc2", "hetero", "HC2")),
+        ("HC3", VcovSpec("hc3", "hetero", "HC3")),
+        ({"CRV3": "a"}, VcovSpec("crv3", "CRV", "CRV3", ("a",))),
+        ({"CRV3": "a+b^c"}, VcovSpec("crv3", "CRV", "CRV3", ("a", "b^c"))),
     ],
 )
 def test_parse_vcov(vcov, expected):
     assert parse_vcov(vcov) == expected
 
 
+def test_parse_vcov_kwargs():
+    nw = parse_vcov("NW", {"time_id": "t", "panel_id": "i", "lag": 3})
+    assert (nw.kind, nw.vcov_type, nw.detail, nw.lag, nw.time_id, nw.panel_id) == ("nw", "HAC", "NW", 3, "t", "i")
+    assert nw.columns() == {"time": "t", "panel": "i", "lat": None, "lon": None}
+    assert nw.core_options()["lag"] == 3
+    dk = parse_vcov("DK", {"time_id": "t"})
+    assert (dk.kind, dk.detail, dk.lag, dk.panel_id) == ("dk", "DK", None, None)
+    # HAC options are ignored by other estimators, as in pyfixest.
+    assert parse_vcov("hetero", {"lag": 2}).core_options()["lag"] is None
+    c = parse_vcov("conley", {"lat": "la", "lon": "lo", "cutoff": "60mi", "pixel": 5, "distance": "spherical"})
+    assert (c.kind, c.vcov_type, c.detail) == ("conley", "conley", "conley")
+    assert c.columns() == {"time": None, "panel": None, "lat": "la", "lon": "lo"}
+    # fixest: miles to km, and the pixel shares the cutoff's unit.
+    assert c.cutoff == pytest.approx(60 * 1.60934) and c.pixel == pytest.approx(5 * 1.60934) and c.spherical
+    assert parse_vcov("conley", {"lat": "la", "lon": "lo", "cutoff": "100 km"}).cutoff == 100.0
+    d = parse_vcov("conley", {"lat": "la", "lon": "lo"})
+    assert (d.cutoff, d.pixel, d.spherical) == (None, 0.0, False)
+
+
 @pytest.mark.parametrize(
-    "vcov,err",
+    "vcov,kwargs,err,match",
     [
-        ("HC3", NotImplementedError),
-        ({"CRV3": "a"}, NotImplementedError),
-        ({"CRV1": "a+b+c+d+e"}, ValueError),
-        ({"CRV1": "a+a"}, ValueError),
-        ("robust", ValueError),
-        (3, TypeError),
+        ({"CRV1": "a+b+c+d+e"}, None, ValueError, "at most 4"),
+        ({"CRV3": "a+b+c+d+e"}, None, ValueError, "at most 4"),
+        ({"CRV1": "a+a"}, None, ValueError, "duplicate"),
+        ({"CRV2": "a"}, None, ValueError, "vcov dict key must be CRV1 or CRV3"),
+        ({"CRV1": 1}, None, TypeError, "vcov dict value must be a string"),
+        ("robust", None, ValueError, "vcov string must be iid, hetero, HC1, HC2, HC3, NW, or DK"),
+        ("hc3", None, ValueError, "vcov string must be"),
+        (3, None, TypeError, "dict, string or None"),
+        ("nid", None, NotImplementedError, "Only models of type Quantreg support"),
+        ("NW", None, ValueError, "Missing required 'time_id' for NW/DK vcov"),
+        ("DK", {"panel_id": "i"}, ValueError, "Missing required 'time_id' for NW/DK vcov"),
+        ("NW", {"time_id": "t", "bogus": 1}, ValueError, "keys 'lag', 'time_id', or 'panel_id'"),
+        ("NW", {"time_id": "t", "lag": "2"}, ValueError, "integer values for 'lag'"),
+        ("NW", {"time_id": 3}, ValueError, "string values for 'time_id'"),
+        ("NW", {"time_id": "t", "panel_id": 1}, ValueError, "string values for 'panel_id'"),
+        ("conley", {"lat": "la"}, ValueError, "latitude and longitude"),
+        ("conley", {"lat": "la", "lon": "lo", "cutoff": -1}, ValueError, "'cutoff'"),
+        ("conley", {"lat": "la", "lon": "lo", "cutoff": "1.5mi"}, ValueError, "'cutoff'"),
+        ("conley", {"lat": "la", "lon": "lo", "pixel": -2}, ValueError, "'pixel'"),
+        ("conley", {"lat": "la", "lon": "lo", "distance": "flat"}, ValueError, "'triangular' or 'spherical'"),
     ],
 )
-def test_parse_vcov_errors(vcov, err):
-    with pytest.raises(err):
-        parse_vcov(vcov)
+def test_parse_vcov_errors(vcov, kwargs, err, match):
+    with pytest.raises(err, match=match):
+        parse_vcov(vcov, kwargs)
+
+
+def test_parse_vcov_kwargs_columns():
+    with pytest.raises(ValueError, match="The variable 'tt' is not in the data."):
+        parse_vcov("NW", {"time_id": "tt"}, columns=["t", "i"])
 
 
 def test_ssc():

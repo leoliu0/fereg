@@ -18,21 +18,23 @@ ssc(
 )
 }
 \arguments{
-\item{K.adj}{Multiply the variance by \code{(n - 1) / (n - K)} (iid and clustered) or
-\code{n / (n - K)} (heteroskedasticity-robust).}
+\item{K.adj}{Multiply the variance by \code{(n - 1) / (n - K)} (iid, clustered, Newey-West,
+Driscoll-Kraay) or \code{n / (n - K)} (heteroskedasticity-robust, Conley).}
 
 \item{K.fixef}{How fixed effects count in \code{K}: \code{"nonnested"} (fixed effects nested in a
 cluster variable do not count), \code{"full"} or \code{"none"}.}
 
 \item{K.exact}{Count the exact number of redundant fixed-effect coefficients.}
 
-\item{G.adj}{Multiply clustered variances by \code{G / (G - 1)}.}
+\item{G.adj}{Multiply clustered variances by \code{G / (G - 1)} (Newey-West and Driscoll-Kraay:
+\code{T / (T - 1)} with \code{T} time periods).}
 
 \item{G.df}{\code{"min"} (one factor with the smallest number of clusters) or \code{"conventional"}
 (each cluster dimension uses its own \code{G}).}
 
-\item{t.df}{Degrees of freedom of the t distribution with clustered variances: \code{"min"}
-(\code{G - 1}), \code{"conventional"} (\code{n - K}) or a number.}
+\item{t.df}{Degrees of freedom of the t distribution with clustered, Newey-West and
+Driscoll-Kraay variances: \code{"min"} (\code{G - 1}, or \code{T - 1}), \code{"conventional"} (\code{n - K}) or a
+number.}
 
 \item{adj, fixef.K, cluster.adj, cluster.df}{Former fixest names of \code{K.adj}, \code{K.fixef}, \code{G.adj}
 and \code{G.df}.}
@@ -41,5 +43,13 @@ and \code{G.df}.}
 An object of class \code{ssc.type}.
 }
 \description{
-Same arguments and defaults as fixest's \code{ssc()}.
+Same arguments and defaults as fixest's \code{ssc()}. As in fixest, the correction depends on the
+variance type: heteroskedasticity-robust, Newey-West, Driscoll-Kraay and Conley variances use
+\code{K.fixef = "full"} (no nesting), Newey-West and Driscoll-Kraay apply \code{G.adj} with \code{G} = the
+number of time periods, Conley uses \code{n / (n - K)}, and HC2 / HC3 use no correction at all.
+}
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+summary(m, vcov = ~id, ssc = ssc(K.adj = FALSE, G.adj = FALSE))
 }

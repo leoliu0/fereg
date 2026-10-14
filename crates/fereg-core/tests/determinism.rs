@@ -145,7 +145,7 @@ fn weighted_three_fe_with_repeated_cells() {
 #[test]
 fn joint_factor_with_coupled_blocks() {
     // Two large blocks (3000 and 800 levels) and a small one (10), weighted: the joint factor
-    // (faer AMD + supernodal LDLᵀ inside the pool) must give the same bits at any thread count.
+    // (faer AMD + supernodal LDL^T inside the pool) must give the same bits at any thread count.
     let d = random(200_000, &[20_000, 3_000, 800, 10], true, 5);
     let cfg = SolverConfig { small_limit: 100, ..SolverConfig::default() };
     let (iterations, escalated) = check(&d, SolverConfig { joint: JointPolicy::Always, ..cfg });

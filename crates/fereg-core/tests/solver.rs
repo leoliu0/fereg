@@ -1,4 +1,4 @@
-//! FeSolver (plan D5) against the dense explicit-dummy oracle (plan §2.5).
+//! FeSolver (plan D5) against the dense explicit-dummy oracle (plan sec. 2.5).
 
 use fereg_core::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts};
 use fereg_core::cg::PROBE_AT;
@@ -105,7 +105,7 @@ fn max_rel(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Checks `cfg`, the same configuration with large blocks scattered through the M×R scratch
+/// Checks `cfg`, the same configuration with large blocks scattered through the M x R scratch
 /// (`acc_bytes_max = 0`), and with the joint factor off / always (block-Jacobi escalation and
 /// joint paths both exercised); returns the info of `cfg`.
 fn check(d: &Data, cfg: SolverConfig, r: usize) -> SolveInfo {
@@ -154,7 +154,7 @@ fn ring(nfirm: usize, nindiv: usize) -> Data {
     Data { factors: vec![indiv, firm], terms: vec![vec![0], vec![1]], w: None, seed: 7 }
 }
 
-/// fixest "difficult" design: indiv × year panel, firm = obs mod F (band graph on a ring).
+/// fixest "difficult" design: indiv x year panel, firm = obs mod F (band graph on a ring).
 fn difficult(nindiv: usize, nyear: usize, nfirm: usize, weighted: bool) -> Data {
     let n = nindiv * nyear;
     let indiv: Vec<f64> = (0..n).map(|i| (i / nyear) as f64).collect();
@@ -329,7 +329,7 @@ fn disconnected_components() {
 
 #[test]
 fn nested_fe() {
-    // group ⊃ indiv: the group block is redundant given FE1 = indiv.
+    // group contains indiv: the group block is redundant given FE1 = indiv.
     let mut rng = SplitMix64::new(8);
     let n = 2000;
     let indiv: Vec<f64> = (0..n).map(|_| (rng.next_u64() % 200) as f64).collect();
@@ -395,9 +395,9 @@ fn set_weights_with_warm_start() {
         let wk: Vec<f64> = (0..n).map(|_| 0.3 + 2.0 * rng.next_f64()).collect();
         with_pool(4, |pool| {
             let wd: Vec<f64> = p.dense.row_order().iter().map(|&k| wk[k as usize]).collect();
-            p.dense.absorber_mut().set_weights(Some(wd), pool, &ctx).unwrap();
+            p.dense.absorber_mut().set_weights(Some(&wd), pool, &ctx).unwrap();
             let wf: Vec<f64> = p.fast.row_order().iter().map(|&k| wk[k as usize]).collect();
-            p.fast.set_weights(Some(wf), pool, &ctx).unwrap();
+            p.fast.set_weights(Some(&wf), pool, &ctx).unwrap();
         })
         .unwrap();
         for round in 0..3 {
@@ -411,7 +411,7 @@ fn set_weights_with_warm_start() {
     }
 }
 
-/// fit_rows reproduces z − z̃, and term_values match the dense oracle on connected designs.
+/// fit_rows reproduces z - z~, and term_values match the dense oracle on connected designs.
 #[test]
 fn fit_rows_and_term_values_parity() {
     let designs = [
@@ -430,7 +430,7 @@ fn fit_rows_and_term_values_parity() {
         let n = p.dense.n();
         with_pool(4, |pool| {
             for j in 0..2 {
-                // fit = z − z̃ (fast, kept order).
+                // fit = z - z~ (fast, kept order).
                 let fit = to_kept_order(p.fast.row_order(), &p.fast.fit_rows(&cf, j, pool));
                 let scale = p.cols[j].iter().fold(0.0f64, |m, v| m.max(v.abs()));
                 for i in 0..n {
@@ -450,7 +450,7 @@ fn fit_rows_and_term_values_parity() {
                     }
                 }
             }
-            // combine() is linear: fit of [1, −1] = fit_0 − fit_1.
+            // combine() is linear: fit of [1, -1] = fit_0 - fit_1.
             let comb = cf.combine(&[1.0, -1.0]);
             let a = p.fast.fit_rows(&comb, 0, pool);
             let b0 = p.fast.fit_rows(&cf, 0, pool);

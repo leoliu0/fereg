@@ -195,9 +195,10 @@ def test_fixef_values_are_lazy_and_cached():
     assert ours.__dict__["_fixef_values"] is values
     # Same values as an eager fit (keep_fixef=True).
     from fereg._binding import fit_design
+    from fereg._vcov import parse_vcov
 
     eager = fit_design(
-        ours._design, model="ols", vcov="iid", ssc=None, weights_type="aweights", fixef_rm="singleton",
+        ours._design, model="ols", vcov=parse_vcov("iid"), ssc=None, weights_type="aweights", fixef_rm="singleton",
         collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, keep_fixef=True,
     )
     for a, b in zip(values, eager.fixef):

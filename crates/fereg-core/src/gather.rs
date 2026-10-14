@@ -1,4 +1,4 @@
-//! Row-major data blocks in solver row order (plan §1.5).
+//! Row-major data blocks in solver row order (plan sec. 1.5).
 
 use std::mem::MaybeUninit;
 
@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use crate::error::RfError;
 use crate::par::{CHUNK, Pool, alloc_uninit, alloc_vec, assume_init};
 
-/// At least half of consecutive entries of `order` differ by ≤ 8.
+/// At least half of consecutive entries of `order` differ by <= 8.
 pub fn is_local(order: &[u32]) -> bool {
     if order.len() < 2 {
         return true;
@@ -16,7 +16,7 @@ pub fn is_local(order: &[u32]) -> bool {
     2 * near >= order.len() - 1
 }
 
-/// `out[k·R + j] = cols[j][order[k]]`. When `order` is local the columns are read directly;
+/// `out[k*R + j] = cols[j][order[k]]`. When `order` is local the columns are read directly;
 /// otherwise they are first transposed to kept-order rows (sequential reads) and the rows are
 /// then permuted (one random read of R contiguous values per row).
 pub fn gather_rows(order: &[u32], cols: &[&[f64]], pool: &Pool) -> Result<Vec<f64>, RfError> {
@@ -72,7 +72,7 @@ impl Col<'_> {
     }
 }
 
-/// Input-order columns → row-major block in row order: `out[k·R + j] = cols[j][kept[order[k]]]`
+/// Input-order columns -> row-major block in row order: `out[k*R + j] = cols[j][kept[order[k]]]`
 /// (`kept = None`: nothing dropped, the identity), composing the two index maps instead of
 /// compacting the columns first. Local orders read the columns directly; otherwise the kept rows
 /// are transposed first (ascending reads) and then permuted, as in [`gather_rows`]. Buffers are
@@ -102,7 +102,7 @@ pub fn gather_input(order: &[u32], kept: Option<&[u32]>, cols: &[Col], pool: &Po
     })
 }
 
-/// An n×r row-major block whose row k is written by `fill(k, row)` (every value; parallel over
+/// An n x r row-major block whose row k is written by `fill(k, row)` (every value; parallel over
 /// fixed chunks, without a zeroing pass).
 fn fill_rows(n: usize, r: usize, pool: &Pool, fill: impl Fn(usize, &mut [MaybeUninit<f64>]) + Sync) -> Result<Vec<f64>, RfError> {
     if r == 0 {
@@ -147,7 +147,7 @@ pub fn inverse(order: &[u32]) -> Vec<u32> {
     inv
 }
 
-/// Row-order values → kept order: `out[order[k]] = v[k]`.
+/// Row-order values -> kept order: `out[order[k]] = v[k]`.
 pub fn to_kept_order(order: &[u32], v: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0; v.len()];
     for (k, &o) in order.iter().enumerate() {

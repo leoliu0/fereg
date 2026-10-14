@@ -15,5 +15,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 fereg-core = { path = "../fereg-core" }
+# Only for `faer::set_global_parallelism` (as the R package and the Stata plugin).
+faer.workspace = true
 pyo3 = "0.29.3"
 numpy = "0.29.0"

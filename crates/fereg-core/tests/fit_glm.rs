@@ -10,9 +10,9 @@ use fit_common::*;
 /// The GLM core follows fixest's IRLS path (starting values, step halving, stopping rule), so
 /// every fixest field, the variance matrices included, matches at this tolerance.
 const RTOL: f64 = 1e-8;
-/// pyfixest's IRLS takes another path (μ₀ = (y + ȳ)/2, no step halving); its variance matrices
+/// pyfixest's IRLS takes another path (mu_0 = (y + ybar)/2, no step halving); its variance matrices
 /// come from the IRLS weights at the start of its last iteration and so carry that iteration's
-/// distance to the optimum (≈1e-6 relative here). Coefficients and deviances use [`RTOL`].
+/// distance to the optimum (~=1e-6 relative here). Coefficients and deviances use [`RTOL`].
 const RTOL_PY_V: f64 = 5e-6;
 
 #[test]
@@ -106,7 +106,7 @@ fn pyfixest_glm_cases() {
 }
 
 /// Pyfixest-flavor logit: the rows of the levels whose outcomes are all 1 (pyfixest keeps them)
-/// are left out of IRLS and reported at the bound, with fixed effects ±∞ on their levels; the
+/// are left out of IRLS and reported at the bound, with fixed effects +/-inf on their levels; the
 /// reported sample is pyfixest's (checked against the fixtures above).
 #[test]
 fn pyfixest_logit_left_out_rows() {
@@ -124,7 +124,7 @@ fn pyfixest_logit_left_out_rows() {
         for &k in &left_out {
             let i = out.obs[k] as usize;
             assert_eq!(input.y[i], 1.0, "{name}: only all-one levels are left out");
-            assert_eq!(eta[k], bound, "{name}: η at the upper bound");
+            assert_eq!(eta[k], bound, "{name}: eta at the upper bound");
             assert_eq!(out.irls_weights.as_ref().unwrap()[k], (1.0 - out.fitted.as_ref().unwrap()[k]) * out.fitted.as_ref().unwrap()[k]);
         }
         // Their level of the first term diverges; the other rows' fixed effects are finite.

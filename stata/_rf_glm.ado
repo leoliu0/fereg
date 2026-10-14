@@ -1,5 +1,5 @@
-*! version 0.3.0  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
-*! Syntax, messages and e() of feppml mirror ppmlhdfe 2.3.3 (Correia, Guimarães, Zylkin).
+*! version 0.4.0  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
+*! Syntax, messages and e() of feppml mirror ppmlhdfe 2.3.3 (Correia, Guimaraes, Zylkin).
 *
 * Usage (from feppml.ado / felogit.ado):  _rf_glm poisson|logit <command arguments>
 program _rf_glm, eclass
@@ -16,6 +16,7 @@ program _rf_glm, eclass
 	syntax varlist(fv ts numeric) [if] [in] [pw fw/] [,
 		Absorb(string) NOAbsorb
 		VCE(string) CLuster(string)
+		BW(string) kernel(string) kiefer dkraay(integer 0) psd0 psda
 		EXPosure(varname numeric) OFFset(varname numeric)
 		EForm IRr OR
 		GUESS(string) TOLerance(real 1e-8) MAXITerations(integer 10000)
@@ -191,8 +192,41 @@ program _rf_glm, eclass
 	* PPML uses robust standard errors
 	if ("`family'" == "poisson" & "`vcetype'" == "unadjusted") local vcetype robust
 	local clustervars `s(clustervars)'
-	local base_clustervars `s(base_clustervars)'
 	local num_clusters `s(num_clusters)'
+	local dkraay_bw `s(dkraay_bw)'
+	local conley_lat `s(conley_lat)'
+	local conley_lon `s(conley_lon)'
+	local conley_cutoff `s(cutoff)'
+	local conley_pixel `s(pixel)'
+	local conley_distance `s(distance)'
+	* ivreghdfe kernel options (borrowed) and vce(dkraay); Poisson is always robust (ppmlhdfe)
+	local userrobust = inlist("`vcetype'", "robust", "cluster") & ("`family'" == "poisson" | !(`"`vce'"' == "" & "`weight'" == "pweight"))
+	_rf_parse_hac, vcetype(`vcetype') clustervars(`clustervars') weighttype(`weight') userrobust(`userrobust') ///
+		bw(`bw') kernel(`kernel') `kiefer' dkraay(`dkraay') `psd0' `psda'
+	local hac `s(hac)'
+	local hac_kernel `s(kernel)'
+	local hac_kernelkey `s(kernelkey)'
+	local hac_bw `s(bw)'
+	local hac_kiefer `s(kiefer)'
+	local hac_psd `s(psd)'
+	local hac_robust `s(robust)'
+	local tvar `s(tvar)'
+	local ivar `s(ivar)'
+	local xtivar `s(xtivar)'
+	local tdelta `s(tdelta)'
+	local clustvar_e `clustervars'
+	if (`hac') {
+		local vcetype `s(vcetype)'
+		local clustervars `s(clustervars)'
+		local num_clusters `s(num_clusters)'
+		if (`dkraay') local clustvar_e `tvar'
+	}
+	local base_clustervars
+	foreach dim of local clustervars {
+		local parts : subinstr local dim "#" " ", all
+		local base_clustervars `base_clustervars' `parts'
+	}
+	local base_clustervars : list uniq base_clustervars
 
 	capture drop __hdfe* // previously saved FEs (as reghdfe)
 	_rf_parse_absorb `absorb'
@@ -224,7 +258,7 @@ program _rf_glm, eclass
 	* offset() the model and cluster variables are marked out here first, since the exposure
 	* check runs over that sample.
 	if ("`exposure'`offset'" != "") {
-		local varlist `depvar' `indepvars' `base_clustervars'
+		local varlist `depvar' `indepvars' `base_clustervars' `tvar' `ivar' `conley_lat' `conley_lon'
 		marksample touse, strok
 	}
 	else marksample touse, novarlist
@@ -254,7 +288,7 @@ program _rf_glm, eclass
 	local nmodel : word count `modelvars'
 
 	local factors `absfactors'
-	foreach v of local base_clustervars {
+	foreach v in `base_clustervars' `tvar' `ivar' {
 		if (!`: list v in factors') local factors `factors' `v'
 	}
 	local nfac : word count `factors'
@@ -304,16 +338,10 @@ program _rf_glm, eclass
 			local abskey = cond("`abskey'" == "", "`term'", "`abskey';`term'")
 		}
 	}
-	local clukey
-	foreach dim of local clustervars {
-		local parts : subinstr local dim "#" " ", all
-		local cpos
-		foreach v of local parts {
-			local k : list posof "`v'" in factors
-			local cpos = cond("`cpos'" == "", "`k'", "`cpos'*`k'")
-		}
-		local clukey = cond("`clukey'" == "", "`cpos'", "`clukey';`cpos'")
-	}
+	_rf_vce_args, factors(`factors') vcetype(`vcetype') clustervars(`clustervars') tvar(`tvar') ivar(`ivar') ///
+		tdelta(`tdelta') dkraay_bw(`dkraay_bw') hac(`hac') kernelkey(`hac_kernelkey') bw(`hac_bw') ///
+		kiefer(`hac_kiefer') psd(`hac_psd') lat(`conley_lat') lon(`conley_lon') cutoff(`conley_cutoff') ///
+		pixel(`conley_pixel') distance(`conley_distance')
 
 	local common `""threads=`threads'" "verbose=`plugin_verbose'""'
 	if ("`serialio'" != "") local common `"`common' "serialio=1""'
@@ -324,14 +352,14 @@ program _rf_glm, eclass
 // Prepare: factorize, drop singletons and fe-separated groups
 // --------------------------------------------------------------------------
 	_rf_load
-	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "vce=`vcetype'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
+	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
+	local args `"`args' `rf_vceargs'"'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
-	if ("`vcetype'" == "cluster") local args `"`args' "cluster=`clukey'""'
 	* No if, in, weight, exposure, offset or markout: touse is 1 everywhere and the plugin does
 	* not read it
 	if (`"`if'`in'`weight'`exposure'`offset'`rf_markvars'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
-	_rf_load `facvars' `slopevars_r' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
+	_rf_load `facvars' `slopevars_r' `conley_lat' `conley_lon' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
 	local num_singletons0 = scalar(__rf_num_singletons)
 	local num_fesep0 = scalar(__rf_num_fe_separated)
@@ -351,6 +379,7 @@ program _rf_glm, eclass
 			}
 		}
 	}
+	if (`hac' & !`is_tagsep') _rf_hac_gaps `touse' `tvar'
 	if ("`family'" == "poisson") {
 		qui count if `touse' & `yvar' < 0
 		if (r(N)) {
@@ -568,13 +597,17 @@ program _rf_glm, eclass
 		else if ("`s'" == "p") ereturn scalar p = chi2tail(e(df_m), e(chi2))
 		else PostScalar `s'
 	}
-	if ("`vcetype'" == "cluster") {
-		ereturn scalar N_clustervars = `num_clusters'
-		forval i = 1/`num_clusters' {
+	local post_clusters `clustervars'
+	if ("`vcetype'" == "dkraay") local post_clusters `tvar'
+	local post_ncl : word count `post_clusters'
+	if (`post_ncl' > 0) {
+		ereturn scalar N_clustervars = `post_ncl'
+		forval i = 1/`post_ncl' {
 			PostScalar N_clust`i'
 		}
 		PostScalar N_clust
 	}
+	if ("`vcetype'" == "dkraay") PostScalar dkraay_bw
 
 	if ("`d'" != "") ereturn local d `d'
 	if ("`family'" == "poisson") {
@@ -592,20 +625,40 @@ program _rf_glm, eclass
 	local title = cond("`family'" == "poisson", "HDFE {help `cmd'##description:PPML} regression", "HDFE Logistic regression")
 	ereturn local title "`title'"
 	ereturn local chi2type "Wald"
-	if ("`family'" == "logit") {
-		ereturn local vce = cond("`vcetype'" == "unadjusted", "oim", "`vcetype'")
+	* e(vce) and e(vcetype): ppmlhdfe (robust, cluster), logit (oim), reghdfe (dkraay), regress
+	* (hc2, hc3), ivreghdfe's strings for the kernel options; crv3 and conley are fereg's
+	if (`hac') {
+		_rf_hac_post, hac(1) kernel(`hac_kernel') tvar(`tvar') ivar(`xtivar') robust(`hac_robust') ///
+			clustvar(`clustvar_e') clusters(`clustervars') kiefer(`hac_kiefer') psd(`hac_psd') bwchoice(`_rf_bwchoice')
+		ereturn local vce `rf_vcestr'
+		if ("`rf_vcetype'" != "") ereturn local vcetype `rf_vcetype'
+		ereturn local hacsubtitleV "`rf_hacV'"
+		if ("`rf_hacV2'" != "") ereturn local hacsubtitleV2 "`rf_hacV2'"
+		if ("`rf_vcetype'" == "Robust") ereturn local title3 "Statistics robust to heteroskedasticity"
+		else ereturn local title3 "Statistics robust to autocorrelation"
 	}
 	else {
-		ereturn local vce `vcetype'
-	}
-	if ("`vcetype'" != "unadjusted") ereturn local vcetype Robust
-	if ("`vcetype'" == "cluster") {
-		forval i = 1/`num_clusters' {
-			ereturn local clustvar`i' `: word `i' of `clustervars''
+		if ("`family'" == "logit") {
+			ereturn local vce = cond("`vcetype'" == "unadjusted", "oim", "`vcetype'")
 		}
-		ereturn local clustvar `clustervars'
-		ereturn local title3 "Statistics robust to heteroskedasticity"
+		else {
+			ereturn local vce `vcetype'
+		}
+		if inlist("`vcetype'", "robust", "cluster", "dkraay") ereturn local vcetype Robust
+		if inlist("`vcetype'", "hc2", "hc3") ereturn local vcetype = "Robust " + upper("`vcetype'")
+		if ("`vcetype'" == "crv3") ereturn local vcetype CRV3
+		if ("`vcetype'" == "conley") ereturn local vcetype Conley
+		if (`post_ncl' > 0 | "`vcetype'" == "conley") ereturn local title3 "Statistics robust to heteroskedasticity"
+		if ("`vcetype'" == "dkraay") ereturn local title4 "and autocorrelation (Driscoll-Kraay)"
+		if ("`vcetype'" == "conley") ereturn local title4 "and spatial correlation (Conley)"
 	}
+	if (`post_ncl' > 0) {
+		forval i = 1/`post_ncl' {
+			ereturn local clustvar`i' `: word `i' of `post_clusters''
+		}
+		ereturn local clustvar `post_clusters'
+	}
+	if ("`vcetype'" == "conley") _rf_conley_post, lat(`conley_lat') lon(`conley_lon') pixel(`conley_pixel') distance(`conley_distance')
 	mata: st_global("e(indepvars)", invtokens((tokens(st_local("indepvars_e")), " _cons")))
 	ereturn local depvar `depvar'
 	if (!`is_noabsorb') ereturn local title2 "Absorbing `G' HDFE group`=cond(`G' == 1, "", "s")'"

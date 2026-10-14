@@ -20,7 +20,7 @@ pub fn version(a: &Args) -> Result<(), RfError> {
 /// session with that FE1 would: `direct` reads each row from its observation, `kept` reads
 /// sequentially and permutes in memory), `spin=<seconds>` (poll Break for that long; r(1) on Break).
 ///
-/// Results: `__rf_nobs`, `__rf_chk` = Σ_rows Σ_j j·v_j (missing → 0; summed left to right in
+/// Results: `__rf_nobs`, `__rf_chk` = sum_rows sum_j j*v_j (missing -> 0; summed left to right in
 /// observation order, or in row order with `sortby`), `__rf_tread` (read seconds).
 pub fn selftest(a: &Args) -> Result<(), RfError> {
     let common = a.common(true)?;

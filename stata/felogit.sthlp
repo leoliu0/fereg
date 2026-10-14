@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.0}{...}
+{* *! version 0.4.0}{...}
 {vieweralsosee "[R] logit" "help logit"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
@@ -47,8 +47,9 @@ As with {cmd:logit}, a nonzero, nonmissing {it:depvar} counts as a success.
 {synopt :{opt d}}save the sum of the fixed effects in {it:_felogit_d} (overwritten if it exists){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(felogit##vce:vcetype)}}{opt oim} (default), {opt r:obust}, or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(felogit##vce:vcetype)}}{opt oim} (default), {opt r:obust}, {opt cl:uster} {it:clustervars} (multi-way allowed), {opt dk:raay} [{it:#}], {opt hc2}, {opt hc3}, {opt crv3} {it:clustervars}, or {opt conley} {it:latvar lonvar}[{cmd:,} {it:conley_options}]{p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
+{synopt :{opt bw()} {opt kernel()} {opt dkraay()} {opt kiefer} {opt psd0} {opt psda}}kernel (HAC) variances, as in {help fereg##variance:fereg}{p_end}
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups{p_end}
 {synopt :{opt sep:aration(list)}}{cmd:fe} (default), {cmd:fe mu}, {cmd:mu} or {cmd:none}{p_end}
@@ -85,7 +86,7 @@ incidental-parameter bias correction: its slope coefficients equal those of {cmd
 {pstd}
 The model is fitted by iteratively reweighted least squares, with step halving when the deviance increases. Each
 step partials out the fixed effects with the compiled solver of {help fereg} (warm-started across iterations),
-following the algorithm of {cmd:ppmlhdfe} (Correia, Guimarães and Zylkin, 2020). Fixed-effect groups whose outcome
+following the algorithm of {cmd:ppmlhdfe} (Correia, Guimar{c a~}es and Zylkin, 2020). Fixed-effect groups whose outcome
 is always 0 or always 1 are dropped first, since their fixed effect is infinite. Results are bit-for-bit
 identical for any number of threads.
 
@@ -113,6 +114,17 @@ Saved fixed effects ({it:target}{cmd:=} or {cmd:savefe}) add up to d.
 {opt ols}) is the default; {opt r:obust} gives Huber/White errors with small-sample factor N/(N-1); {opt cl:uster}
 {it:clustervars} gives cluster-robust errors with factor G/(G-1). Several cluster variables give multi-way
 clustering. {cmd:pweight}s imply {cmd:vce(robust)}. These are the conventions of {cmd:logit}.
+
+{phang}
+The other variance estimators of {help fereg##variance:fereg} are available as {it:fereg extensions}
+({cmd:logit} has none of them for this model), with the same syntax, applied to the scores of the final IRLS
+iteration: {opt vce(dkraay [#])} ({cmd:reghdfe}'s Driscoll-Kraay formula with the asymptotic factor T/(T-1));
+the {cmd:ivreghdfe} kernel options {opt bw()}, {opt kernel()}, {opt dkraay(#)}, {opt kiefer}, {opt psd0} and
+{opt psda} (HAC with {opt vce(robust)}, AC with the default {opt oim}; factor N/(N-1), or G/(G-1) with
+clustering); {opt vce(hc2)} and {opt vce(hc3)} (leverage of the IRLS-weighted design including the fixed
+effects, no factor); {opt vce(crv3 clustervars)} (leave-one-cluster-out logit refits, factor G/(G-1); the
+jackknifed {cmd:_cons} is the linearized one); {opt vce(conley ...)} ({cmd:fixest}'s Conley variance, factor
+N/(N-1)). The header adds the lines of {cmd:fereg} (DK bandwidth, Conley cutoff, kernel).
 
 {phang}
 {opt offset(varname)} adds {it:varname} to the index with coefficient 1.
@@ -246,6 +258,7 @@ certifying its result (a note is printed){p_end}
 {synopt:{cmd:e(N_clust)}}number of clusters (minimum across cluster variables){p_end}
 {synopt:{cmd:e(N_clust#)}}number of clusters of the #th cluster variable{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster variables{p_end}
+{synopt:{cmd:e(dkraay_bw)}, {cmd:e(bw)}, {cmd:e(conley_cutoff)}, {cmd:e(conley_pixel)}}as {help fereg##results:fereg}{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
@@ -259,9 +272,12 @@ certifying its result (a note is printed){p_end}
 {synopt:{cmd:e(dofmethod)}}degrees-of-freedom adjustments used{p_end}
 {synopt:{cmd:e(title)}}{cmd:HDFE Logistic regression} ({cmd:Logistic regression} without fixed effects){p_end}
 {synopt:{cmd:e(title2)}}{cmd:Absorbing # HDFE group(s)}{p_end}
-{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors){p_end}
-{synopt:{cmd:e(vce)}}{cmd:oim}, {cmd:robust} or {cmd:cluster}{p_end}
-{synopt:{cmd:e(vcetype)}}{cmd:Robust} for robust and clustered errors{p_end}
+{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors, {cmd:dkraay}, {cmd:conley}, robust kernels; {cmd:Statistics robust to autocorrelation} with an AC kernel){p_end}
+{synopt:{cmd:e(title4)}}second line for {cmd:dkraay} and {cmd:conley}{p_end}
+{synopt:{cmd:e(vce)}}{cmd:oim}, {cmd:robust}, {cmd:cluster}, {cmd:dkraay}, {cmd:hc2}, {cmd:hc3}, {cmd:crv3}, {cmd:conley}, or {cmd:ivreghdfe}'s description with a kernel{p_end}
+{synopt:{cmd:e(vcetype)}}{cmd:Robust} for robust, clustered, Driscoll-Kraay and HAC errors; {cmd:Robust HC2}, {cmd:Robust HC3}, {cmd:CRV3}, {cmd:Conley}{p_end}
+{synopt:{cmd:e(kernel)}, {cmd:e(tvar)}, {cmd:e(ivar)}, {cmd:e(bwchoice)}, {cmd:e(hacsubtitleV)}, {cmd:e(hacsubtitleV2)}}kernel variances, as {help fereg##results:fereg}{p_end}
+{synopt:{cmd:e(conley_lat)}, {cmd:e(conley_lon)}, {cmd:e(conley_distance)}}Conley coordinates and distance{p_end}
 {synopt:{cmd:e(clustvar)}}cluster variables{p_end}
 {synopt:{cmd:e(clustvar#)}}#th cluster variable{p_end}
 {synopt:{cmd:e(chi2type)}}{cmd:Wald}{p_end}
@@ -291,11 +307,14 @@ certifying its result (a note is printed){p_end}
 {title:Author}
 
 {pstd}Leo Liu{break}
+UTS Business School, University of Technology Sydney{break}
+Sydney, Australia{break}
+{browse "mailto:leo.liu@uts.edu.au":leo.liu@uts.edu.au}{break}
 {browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}
 The IRLS algorithm, separation checks and displays of {cmd:felogit} follow {cmd:ppmlhdfe} by Sergio Correia,
-Paulo Guimarães and Thomas Zylkin (MIT license):{p_end}
+Paulo Guimar{c a~}es and Thomas Zylkin (MIT license):{p_end}
 
-{phang}Correia, S., P. Guimarães, and T. Zylkin. 2020. Fast Poisson estimation with high-dimensional fixed effects.
+{phang}Correia, S., P. Guimar{c a~}es, and T. Zylkin. 2020. Fast Poisson estimation with high-dimensional fixed effects.
 {it:Stata Journal} 20(1): 95-115.{p_end}

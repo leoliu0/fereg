@@ -130,12 +130,42 @@ fn clusters(items: &[Robj]) -> Result<Vec<Vec<usize>>> {
     items.iter().map(|r| indices(r, "cluster")).collect()
 }
 
-fn vcov_kind(s: &str) -> Result<VcovKind> {
-    match s {
+/// The variance request built by `fereg:::core_kind()`: list(type, lag, cutoff, pixel, spherical)
+/// with `lag` / `cutoff` NA for the reference's default (fixest's lag rules, deduced cutoff).
+fn vcov_kind(l: &List) -> Result<VcovKind> {
+    // NA_real_ (a NaN payload) = the reference's default; read through the slice (extendr's
+    // `as_real` maps NA to `None`).
+    let opt = |name: &str| -> Result<Option<f64>> {
+        let v = field(l, name).as_real_slice().and_then(|s| s.first().copied()).ok_or_else(|| invalid(format!("fereg: `{name}` must be a number")))?;
+        Ok(if v.is_nan() { None } else { Some(v) })
+    };
+    let lag = || -> Result<Option<usize>> {
+        match opt("lag")? {
+            None => Ok(None),
+            Some(v) if v >= 0.0 && v.fract() == 0.0 => Ok(Some(v as usize)),
+            Some(_) => Err(invalid("fereg: the lag must be a non-negative integer")),
+        }
+    };
+    match get_str(l, "type")? {
         "iid" => Ok(VcovKind::Iid),
         "hetero" => Ok(VcovKind::Hetero),
+        "hc2" => Ok(VcovKind::Hc2),
+        "hc3" => Ok(VcovKind::Hc3),
         "cluster" => Ok(VcovKind::Cluster),
-        _ => Err(invalid(format!("fereg: unknown vcov type `{s}`"))),
+        "crv3" => Ok(VcovKind::Crv3),
+        "nw" => Ok(VcovKind::NeweyWest { lag: lag()? }),
+        "dk" => Ok(VcovKind::DriscollKraay { lag: lag()? }),
+        "conley" => Ok(VcovKind::Conley { cutoff: opt("cutoff")?, pixel: get_f64(l, "pixel")?, spherical: get_bool(l, "spherical")? }),
+        s => Err(invalid(format!("fereg: unknown vcov type `{s}`"))),
+    }
+}
+
+/// A single 0-based factor index from a 1-based number, or `None` for `NULL`.
+fn opt_index(r: &Robj, what: &str) -> Result<Option<usize>> {
+    match indices(r, what)?.as_slice() {
+        [] => Ok(None),
+        [i] => Ok(Some(*i)),
+        _ => Err(invalid(format!("fereg: `{what}` must be a single factor index"))),
     }
 }
 
@@ -186,7 +216,7 @@ fn spec_of(l: &List) -> Result<FitSpec> {
         model,
         flavor: Flavor::Fixest,
         intercept: get_bool(l, "intercept")?,
-        vcov: vcov_kind(get_str(l, "vcov")?)?,
+        vcov: vcov_kind(&field(l, "vcov").try_into().map_err(|_| invalid("fereg: `vcov` must be a list"))?)?,
         ssc: ssc_of(&ssc)?,
         weights_type: WeightsType::Aweights,
         fixef_rm,
@@ -204,6 +234,9 @@ fn spec_of(l: &List) -> Result<FitSpec> {
 }
 
 fn ctx(threads: i32) -> Ctx<'static> {
+    // faer calls made outside the core's scoped pools must not start rayon's global pool (all
+    // cores, threads outliving the call): every parallel faer call in the core passes its pool.
+    faer::set_global_parallelism(faer::Par::Seq);
     Ctx { threads: threads.max(0) as usize, verbose: 0, interrupt: &interrupted, log: &print_log }
 }
 
@@ -231,7 +264,7 @@ fn rows_1based(v: &[u32]) -> Robj {
     Integers::from_values(v.iter().map(|&i| i as i32 + 1)).into()
 }
 
-/// Square row-major `k × k` matrix as an R matrix (column-major).
+/// Square row-major `k x k` matrix as an R matrix (column-major).
 fn matrix(v: &[f64]) -> Robj {
     let k = (v.len() as f64).sqrt() as usize;
     let mut cm = vec![0.0; v.len()];
@@ -266,10 +299,16 @@ fn sources(s: &[CoefSource]) -> Robj {
 }
 
 fn vcov_out(v: &VcovOutput) -> Robj {
-    let kind = match v.kind {
-        VcovKind::Iid => "iid",
-        VcovKind::Hetero => "hetero",
-        VcovKind::Cluster => "cluster",
+    let (kind, lag, cutoff) = match v.kind {
+        VcovKind::Iid => ("iid", None, None),
+        VcovKind::Hetero => ("hetero", None, None),
+        VcovKind::Cluster => ("cluster", None, None),
+        VcovKind::Hc2 => ("hc2", None, None),
+        VcovKind::Hc3 => ("hc3", None, None),
+        VcovKind::Crv3 => ("crv3", None, None),
+        VcovKind::NeweyWest { lag } => ("nw", lag, None),
+        VcovKind::DriscollKraay { lag } => ("dk", lag, None),
+        VcovKind::Conley { cutoff, .. } => ("conley", None, cutoff),
     };
     named(vec![
         ("kind", kind.into()),
@@ -278,9 +317,30 @@ fn vcov_out(v: &VcovOutput) -> Robj {
         ("df_t", real(v.df_t.unwrap_or(f64::NAN))),
         ("t_dist", v.df_t.is_some().into()),
         ("n_clusters", reals(&v.n_clusters.iter().map(|&g| g as f64).collect::<Vec<_>>())),
+        ("n_periods", real(v.n_periods.map_or(f64::NAN, |t| t as f64))),
+        // Resolved defaults: Newey-West / Driscoll-Kraay lag, Conley cutoff (km).
+        ("lag", real(lag.map_or(f64::NAN, |l| l as f64))),
+        ("cutoff", real(cutoff.unwrap_or(f64::NAN))),
         ("ssc_factor", real(v.ssc_factor)),
         ("psd_fixed", v.psd_fixed.into()),
     ])
+}
+
+/// Time / panel factor indices and coordinates of a variance request, each `None` when unused.
+struct VcovVars<'a> {
+    time: Option<usize>,
+    panel: Option<usize>,
+    lat: Option<&'a [f64]>,
+    lon: Option<&'a [f64]>,
+}
+
+fn vcov_vars<'a>(time: &Robj, panel: &Robj, lat: &'a Robj, lon: &'a Robj) -> Result<VcovVars<'a>> {
+    Ok(VcovVars {
+        time: opt_index(time, "time")?,
+        panel: opt_index(panel, "panel")?,
+        lat: opt_real(lat, "lat")?,
+        lon: opt_real(lon, "lon")?,
+    })
 }
 
 fn fixef_list(values: &[FixefValues]) -> Robj {
@@ -453,6 +513,8 @@ fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
     let drop_r = field(&input, "drop");
     let fe_r = list_items(&input, "fe")?;
     let cl_r = list_items(&input, "cluster")?;
+    let (time_r, panel_r, lat_r, lon_r) = (field(&input, "time"), field(&input, "panel"), field(&input, "lat"), field(&input, "lon"));
+    let vv = vcov_vars(&time_r, &panel_r, &lat_r, &lon_r)?;
 
     let drop: Option<Vec<bool>> = if drop_r.is_null() {
         None
@@ -488,8 +550,11 @@ fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
         weights: opt_real(&w_r, "weights")?,
         offset: opt_real(&off_r, "offset")?,
         cluster: clusters(&cl_r)?,
+        time: vv.time,
+        panel: vv.panel,
+        lat: vv.lat,
+        lon: vv.lon,
         drop: drop.as_deref(),
-        ..Default::default()
     };
     let spec = spec_of(&spec)?;
     let ctx = ctx(nthreads);
@@ -497,9 +562,10 @@ fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
     output(out, n, nthreads.max(0) as usize)
 }
 
-/// Variance matrix of a fitted model under another estimator / small-sample correction.
+/// Variance matrix of a fitted model under another estimator / small-sample correction. `vars` is
+/// list(time, panel, lat, lon) over the original input rows (as in `fereg_fit`'s input).
 #[extendr]
-fn fereg_vcov(state: Robj, kind: &str, ssc: List, factors: List, factor_names: Strings, cluster: List, nthreads: i32) -> Result<Robj> {
+fn fereg_vcov(state: Robj, kind: List, ssc: List, factors: List, factor_names: Strings, cluster: List, vars: List, nthreads: i32) -> Result<Robj> {
     let st = state_of(&state)?;
     let fac_r: Vec<Robj> = factors.values().collect();
     let names: Vec<String> = factor_names.iter().map(|s| s.to_string()).collect();
@@ -507,11 +573,20 @@ fn fereg_vcov(state: Robj, kind: &str, ssc: List, factors: List, factor_names: S
         return Err(invalid("fereg: one name per factor is required"));
     }
     let cols = factor_cols(&fac_r, &names)?;
-    let cl_r: Vec<Robj> = cluster.values().collect();
+    let cl = clusters(&cluster.values().collect::<Vec<Robj>>())?;
+    let (time_r, panel_r, lat_r, lon_r) = (field(&vars, "time"), field(&vars, "panel"), field(&vars, "lat"), field(&vars, "lon"));
+    let vv = vcov_vars(&time_r, &panel_r, &lat_r, &lon_r)?;
     let ctx = ctx(nthreads);
-    let v = st
-        .vcov(vcov_kind(kind)?, &ssc_of(&ssc)?, &cols, &names, &clusters(&cl_r)?, &ctx)
-        .map_err(core_err)?;
+    let data = fit::VcovData {
+        factors: &cols,
+        factor_names: &names,
+        cluster: &cl,
+        time: vv.time,
+        panel: vv.panel,
+        lat: vv.lat,
+        lon: vv.lon,
+    };
+    let v = st.vcov(vcov_kind(&kind)?, &ssc_of(&ssc)?, &data, &ctx).map_err(core_err)?;
     Ok(vcov_out(&v))
 }
 

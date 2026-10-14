@@ -47,7 +47,7 @@ fn bit_identical_across_threads() {
     }
 }
 
-/// Plan §1 toy example: the printed six digits of fixest.
+/// Plan sec. 1 toy example: the printed six digits of fixest.
 #[test]
 fn toy_example() {
     let cases = read_json("fit_fixest.json").list();
@@ -80,16 +80,16 @@ fn pyfixest_cases() {
             assert!(msg.contains("cluster variable cna"), "{name}: {msg}");
             continue;
         }
-        // pyfixest reports weighted residuals scaled by √w: those are not compared.
+        // pyfixest reports weighted residuals scaled by sqrt w: those are not compared.
         let mut j = j.clone();
-        if !matches!(j.get("weights"), Some(J::Null) | None)
-            && let J::Obj(fields) = &mut j
-        {
-            fields.iter_mut().filter(|(k, _)| k == "expect").for_each(|(_, e)| {
-                if let J::Obj(ef) = e {
-                    ef.retain(|(k, _)| k != "resid");
-                }
-            });
+        if !matches!(j.get("weights"), Some(J::Null) | None) {
+            if let J::Obj(fields) = &mut j {
+                fields.iter_mut().filter(|(k, _)| k == "expect").for_each(|(_, e)| {
+                    if let J::Obj(ef) = e {
+                        ef.retain(|(k, _)| k != "resid");
+                    }
+                });
+            }
         }
         check_case(&j, Flavor::Pyfixest, FactorKind::F64, 4, RTOL);
     }

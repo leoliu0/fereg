@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.0}{...}
+{* *! version 0.4.0}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -48,8 +48,9 @@ separation checks, same output and the same stored results, computed by a parall
 {synopt :{opt d}}save the sum of the fixed effects in {it:_ppmlhdfe_d} (overwritten if it exists){p_end}
 
 {syntab:Model}
-{synopt :{opth vce:(feppml##vce:vcetype)}}{opt r:obust} (default) or {opt cl:uster} {it:clustervars} (multi-way allowed){p_end}
+{synopt :{opth vce:(feppml##vce:vcetype)}}{opt r:obust} (default), {opt cl:uster} {it:clustervars} (multi-way allowed), {opt dk:raay} [{it:#}], {opt hc2}, {opt hc3}, {opt crv3} {it:clustervars}, or {opt conley} {it:latvar lonvar}[{cmd:,} {it:conley_options}]{p_end}
 {synopt :{opth cl:uster(varlist)}}synonym of {cmd:vce(cluster} {it:varlist}{cmd:)}{p_end}
+{synopt :{opt bw()} {opt kernel()} {opt dkraay()} {opt psd0} {opt psda}}kernel (HAC) variances, as in {help fereg##variance:fereg}{p_end}
 {synopt :{opth exp:osure(varname)}}include ln({it:varname}) in the model with coefficient constrained to 1{p_end}
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups (not recommended){p_end}
@@ -86,7 +87,7 @@ separation checks, same output and the same stored results, computed by a parall
 
 {pstd}
 {cmd:feppml} fits Poisson regressions by pseudo-maximum likelihood (PPML) with any number of absorbed
-fixed effects, following {cmd:ppmlhdfe} 2.3.3 (Correia, Guimarães and Zylkin, 2020): iteratively reweighted
+fixed effects, following {cmd:ppmlhdfe} 2.3.3 (Correia, Guimar{c a~}es and Zylkin, 2020): iteratively reweighted
 least squares with an inner tolerance that tightens as IRLS converges, singletons and observations separated
 by a fixed effect dropped iteratively, the ReLU separation check, the same collinearity rules and messages,
 robust or multi-way clustered standard errors, and the same {cmd:e()} results, so that {cmd:esttab},
@@ -125,6 +126,17 @@ multi-way clustering with the Cameron-Gelbach-Miller adjustment when the varianc
 semidefinite. Cluster variables may be interactions ({it:exporter#importer}) and string variables.
 
 {phang}
+The other variance estimators of {help fereg##variance:fereg} are available as {it:fereg extensions}
+({cmd:ppmlhdfe} has none of them), with the same syntax, applied to the scores of the final IRLS iteration
+(working residuals and weights): {opt vce(dkraay [#])} ({cmd:reghdfe}'s Driscoll-Kraay formula with the
+asymptotic factor T/(T-1)); the {cmd:ivreghdfe} kernel options {opt bw()}, {opt kernel()}, {opt dkraay(#)},
+{opt psd0} and {opt psda} (always HAC, since PPML errors are robust, so {opt kiefer} is not allowed; factor
+N/(N-1), or G/(G-1) with clustering); {opt vce(hc2)} and {opt vce(hc3)} (leverage of the IRLS-weighted design
+including the fixed effects, no factor); {opt vce(crv3 clustervars)} (leave-one-cluster-out refits, factor
+G/(G-1); the jackknifed {cmd:_cons} is the linearized one); {opt vce(conley ...)} ({cmd:fixest}'s Conley
+variance, factor N/(N-1)). The header adds the lines of {cmd:fereg} (DK bandwidth, Conley cutoff, kernel).
+
+{phang}
 {opt exposure(varname)} and {opt offset(varname)} add ln({it:varname}) or {it:varname} to the linear
 predictor with coefficient 1. The exposure must be positive. Only one of them may be specified.
 
@@ -137,7 +149,7 @@ a warning is printed.
 
 {phang}
 {opt separation(list)} chooses the methods used to detect observations whose mean is zero at the
-pseudo-maximum (separated observations), which are dropped before estimation (Correia, Guimarães and Zylkin, 2019):
+pseudo-maximum (separated observations), which are dropped before estimation (Correia, Guimar{c a~}es and Zylkin, 2019):
 
 {phang2}{cmd:fe}: drop fixed-effect groups whose outcome is always zero (iterated with the singleton check);{p_end}
 {phang2}{cmd:relu}: the ReLU algorithm of {cmd:ppmlhdfe} (alias {cmd:ir});{p_end}
@@ -326,6 +338,7 @@ remain in the sample{p_end}
 {synopt:{cmd:e(N_clust)}}number of clusters (minimum across cluster variables){p_end}
 {synopt:{cmd:e(N_clust#)}}number of clusters of the #th cluster variable{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster variables{p_end}
+{synopt:{cmd:e(dkraay_bw)}, {cmd:e(bw)}, {cmd:e(conley_cutoff)}, {cmd:e(conley_pixel)}}as {help fereg##results:fereg}{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
@@ -339,9 +352,12 @@ remain in the sample{p_end}
 {synopt:{cmd:e(dofmethod)}}degrees-of-freedom adjustments used{p_end}
 {synopt:{cmd:e(title)}}{cmd:HDFE PPML regression} ({cmd:PPML regression} without fixed effects){p_end}
 {synopt:{cmd:e(title2)}}{cmd:Absorbing # HDFE group(s)}{p_end}
-{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors){p_end}
-{synopt:{cmd:e(vce)}}{cmd:robust} or {cmd:cluster}{p_end}
-{synopt:{cmd:e(vcetype)}}{cmd:Robust}{p_end}
+{synopt:{cmd:e(title3)}}{cmd:Statistics robust to heteroskedasticity} (clustered errors, {cmd:dkraay}, {cmd:conley}, kernels){p_end}
+{synopt:{cmd:e(title4)}}second line for {cmd:dkraay} and {cmd:conley}{p_end}
+{synopt:{cmd:e(vce)}}{cmd:robust}, {cmd:cluster}, {cmd:dkraay}, {cmd:hc2}, {cmd:hc3}, {cmd:crv3}, {cmd:conley}, or {cmd:ivreghdfe}'s description with a kernel{p_end}
+{synopt:{cmd:e(vcetype)}}{cmd:Robust}; {cmd:Robust HC2}, {cmd:Robust HC3}, {cmd:CRV3}, {cmd:Conley}{p_end}
+{synopt:{cmd:e(kernel)}, {cmd:e(tvar)}, {cmd:e(ivar)}, {cmd:e(bwchoice)}, {cmd:e(hacsubtitleV)}, {cmd:e(hacsubtitleV2)}}kernel variances, as {help fereg##results:fereg}{p_end}
+{synopt:{cmd:e(conley_lat)}, {cmd:e(conley_lon)}, {cmd:e(conley_distance)}}Conley coordinates and distance{p_end}
 {synopt:{cmd:e(clustvar)}}cluster variables{p_end}
 {synopt:{cmd:e(clustvar#)}}#th cluster variable{p_end}
 {synopt:{cmd:e(chi2type)}}{cmd:Wald}{p_end}
@@ -371,15 +387,18 @@ remain in the sample{p_end}
 {title:Author}
 
 {pstd}Leo Liu{break}
+UTS Business School, University of Technology Sydney{break}
+Sydney, Australia{break}
+{browse "mailto:leo.liu@uts.edu.au":leo.liu@uts.edu.au}{break}
 {browse "https://github.com/leoliu0/fereg":github.com/leoliu0/fereg}{p_end}
 
 {pstd}
-{cmd:feppml} reproduces the conventions of {cmd:ppmlhdfe} by Sergio Correia, Paulo Guimarães and Thomas Zylkin;
+{cmd:feppml} reproduces the conventions of {cmd:ppmlhdfe} by Sergio Correia, Paulo Guimar{c a~}es and Thomas Zylkin;
 its predict program and displays are adapted from {cmd:ppmlhdfe} (MIT license). Please cite ppmlhdfe when
 reporting results:{p_end}
 
-{phang}Correia, S., P. Guimarães, and T. Zylkin. 2020. Fast Poisson estimation with high-dimensional fixed effects.
+{phang}Correia, S., P. Guimar{c a~}es, and T. Zylkin. 2020. Fast Poisson estimation with high-dimensional fixed effects.
 {it:Stata Journal} 20(1): 95-115.{p_end}
 
-{phang}Correia, S., P. Guimarães, and T. Zylkin. 2019. Verifying the existence of maximum likelihood estimates for
+{phang}Correia, S., P. Guimar{c a~}es, and T. Zylkin. 2019. Verifying the existence of maximum likelihood estimates for
 generalized linear models. arXiv:1903.01633.{p_end}

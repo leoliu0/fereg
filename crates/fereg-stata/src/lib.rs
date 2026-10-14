@@ -28,7 +28,7 @@ use args::{Args, Common};
 const SD_PLUGINVER: c_int = 3;
 
 /// Default of the `serialio` key for `prepare`/`ols`/`iv`/`glm`: parallel numeric reads are on
-/// (decided by `tests/stata/stress_io.do`, plan §4.3).
+/// (decided by `tests/stata/stress_io.do`, plan sec. 4.3).
 const SERIALIO_DEFAULT: bool = false;
 
 /// Message of the last panic (filled by the panic hook, consumed by `stata_call`).

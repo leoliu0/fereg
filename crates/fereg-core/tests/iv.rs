@@ -2,8 +2,8 @@
 //!
 //! Ground truth: ivreghdfe 1.1.4 (reghdfe 6.13.1, ranktest 2.0.04) results at tol(1e-14) with
 //! `ffirst savefirst`, saved by `tests/data/gen_iv_fixtures.do`: an nlswork subset
-//! (`ln_wage age (tenure = union south [msp])`, absorb(idcode year), × unadjusted / robust /
-//! cluster idcode / cluster idcode year × none/aw/fw/pw) and simulated data with two endogenous
+//! (`ln_wage age (tenure = union south [msp])`, absorb(idcode year), x unadjusted / robust /
+//! cluster idcode / cluster idcode year x none/aw/fw/pw) and simulated data with two endogenous
 //! regressors. b rtol 1e-7, V and every statistic rtol 1e-6, integers exact.
 //!
 //! Every test runs over [`KINDS`].
@@ -300,7 +300,7 @@ struct MaxErr {
     stats: f64,
 }
 
-/// Max relative error of `got` vs `want` with an absolute floor of 1e-10·max|want| (entries that
+/// Max relative error of `got` vs `want` with an absolute floor of 1e-10*max|want| (entries that
 /// are zero up to rounding, e.g. tiny p-values next to large F statistics).
 fn vec_err(what: &str, got: &[f64], want: &[f64]) -> f64 {
     assert_eq!(got.len(), want.len(), "{what}: length");
@@ -393,7 +393,7 @@ fn b_ivreghdfe_ground_truth() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Errors, Stock–Yogo macros, collinearity and thread invariance.
+// Errors, Stock-Yogo macros, collinearity and thread invariance.
 
 fn sim_model<'a>(d: &'a Csv, endog: &[&str], inst: &[&str], vce: Vce) -> Model<'a> {
     Model {

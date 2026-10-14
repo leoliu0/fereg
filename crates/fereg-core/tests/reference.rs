@@ -44,7 +44,7 @@ fn dense_residuals_are_w_orthogonal_to_every_dummy_and_slope_column() {
         let ab = s.absorber_mut();
         let opts = SolveOpts { tol: 1e-12, maxiter: 100, want_coefs: true };
         let info = ab.residualize(&mut rows, 1, &opts, None, pool, &ctx).unwrap();
-        // D'W z̃ = 0 for every column of D.
+        // D'W z~ = 0 for every column of D.
         for t in &terms {
             let mut ic = vec![0.0; t.g];
             let mut sc = vec![0.0; t.g];
@@ -56,7 +56,7 @@ fn dense_residuals_are_w_orthogonal_to_every_dummy_and_slope_column() {
             }
             assert!(ic.iter().chain(&sc).all(|v| v.abs() < 1e-10), "not orthogonal");
         }
-        // z = z̃ + fit.
+        // z = z~ + fit.
         let coefs = info.coefs.unwrap();
         let fit = ab.fit_rows(&coefs, 0, pool);
         for i in 0..nk {

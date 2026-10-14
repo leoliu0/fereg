@@ -1,5 +1,5 @@
 /*
-    glue.c — the only code in fereg that touches the Stata plugin interface (SPI 3.0).
+    glue.c -- the only code in fereg that touches the Stata plugin interface (SPI 3.0).
 
     Compiled by build.rs with -DSYSTEM=OPUNIX|STWIN32 -DSD_FASTMODE and hidden visibility:
     nothing here is exported from the plugin (only the Rust `pginit` / `stata_call` are).

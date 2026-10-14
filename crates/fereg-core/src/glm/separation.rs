@@ -2,7 +2,7 @@
 //! ppmlhdfe_separation_relu.mata, with `solve_lse` from ppmlhdfe_functions.mata).
 //!
 //! Iteratively solves the least-squares problem with equality constraints (method of weighting:
-//! weight M = ⌈ε^{−1/2}⌉ on y > 0, 1 on y = 0) of the ReLU working variable u on the regressors
+//! weight M = ceil(eps^{-1/2}) on y > 0, 1 on y = 0) of the ReLU working variable u on the regressors
 //! and the fixed effects, until the prediction is non-negative on the boundary sample.
 //! Deviation: ppmlhdfe aborts after 100 iterations and keeps every observation; here the
 //! iteration continues while it makes progress (see [`RELU_MAXITER`]), and a check that still
@@ -27,7 +27,7 @@ const RELU_TOL: f64 = 1e-4;
 /// ppmlhdfe `relu_zero_tol`.
 const RELU_ZERO_TOL: f64 = 1e-8;
 /// ppmlhdfe `relu_maxiter`: ppmlhdfe aborts here. The iteration converges linearly (each step
-/// shrinks the negative predictions on the boundary sample by a roughly constant factor, ≈0.94
+/// shrinks the negative predictions on the boundary sample by a roughly constant factor, ~=0.94
 /// on a 36k-row panel that needed 138 iterations), so past this point it continues while that
 /// shrinkage continues ([`RELU_STALL`]), up to [`RELU_HARD_MAXITER`].
 const RELU_MAXITER: usize = 100;
@@ -71,7 +71,7 @@ pub(crate) fn relu(abs: &mut dyn Absorber, d: &GlmData, inner_maxiter: usize, po
     // Van Loan's rule of thumb (solve_lse: M = ceil(epsilon(1)^(-1/2))).
     let big_m = EPS1.powf(-0.5).ceil();
     let w: Vec<f64> = boundary.iter().map(|&b| if b { 1.0 } else { big_m }).collect();
-    abs.set_weights(Some(w.clone()), pool, ctx)?;
+    abs.set_weights(Some(&w), pool, ctx)?;
 
     // Mata norm(X, 1) on each sample: the largest column sum of |x|.
     let col_abs = |want_boundary: bool| -> f64 {
@@ -138,7 +138,7 @@ pub(crate) fn relu(abs: &mut dyn Absorber, d: &GlmData, inner_maxiter: usize, po
             found = true;
             break;
         }
-        // ... or when no boundary residual is negative (normal equations: z'e = 0 with z ≥ 0).
+        // ... or when no boundary residual is negative (normal equations: z'e = 0 with z >= 0).
         pool.install(|| {
             resid.par_iter_mut().for_each(|e| {
                 if e.abs() <= RELU_ZERO_TOL {
@@ -173,7 +173,7 @@ pub(crate) fn relu(abs: &mut dyn Absorber, d: &GlmData, inner_maxiter: usize, po
             }
         }
     }
-    abs.set_weights(d.tw.clone(), pool, ctx)?;
+    abs.set_weights(d.tw.as_deref(), pool, ctx)?;
     if !found || num_sep == 0 {
         return Ok(ReluOut { separated: None, complete: found, certificate: vec![0.0; n], iterations: iter });
     }

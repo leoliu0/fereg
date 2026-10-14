@@ -3,15 +3,15 @@
 //! - Poisson: ppmlhdfe 2.3.3 on the ppmlhdfe test-suite datasets plus a simulated gravity panel
 //!   (`glm_p_*.json`): N, sample, separated/singleton counts, b (rtol 1e-7), V (rtol 1e-6),
 //!   ll, ll_0, deviance, r2_p, chi2, dof, and d / saved-FE sums where requested.
-//! - Logit: Stata `logit y x i.fe1 i.fe2` (`glm_l_*.json`): N, sample, β and V_ββ, ll, ll_0, r2_p.
+//! - Logit: Stata `logit y x i.fe1 i.fe2` (`glm_l_*.json`): N, sample, beta and V_{beta,beta}, ll, ll_0, r2_p.
 //! - fixest convention and [`GlmParts`]: fixest 0.14.2 (`glm_fx_*.json`, see that section).
 //!
 //! Every test runs over [`KINDS`]. `cargo test --test glm -- --nocapture` prints the largest
 //! observed relative error per fixture.
 
 use fereg_core::{
-    AbsorbTerm, AbsorberKind, Ctx, EstResult, Family, FactorValues, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Prep, RfError, Separation,
-    Session, Spec, Vce, WeightKind,
+    AbsorbTerm, AbsorberKind, Ctx, EstResult, Family, FactorValues, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Prep, RfError,
+    Separation, Session, Spec, Vce, WeightKind,
 };
 
 const KINDS: &[AbsorberKind] = &[AbsorberKind::Dense, AbsorberKind::Fast];
@@ -186,7 +186,7 @@ impl Errs {
     fn scalar(&mut self, what: &str, got: f64, want: f64, rtol: f64) {
         self.vec(what, &[got], &[want], rtol);
     }
-    /// |got − want| ≤ tol·max|want| (for vectors such as d whose entries can be near zero).
+    /// |got - want| <= tol*max|want| (for vectors such as d whose entries can be near zero).
     fn vec_scaled(&mut self, what: &str, got: &[f64], want: &[f64], tol: f64) {
         assert_eq!(got.len(), want.len(), "{what}: length");
         let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-300);
@@ -408,6 +408,7 @@ fn setup(g: &G, csv: &Csv, kind: AbsorberKind, threads: usize) -> Result<Setup, 
         separation: Separation { relu: g.relu, mu: g.mu },
         guess: g.guess,
         log: false,
+        collinear: GlmCollinear::Ppmlhdfe,
     };
     Ok(Setup { session, rows, offset, spec, opts, obs })
 }
@@ -462,8 +463,8 @@ fn check_poisson(g: &G, kind: AbsorberKind) {
     if let Some(dv) = g.d_var {
         let want: Vec<f64> = run.obs.iter().map(|&i| fx.get(dv).unwrap().nums()[i]).filter(|v| !v.is_nan()).collect();
         e.vec_scaled("d", r.d.as_deref().unwrap(), &want, g.d_tol);
-        // Our d solves the score equations of every FE: Σ_{i∈g} w_i(y_i − μ_i) = 0 with
-        // μ = exp(x'b + _cons + d + offset).
+        // Our d solves the score equations of every FE: sum_{i in g} w_i(y_i - mu_i) = 0 with
+        // mu = exp(x'b + _cons + d + offset).
         let viol = score_violation(g, &run, &csv);
         assert!(viol <= 1e-9, "{}: FE score equations violated by {viol:e}", g.fixture);
         e.worst.push(("FE score equations".into(), viol));
@@ -475,14 +476,14 @@ fn check_poisson(g: &G, kind: AbsorberKind) {
             kept.iter().map(|&i| g.fe_vars.iter().map(|v| fx.get(v).unwrap().nums()[i]).sum::<f64>()).collect();
         let got: Vec<f64> = (0..n).map(|i| r.fe.iter().map(|f| f[i]).sum::<f64>()).collect();
         e.vec_scaled("sum of saved FEs", &got, &want, 1e-6);
-        // Σ saved FEs = d when every term is saved.
+        // sum saved FEs = d when every term is saved.
         e.vec("d vs saved FEs", r.d.as_deref().unwrap(), &got, 1e-9);
     }
     e.report(g.fixture);
 }
 
-/// Largest violation of the FE score equations Σ_{i∈g} w_i(y_i − μ_i) = 0 (relative to
-/// max(Σ w y, 1)), with μ = exp(x'b + _cons + d + offset) from our reported b and d.
+/// Largest violation of the FE score equations sum_{i in g} w_i(y_i - mu_i) = 0 (relative to
+/// max(sum w y, 1)), with mu = exp(x'b + _cons + d + offset) from our reported b and d.
 fn score_violation(g: &G, run: &Run, csv: &Csv) -> f64 {
     let r = &run.res;
     let b = mat(r, "b");
@@ -571,7 +572,7 @@ fn poisson_specs() -> Vec<G> {
         poisson("p_problem5", "problem5", "y", &["x1", "x2"], &["i", "j"]).tol(1e-12),
         {
             // ppmlhdfe's e(ll) and e(deviance) are off by 4e-3 and 8e-3 here (the sample has
-            // one observation with x = −716). The values below are the Poisson ll and deviance
+            // one observation with x = -716). The values below are the Poisson ll and deviance
             // recomputed in double precision from ppmlhdfe's own e(b); r2_p is not compared.
             let mut g = poisson("p_problem6", "problem6", "y", &["x"], &[]);
             g.exact = vec![("ll", -1486.4665049560613), ("deviance", 2136.1091000805777)];
@@ -597,7 +598,7 @@ fn poisson_specs() -> Vec<G> {
         {
             // x1 and x2 are nearly collinear (x2 = x1 + e/18000): ppmlhdfe finds V numerically
             // singular and reports a missing chi2 (whether the sweep flags it is rounding noise),
-            // and V (entries ≈ 1e6) agrees with ppmlhdfe only to 9.7e-7 (Dense) / 1.6e-6 (Fast).
+            // and V (entries ~= 1e6) agrees with ppmlhdfe only to 9.7e-7 (Dense) / 1.6e-6 (Fast).
             let mut g = poisson("p_collinear6", "collinear6", "y", &["x1", "x2"], &[]).tol(1e-12);
             g.skip = vec!["chi2"];
             g.v_tol = 1e-5;
@@ -648,7 +649,7 @@ fn poisson_specs() -> Vec<G> {
         let mut g = poisson("p_gravity", "gravity", "trade", &["rta", "x2"], &[]).cluster(&[&["exp", "imp"]]);
         g.absorb = vec![(vec!["exp", "year"], false), (vec!["imp", "year"], false), (vec!["exp", "imp"], false)];
         g.d_var = Some("dg");
-        // ppmlhdfe's d satisfies the FE score equations only to ≈5e-7 (relative) here.
+        // ppmlhdfe's d satisfies the FE score equations only to ~=5e-7 (relative) here.
         g.d_tol = 1e-5;
         g
     });
@@ -777,7 +778,7 @@ fn synthetic() -> Csv {
         let x2 = rng.next_f64() + 0.3 * x1;
         let eta = 0.4 * x1 - 0.3 * x2 + a1[f1] + a2[f2];
         let u = rng.next_f64();
-        // A count with mean ≈ exp(η) and many zeros (geometric draw).
+        // A count with mean ~= exp(eta) and many zeros (geometric draw).
         let p = 1.0 / (1.0 + eta.exp());
         let y = (u.ln() / (1.0 - p).ln()).floor().min(50.0);
         let yb = f64::from(u8::from(rng.next_f64() < 1.0 / (1.0 + (-eta).exp())));
@@ -811,8 +812,8 @@ fn large_problems_are_thread_count_invariant() {
 // fixest convention ([`GlmConvention::Fixest`]) and [`GlmParts`]: ground truth from fixest 0.14.2
 // `fepois` / `feglm(family = "logit")` at glm.tol = 1e-12 (`tests/data/gen_glm_parts_fixtures.R`,
 // data `glm_parts.csv`, fixtures `glm_fx_*.json`): sample, coefficients (rtol 1e-7), deviance,
-// log-likelihood, sumFE, IRLS iterations, and the inverse Hessian inv(xt'·diag(w)·xt) (rtol 1e-7
-// vs fixest's cov.iid and vcov(iid)·(n − K)/(n − 1); 1e-6 vs the one at the converged estimate).
+// log-likelihood, sumFE, IRLS iterations, and the inverse Hessian inv(xt'*diag(w)*xt) (rtol 1e-7
+// vs fixest's cov.iid and vcov(iid)*(n - K)/(n - 1); 1e-6 vs the one at the converged estimate).
 
 const FX_MODELS: &[&str] = &["fe1", "fe2", "fe3", "w", "off", "w_off", "nofe", "nofe_w_off"];
 
@@ -862,6 +863,7 @@ fn run_fx(fx: &J, csv: &Csv, kind: AbsorberKind, maxiter: usize, conv: Option<Gl
         separation: Separation::default(),
         guess: Guess::Simple,
         log: false,
+        collinear: GlmCollinear::Ppmlhdfe,
     };
     let (res, parts) = match conv {
         Some(c) => session.glm_parts(rows, &Layout::ols(2), offset, &Spec::default(), &opts, c, &ctx).map(|(r, p)| (r, Some(p)))?,
@@ -870,7 +872,7 @@ fn run_fx(fx: &J, csv: &Csv, kind: AbsorberKind, maxiter: usize, conv: Option<Gl
     Ok(FxRun { session, res, parts })
 }
 
-/// Inverse of a small symmetric positive definite matrix (Gauss–Jordan).
+/// Inverse of a small symmetric positive definite matrix (Gauss-Jordan).
 fn inv_small(a: &[f64], k: usize) -> Vec<f64> {
     let mut m = a.to_vec();
     let mut inv: Vec<f64> = (0..k * k).map(|i| f64::from(u8::from(i / k == i % k))).collect();
@@ -920,12 +922,12 @@ fn check_fx(name: &str, kind: AbsorberKind) {
     let poisson = fx.get("family").unwrap().str() == "poisson";
     let weighted = fx.get("weights").unwrap().num() == 1.0;
     // fixest's weighted logit log-likelihood treats the weights as binomial trial counts
-    // (binomial()$aic with rounded weights); ours is Σ w·[y ln μ + (1 − y) ln(1 − μ)].
+    // (binomial()$aic with rounded weights); ours is sum w*[y ln mu + (1 - y) ln(1 - mu)].
     if poisson || !weighted {
         e.scalar("ll", scalar(&res, "ll"), fx.get("loglik").unwrap().num(), 1e-9);
     }
 
-    // η = x'β + fe_sum + offset, and the saved FE slots add up to fe_sum.
+    // eta = x'beta + fe_sum + offset, and the saved FE slots add up to fe_sum.
     let kept: Vec<usize> = session.kept_index().iter().map(|&i| i as usize).collect();
     let has_off = fx.get("offset").unwrap().num() == 1.0;
     let rebuilt: Vec<f64> = kept
@@ -945,7 +947,7 @@ fn check_fx(name: &str, kind: AbsorberKind) {
     let mu_from_eta: Vec<f64> = parts.eta.iter().map(|&t| if poisson { t.exp() } else { 1.0 / (1.0 + (-t).exp()) }).collect();
     e.vec("mu", &parts.mu, &mu_from_eta, 1e-12);
 
-    // inv(xt'·diag(w)·xt) is fixest's cov.iid (slope block), i.e. vcov(iid)/((n−1)/(n−K)).
+    // inv(xt'*diag(w)*xt) is fixest's cov.iid (slope block), i.e. vcov(iid)/((n-1)/(n-K)).
     let mut h = [0.0; 4];
     for i in 0..n {
         let (a, b) = (parts.xt[2 * i], parts.xt[2 * i + 1]);
@@ -965,7 +967,7 @@ fn check_fx(name: &str, kind: AbsorberKind) {
     let adj = (nf - 1.0) / (nf - fx.get("nparams").unwrap().num());
     let v_iid: Vec<f64> = slope(&fx.get("vcov_iid").unwrap().nums()).iter().map(|v| v / adj).collect();
     e.vec("vcov iid / adj", &inv, &v_iid, 1e-7);
-    // Like fixest, `w` comes from the start of the last iteration, whose μ is accurate to about
+    // Like fixest, `w` comes from the start of the last iteration, whose mu is accurate to about
     // sqrt(glm.tol): 3e-7 relative from the Hessian at the converged estimate on the logits.
     e.vec("inverse Hessian at the estimate", &inv, &slope(&fx.get("cov_iid_conv").unwrap().nums()), 1e-6);
     // Same starting values, step halving and stopping rule as fixest: the same IRLS path.
@@ -1058,8 +1060,8 @@ fn separation_check_alone_matches_the_fit() {
     }
 }
 
-/// Field-panel shape of the feppml `tagsep()` report (firm + industry×year FEs, Poisson): firms
-/// with all-zero outcomes, an all-zero industry×year cell, observations separated by a
+/// Field-panel shape of the feppml `tagsep()` report (firm + industry x year FEs, Poisson): firms
+/// with all-zero outcomes, an all-zero industry x year cell, observations separated by a
 /// regressor that is positive only where y = 0, and singletons left behind by the drops.
 struct SepPanel {
     firm: Vec<f64>,
@@ -1177,6 +1179,7 @@ fn separation_check_without_fe_rule_finds_all_zero_groups() {
         separation: Separation { relu: true, mu: false },
         guess: Guess::Simple,
         log: false,
+        collinear: GlmCollinear::Ppmlhdfe,
     };
     for &kind in KINDS {
         let (mut session, rows) = sep_session(&p, false, kind, &ctx);

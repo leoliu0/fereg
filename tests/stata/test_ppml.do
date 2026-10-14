@@ -1,7 +1,7 @@
 * test_ppml.do -- feppml vs ppmlhdfe 2.3.3 (plan Phase 6.7)
 *
 * Datasets: the ppmlhdfe test-suite data ported in crates/fereg-core/tests/data/glm_*.csv
-*   (MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimarães, and Thomas Zylkin; see
+*   (MIT License, Copyright (c) 2019 Sergio Correia, Paulo Guimaraes, and Thomas Zylkin; see
 *   gen_glm_fixtures.do) and inline (test/slopes1-4.do), auto, nlswork and a simulated gravity
 *   panel.
 * Every ppmlhdfe run uses tol(1e-10) or tighter and sep(fe relu) (fereg treats `simplex` as an

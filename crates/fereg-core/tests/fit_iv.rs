@@ -56,7 +56,7 @@ fn pyfixest_iv_cases() {
     let mut n = 0;
     for j in cases.iter().filter(|c| !c.at("endog").list().is_empty()) {
         let name = j.at("name").str().to_string();
-        // pyfixest reports weighted residuals scaled by √w: only unweighted residuals are compared.
+        // pyfixest reports weighted residuals scaled by sqrt w: only unweighted residuals are compared.
         let (case, out) = check_case(j, Flavor::Pyfixest, FactorKind::F64, 4, RTOL);
         let e = j.at("expect").at("first");
         let f = &out.iv.as_ref().unwrap().first_stage[0];
@@ -80,7 +80,7 @@ fn iv_bit_identical_across_threads() {
         let b = check_fixest_iv(j, 16);
         assert_eq!(a.coef, b.coef, "{name}");
         assert_eq!(a.vcov, b.vcov, "{name}");
-        // Debug strings: NaN fields (Sargan df2, within R² without FE) compare equal there.
+        // Debug strings: NaN fields (Sargan df2, within R^2 without FE) compare equal there.
         assert_eq!(format!("{:?}", a.iv), format!("{:?}", b.iv), "{name}");
         assert_eq!(a.resid, b.resid, "{name}");
         assert_eq!(format!("{:?}", a.stats), format!("{:?}", b.stats), "{name}");

@@ -2,7 +2,7 @@
 
 Every quantity is computed by the Rust core (``fereg._core``); this module only arranges it the
 way pyfixest presents it. Per-observation arrays are exposed lazily so that building a result
-costs O(k²) Python work regardless of the number of observations.
+costs O(k^2) Python work regardless of the number of observations.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from ._binding import (
     qnorm,
     qt,
 )
-from ._vcov import VcovSpec, parse_vcov
+from ._vcov import VcovSpec, VcovTypeNotSupportedError, parse_vcov
 
 __all__ = ["Feols", "Feiv", "Fepois", "Feglm", "Felogit", "Fegaussian", "FixestMulti"]
 
@@ -166,6 +166,8 @@ class Feols:
         # GLM: pyfixest still reports the t degrees of freedom (inference is normal).
         if spec.is_clustered:
             return float(min(v["n_clusters"]) - 1)
+        if v["n_periods"] is not None:
+            return v["n_periods"] - 1
         return _as_int(self._N - v["df_k"])
 
     def _set_vcov(self, v: dict, spec: VcovSpec) -> None:
@@ -179,6 +181,11 @@ class Feols:
         self._clustervar = list(spec.cluster) if spec.is_clustered else None
         self._ssc = np.array([v["ssc_factor"]])
         self._psd_fixed = bool(v["psd_fixed"])
+        # pyfixest's HAC attributes (as requested; None = default), plus the Newey-West /
+        # Driscoll-Kraay lag and the Conley cutoff (km) actually used.
+        self._lag, self._time_id, self._panel_id = spec.lag, spec.time_id, spec.panel_id
+        self._vcov_lag = v["lag"]
+        self._vcov_cutoff = v["cutoff"]
         if spec.is_clustered:
             g = list(v["n_clusters"])
             g_df = (self._ssc_dict or {}).get("G_df", "min")
@@ -201,47 +208,71 @@ class Feols:
         self._conf_int = np.array([b - z * self._se, b + z * self._se])
 
     def vcov(self, vcov, vcov_kwargs: dict | None = None, data=None):
-        """Recomputes the variance matrix under ``vcov`` without refitting; returns ``self``."""
-        if vcov_kwargs:
-            raise NotImplementedError("vcov_kwargs (HAC options) are not supported by fereg.")
+        """Recomputes the variance matrix under ``vcov`` / ``vcov_kwargs`` (as in
+        :func:`fereg.feols`) without refitting the model; returns ``self``.
+
+        The cluster, time, panel and coordinate columns are read from the stored data, or from
+        ``data`` (a frame with the rows of the estimation data). ``{"CRV3": ...}`` re-estimates
+        the model with the jackknife (its leave-one-cluster-out refits need the full fit).
+        """
         state = self._out.state
         if state is None:
             raise ValueError(
                 "This model was estimated with lean=True and keeps no state for vcov(); "
                 "re-estimate it with lean=False."
             )
-        spec = parse_vcov(vcov)
-        factors, names, cluster = [], [], []
-        if spec.is_clustered:
-            from .design import factor_column
+        from .design import vcov_inputs
 
-            src = self._ctx.data if data is None else _check_frame(data)
-            if len(src) != self._out.nobs_origin:
-                raise ValueError(
-                    f"data has {len(src)} rows but the model was estimated on "
-                    f"{self._out.nobs_origin} input rows."
-                )
-            for i, name in enumerate(spec.cluster):
-                fc = factor_column(src, name)
-                factors.append(factor_arg(fc))
-                names.append(fc.name)
-                cluster.append([i])
-        v = state.vcov(
-            spec.kind,
-            ssc=core_ssc(self._ssc_dict),
-            factors=factors,
-            factor_names=names,
-            cluster=cluster,
-            threads=self._ctx.threads,
-        )
+        src = self._ctx.data if data is None else _check_frame(data)
+        if len(src) != self._out.nobs_origin:
+            raise ValueError(
+                f"data has {len(src)} rows but the model was estimated on "
+                f"{self._out.nobs_origin} input rows."
+            )
+        spec = parse_vcov(vcov, vcov_kwargs, columns=list(src.columns))
+        inputs = vcov_inputs(src, list(spec.cluster), spec.columns())
+        if spec.kind == "crv3":
+            v = self._refit_vcov(spec, inputs["factors"])
+        else:
+            if self._is_iv and spec.kind in ("hc2", "hc3"):
+                # pyfixest `_deparse_vcov_input`.
+                raise VcovTypeNotSupportedError("HC2 and HC3 inference types are not supported for IV regressions.")
+            factors = inputs.pop("factors")
+            v = state.vcov(
+                spec.kind,
+                ssc=core_ssc(self._ssc_dict),
+                factors=[factor_arg(fc) for fc in factors],
+                factor_names=[fc.name for fc in factors],
+                **inputs,
+                **spec.core_options(),
+                threads=self._ctx.threads,
+            )
         self._set_vcov(v, spec)
         self.get_inference()
         return self
 
+    def _refit_vcov(self, spec: VcovSpec, cluster_factors: list) -> dict:
+        """Variance matrix of a re-estimation of the model with ``spec`` (clustered by
+        ``cluster_factors``, columns over the estimation data's rows)."""
+        from .estimation import fit_context
+
+        d = self._design
+        base = len(d.factors)
+        design = replace(
+            d,
+            factors=list(d.factors) + list(cluster_factors),
+            cluster=[[base + i] for i in range(len(cluster_factors))],
+            cluster_names=list(spec.cluster),
+        )
+        with warnings.catch_warnings():
+            # The fit's warnings (singletons, collinearity) were issued at estimation.
+            warnings.simplefilter("ignore")
+            return fit_context(self._ctx, vcov=spec, design=design, lean=True).vcov
+
     # ----------------------------------------------------------------- fit statistics
 
     def get_performance(self) -> None:
-        """R², adjusted R², within R² and RMSE with pyfixest's definitions."""
+        """R^2, adjusted R^2, within R^2 and RMSE with pyfixest's definitions."""
         st = self._out.stats
         n, k = self._N, self._k
         has_intercept = not self._drop_intercept
@@ -261,7 +292,7 @@ class Feols:
             self._adj_r2_within = 1 - (ssu / ssy_within) * adj_factor_within
 
     def wald_test(self, R=None, q=None, distribution: str = "F") -> pd.Series:
-        """Wald test of ``R β = q`` (default: all coefficients are zero), as pyfixest."""
+        """Wald test of ``R beta = q`` (default: all coefficients are zero), as pyfixest."""
         k_fe = int(np.sum(self._k_fe.to_numpy())) if self._has_fixef else 0
         R = np.eye(self._k) if R is None else np.asarray(R, dtype=float)
         if R.ndim == 1:
@@ -419,7 +450,7 @@ class Feols:
         return frozenset(np.flatnonzero(~keep).tolist())
 
     def resid(self) -> np.ndarray:
-        """Residuals y − ŷ (IV: residuals with the original endogenous regressors)."""
+        """Residuals y - yhat (IV: residuals with the original endogenous regressors)."""
         return self._require(self._out.resid, "resid()")
 
     # ----------------------------------------------------------------- fixed effects
@@ -470,7 +501,7 @@ class Feols:
         return f"C({label})" if slope is None else f"C({label}):{self._design.slope_names[slope]}"
 
     def _fe_prediction(self, nd: Any) -> np.ndarray:
-        """Σ fixed effects (× slopes) for every row of the newdata design; unseen level → NaN."""
+        """sum fixed effects (x slopes) for every row of the newdata design; unseen level -> NaN."""
         d = self._design
         fe_hat = np.zeros(nd.n)
         keys_cache: dict[int, tuple[pd.Index, np.ndarray]] = {}
@@ -692,7 +723,7 @@ class Fepois(Feols):
         return self._u_hat_working * np.sqrt(self._irls_weights)
 
     def resid(self, type: str = "response") -> np.ndarray:
-        """Response (y − μ) or working residuals."""
+        """Response (y - mu) or working residuals."""
         if type == "response":
             return self._u_hat_response
         if type == "working":
@@ -703,7 +734,7 @@ class Fepois(Feols):
         return np.exp(eta)
 
 
-# Bound of the logit mean in the core (`glm::family::MU_MIN` = 100·ε).
+# Bound of the logit mean in the core (`glm::family::MU_MIN` = 100*eps).
 _MU_MIN = 100.0 * np.finfo(np.float64).eps
 
 
@@ -745,8 +776,8 @@ class Feglm(Feols):
         mu = self._Y_hat_response
         with np.errstate(divide="ignore", invalid="ignore"):
             e = self._u_hat_response / (mu * (1.0 - mu))
-        # Rows of FE levels with an all-one (or all-zero) outcome sit at the bound μ = 1 − MU_MIN
-        # (MU_MIN): their FE is ±inf, the fit is exact and the working residual is 0 (the
+        # Rows of FE levels with an all-one (or all-zero) outcome sit at the bound mu = 1 - MU_MIN
+        # (MU_MIN): their FE is +/-inf, the fit is exact and the working residual is 0 (the
         # limit pyfixest's IRLS approaches).
         e[(mu <= _MU_MIN) | (mu >= 1.0 - _MU_MIN)] = 0.0
         return e
@@ -768,7 +799,7 @@ class Feglm(Feols):
 class Felogit(Feglm):
     """Logit estimation results (pyfixest ``Felogit``)."""
 
-    # η of μ = 1 − MU_MIN. Rows of all-one (all-zero) FE levels have FE = ±inf; their
+    # eta of mu = 1 - MU_MIN. Rows of all-one (all-zero) FE levels have FE = +/-inf; their
     # predictions sit at the bound, as the fitted values of the estimation sample do.
     _ETA_BOUND = float(np.log((1.0 - _MU_MIN) / _MU_MIN))
 
@@ -802,6 +833,7 @@ class FixestMulti:
         return self.all_fitted_models[keys[i]]
 
     def vcov(self, vcov, vcov_kwargs: dict | None = None):
+        """Recomputes every model's variance matrix (:meth:`Feols.vcov`); returns ``self``."""
         for m in self.all_fitted_models.values():
             m.vcov(vcov, vcov_kwargs=vcov_kwargs)
         return self

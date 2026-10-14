@@ -47,7 +47,7 @@ pub fn resolve_threads(threads: usize) -> usize {
 }
 
 /// Threads worth starting for `work` rows or cells: at most one per [`CHUNK`], since chunks are
-/// the unit of parallel work. A 16-thread scoped pool costs ≈0.2 ms to build and join, which
+/// the unit of parallel work. A 16-thread scoped pool costs ~=0.2 ms to build and join, which
 /// dominates small problems. Results do not depend on the thread count (D3), so capping is safe.
 pub fn threads_for(requested: usize, work: usize) -> usize {
     resolve_threads(requested).min(work.div_ceil(CHUNK)).max(1)
@@ -124,7 +124,7 @@ pub(crate) fn width<const R: usize>(r: usize) -> usize {
 
 /// Calls `f::<R, B>(args)` with `R` = `$r` as a constant (1..=8; 0 = runtime width, see
 /// [`width`]) and the const bool `B` = `$b`, so per-row loops over the columns are unrolled and
-/// a flag-dependent branch (e.g. unit weights, where w·v = v exactly) disappears.
+/// a flag-dependent branch (e.g. unit weights, where w*v = v exactly) disappears.
 macro_rules! dispatch_width {
     ($r:expr, $b:expr, $f:ident($($a:expr),* $(,)?)) => {
         match ($r, $b) {
@@ -182,6 +182,31 @@ pub fn alloc_par<T: Copy + Send + Sync>(n: usize, value: T, pool: &Pool) -> Resu
     }
     // SAFETY: every element was written above.
     Ok(unsafe { assume_init(v) })
+}
+
+/// `src` copied into `buf` when it has the same length (no allocation, its pages are already
+/// mapped), else into a new buffer; parallel chunks either way.
+pub fn copy_into(buf: Option<Vec<f64>>, src: &[f64], pool: &Pool) -> Result<Vec<f64>, RfError> {
+    let mut out = match buf {
+        Some(b) if b.len() == src.len() => b,
+        _ => {
+            let mut v = alloc_uninit(src.len())?;
+            pool.install(|| v.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| {
+                for (o, &x) in o.iter_mut().zip(s) {
+                    *o = MaybeUninit::new(x);
+                }
+            }));
+            // SAFETY: the zip covers every element (same length as `src`).
+            return Ok(unsafe { assume_init(v) });
+        }
+    };
+    pool.install(|| out.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| o.copy_from_slice(s)));
+    Ok(out)
+}
+
+/// Every value is finite and strictly positive (valid observation weights).
+pub fn all_positive(v: &[f64], pool: &Pool) -> bool {
+    pool.install(|| v.par_chunks(CHUNK).all(|c| c.iter().all(|x| x.is_finite() && *x > 0.0)))
 }
 
 #[cfg(test)]

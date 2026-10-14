@@ -362,9 +362,10 @@ fe_labels <- function(values) {
   if (length(parts) == 1) parts[[1]] else do.call(paste, c(parts, sep = "_"))
 }
 
-# Level order: fixest sorts levels by value (factors by level order), interactions by the first
-# variable, then the second, ...
+# Level order as fixest: a single variable by value (factors by level order); an interaction
+# (`a^b`) by its label "a_b" as a character string (R's collation, so "10_4" < "1000_1" < "2_1").
 fe_order <- function(values) {
-  keys <- lapply(values, function(x) if (is.factor(x)) as.integer(x) else x)
-  do.call(order, unname(keys))
+  if (length(values) > 1) return(order(fe_labels(values)))
+  x <- values[[1]]
+  order(if (is.factor(x)) as.integer(x) else x)
 }

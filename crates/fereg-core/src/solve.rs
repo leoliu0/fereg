@@ -1,12 +1,12 @@
 //! FE solver (plan D5, Phase 2): `FeSolver` implements [`crate::absorber::Absorber`].
 //!
-//! `residualize` runs (1) the fused rhs pass over the rows (cell sums, b1, Σwv², Σwv),
+//! `residualize` runs (1) the fused rhs pass over the rows (cell sums, b1, sum wv^2, sum wv),
 //! (2) lockstep PCG on the reduced system S x = rhs over the non-FE1 blocks, (3) the fused
 //! back-substitution / in-place residualization pass (F is never materialized).
 //!
-//! FeCoefs layout: p = m + G1 rows, `[x (m×R); α1 (G1×R)]`, where x stacks the non-FE1 blocks
+//! FeCoefs layout: p = m + G1 rows, `[x (m x R); alpha1 (G1xR)]`, where x stacks the non-FE1 blocks
 //! (small blocks first, then large ones, each in term order; see [`crate::structure`]).
-//! Under `noabsorb` G1 = 1 and α1 is the weighted mean.
+//! Under `noabsorb` G1 = 1 and alpha1 is the weighted mean.
 
 use std::time::Instant;
 
@@ -17,14 +17,14 @@ use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
 use crate::operator::{JointCells, Ops, Rhs, Scratch, SegAgg, WeightState, weight_state};
-use crate::par::{CHUNK, Pool, alloc_vec, sum_chunks};
+use crate::par::{self, CHUNK, Pool, alloc_vec, sum_chunks};
 use crate::precond::dense::{self, Dense, SmallWork};
 use crate::precond::{BlockPrecond, Joint, Precond, approx_chol::ApproxChol, jacobi, sparse_chol::SparseChol};
 use crate::session::Term;
 use crate::slopes::SlopeSolver;
 use crate::structure::{self, Structure};
 
-/// Assembly-work limit E_b = Σ_s d_s² for exact assembly of a large block.
+/// Assembly-work limit E_b = sum_s d_s^2 for exact assembly of a large block.
 pub const MAX_ASSEMBLY_WORK: u64 = 400_000_000;
 /// Structural nonzeros limit of an exactly assembled block.
 pub const MAX_BLOCK_NNZ: u64 = 30_000_000;
@@ -49,7 +49,7 @@ pub struct SolverConfig {
     /// Total levels of the blocks factored jointly and exactly (dense).
     pub small_limit: usize,
     /// Largest reduced vector (bytes, all R columns) scattered entirely through per-task
-    /// accumulators; larger large blocks use the M×R scratch and level pulls.
+    /// accumulators; larger large blocks use the M x R scratch and level pulls.
     pub acc_bytes_max: usize,
     /// Assembly-work limit E_b for exact assembly of a large block.
     pub max_assembly_work: u64,
@@ -78,7 +78,7 @@ impl Default for SolverConfig {
 // fitted on the 1e6-observation AKM / fixest panels with `verbose(2)` phase timings. It never
 // depends on the thread count, so the solver path and therefore the result bits are the same at
 // any number of threads (plan D3). Single-thread costs are the relevant scale: the matvec and the
-// assembly scale ~5× on 16 threads while AMD and small factorizations do not, so at 16 threads
+// assembly scale ~5x on 16 threads while AMD and small factorizations do not, so at 16 threads
 // the joint factor is relatively dearer, but PCG times there are far below every competitor.
 /// Matvec cost per cell and per (block code + column).
 const C_CELL: f64 = 2.8e-9;
@@ -88,7 +88,7 @@ const C_COORD: f64 = 4e-9;
 const C_SOLVE: f64 = 3e-10;
 /// Dense small-block solve cost per entry and column.
 const C_DENSE: f64 = 1e-9;
-/// Joint assembly cost per unit of work (row walks + cells × blocks + dense small block) and
+/// Joint assembly cost per unit of work (row walks + cells x blocks + dense small block) and
 /// per structural nonzero (sorting and writing the rows).
 const C_ASM: f64 = 1.2e-9;
 const C_ASM_NNZ: f64 = 5e-8;
@@ -104,7 +104,7 @@ const C_ENTRY: f64 = 6e-9;
 const JOINT_MARGIN: f64 = 0.8;
 /// Deferred dense small block (every block small, R small): a PCG iteration on cell data that fit
 /// in the cache costs C_CELL_CACHED per cell and (block code + column) instead of C_CELL, and
-/// the dense assembly costs C_SMALL_ASM per unit of Σ_s d_s² (fitted at 1e5 observations,
+/// the dense assembly costs C_SMALL_ASM per unit of sum_s d_s^2 (fitted at 1e5 observations,
 /// 3 FEs: 0.23 ms per Jacobi iteration at R = 2, 3.0 ms assembly). The factor is deferred when
 /// it costs more than DEFER_ITERS such iterations.
 const C_CELL_CACHED: f64 = 6e-10;
@@ -118,9 +118,9 @@ const C_SCAN: f64 = 3.5e-9;
 /// Structural statistics of the joint factor (weight independent), filled stage by stage.
 #[derive(Clone, Copy, Debug, Default)]
 struct JointStats {
-    /// 2·Σ_s d_s·l_s + cells × blocks + dense small-block work (l_s: large codes of segment s).
+    /// 2*sum_s d_s*l_s + cells x blocks + dense small-block work (l_s: large codes of segment s).
     work: Option<u64>,
-    /// Σ_s d_s² (the assembly-work budget measure).
+    /// sum_s d_s^2 (the assembly-work budget measure).
     seg_work: Option<u64>,
     /// Structural nonzeros of the joint matrix and of its large-coordinate submatrix.
     nnz: Option<u64>,
@@ -185,7 +185,7 @@ fn jacobi_iter_cost(st: &Structure, r: usize) -> f64 {
 
 /// Cost of assembling (unless the weight pass already did) and factoring the small block.
 /// `known`: the representation of an earlier factorization of this structure ([`Dense::work`];
-/// it does not change with the weights). Without one, a sparse factor is expected when Σ_s d_s²
+/// it does not change with the weights). Without one, a sparse factor is expected when sum_s d_s^2
 /// bounds the nonzeros of S_SS below [`dense::SPARSE_DENSITY`].
 fn small_build_cost(st: &Structure, ws: &WeightState, known: Option<SmallWork>) -> f64 {
     let asm = if ws.small_s.is_some() { 0.0 } else { C_SMALL_ASM * st.small_work as f64 };
@@ -201,7 +201,7 @@ fn small_build_cost(st: &Structure, ws: &WeightState, known: Option<SmallWork>) 
 }
 
 /// One application of the small factor to `r` columns. Dense: two triangular solves, measured
-/// at 1-16 threads (m_s 512-4096) as m_s²·(1.5e-10 + 3.5e-11·r) (matrix traffic, then flops per
+/// at 1-16 threads (m_s 512-4096) as m_s^2*(1.5e-10 + 3.5e-11*r) (matrix traffic, then flops per
 /// column); sparse: the factor entries are streamed twice per column.
 fn small_apply_cost(st: &Structure, work: SmallWork, r: usize) -> f64 {
     match work {
@@ -213,9 +213,14 @@ fn small_apply_cost(st: &Structure, work: SmallWork, r: usize) -> f64 {
     }
 }
 
+/// Share of a solve's PCG cost that a refresh of stale block factors is expected to save. On the
+/// 6.7M-trip taxi Poisson model (two coupled large blocks with exact factors) refreshing them
+/// before every IRLS solve cut the PCG iterations from 654 to 361.
+const STALE_GAIN: f64 = 0.3;
+
 /// A stale small factor is always refactored once the weights moved by more than this ratio
 /// range since its factorization (e.g. the switch to and from the ReLU separation weights,
-/// 1 vs ~7e7): PCG would need on the order of √(ratio) iterations, more than any observed count
+/// 1 vs ~7e7): PCG would need on the order of sqrt(ratio) iterations, more than any observed count
 /// predicts. Gradual IRLS changes stay far below it between refactorizations.
 const MAX_SMALL_DRIFT: f64 = 1e6;
 
@@ -344,6 +349,8 @@ pub struct FeSolver {
     /// CG count of the first solve after the last (re)factorization.
     base_iters: Option<usize>,
     need_refactor: bool,
+    /// PCG iterations of the last solve (the stale-factor refresh decision).
+    last_iters: Option<usize>,
     /// A deferred solve had to build the dense small factor at a probe (Jacobi converges too
     /// slowly on this graph): later solves, e.g. the next IRLS weights, build it up front.
     small_upfront: bool,
@@ -377,9 +384,13 @@ impl FeSolver {
         let w_rows = match weights {
             Some(w) => {
                 let mut v = alloc_vec(n, 0.0)?;
-                for (o, &k) in v.iter_mut().zip(&st.pi) {
-                    *o = w[k as usize];
-                }
+                pool.install(|| {
+                    v.par_chunks_mut(CHUNK).zip(st.pi.par_chunks(CHUNK)).for_each(|(o, p)| {
+                        for (o, &k) in o.iter_mut().zip(p) {
+                            *o = w[k as usize];
+                        }
+                    })
+                });
                 Some(v)
             }
             None => None,
@@ -414,6 +425,7 @@ impl FeSolver {
             large_fresh: true,
             base_iters: None,
             need_refactor: false,
+            last_iters: None,
             small_upfront: false,
             joint: JointState::default(),
             cfg,
@@ -435,7 +447,7 @@ impl FeSolver {
 
     /// Rebuilds the escalated large-block (or joint) factors for the current weights at the next
     /// `residualize` (numeric refactorization; the automatic rules do this when a solve with a
-    /// stale block factor needs more than max(30, 2 × the post-factorization count) iterations,
+    /// stale block factor needs more than max(30, 2 x the post-factorization count) iterations,
     /// or when the cost model prefers refreshing a stale joint factor to iterating with it).
     pub fn request_refactor(&mut self) {
         if self.escalated || self.pre.joint.is_some() {
@@ -504,6 +516,31 @@ impl FeSolver {
             && small_build_cost(st, &self.ws, self.small_work) > DEFER_ITERS * jacobi_iter_cost(st, r)
     }
 
+    /// Escalated block factors that are stale (the weights changed since factorization, as
+    /// between IRLS iterations) are refactored before a solve when that costs at most
+    /// [`STALE_GAIN`] of the last solve's PCG cost. Only exact sparse factors have a cost
+    /// estimate; with an approximate one the iteration-count rule of `residualize` decides.
+    fn stale_refresh_pays(&self, r: usize, ctx: &Ctx) -> bool {
+        if !self.escalated || self.large_fresh || self.pre.joint.is_some() {
+            return false;
+        }
+        let Some(last) = self.last_iters else { return false };
+        let mut rebuild = 0.0;
+        for bp in &self.pre.large {
+            match bp {
+                BlockPrecond::Jacobi => {}
+                BlockPrecond::SparseChol { rebuild: c, .. } => rebuild += c,
+                BlockPrecond::ApproxChol { .. } => return false,
+            }
+        }
+        let pcg = last as f64 * (matvec_cost(&self.st, r) + block_precond_cost(&self.st, &self.pre, r));
+        let pays = rebuild <= STALE_GAIN * pcg;
+        if ctx.verbose >= 2 {
+            ctx.log(&format!("fereg: stale block factors: refresh est {rebuild:.4}s vs last pcg est {pcg:.4}s -> {}", if pays { "refresh" } else { "keep" }));
+        }
+        pays
+    }
+
     fn refresh_large(&mut self, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
         if self.pre.joint.is_some() {
             self.refresh_joint(pool, ctx)?;
@@ -519,7 +556,7 @@ impl FeSolver {
             let keep = kept_levels(&ops, b);
             let refreshed = match &mut self.pre.large[i] {
                 BlockPrecond::Jacobi => true,
-                BlockPrecond::SparseChol { keep: k0, f } if *k0 == keep => {
+                BlockPrecond::SparseChol { keep: k0, f, .. } if *k0 == keep => {
                     let agg = ops.seg_agg(b, pool)?;
                     if cell_seg.is_none() {
                         cell_seg = Some(self.st.cell_segments(pool)?);
@@ -606,10 +643,10 @@ fn joint_allowed(cfg: &SolverConfig, js: &JointState) -> bool {
 }
 
 /// Builds the exact joint factor of S when the cost model accepts it: the remaining build cost
-/// plus the solves of the (at most two) remaining iterations, 2·(matvec + joint solve), must be
-/// at most [`JOINT_MARGIN`] × `without` (the projected PCG cost with the current preconditioner;
+/// plus the solves of the (at most two) remaining iterations, 2*(matvec + joint solve), must be
+/// at most [`JOINT_MARGIN`] x `without` (the projected PCG cost with the current preconditioner;
 /// `f64::INFINITY` = always within the hard budgets). The check runs before every stage with
-/// the statistics known so far (assembly work → nnz → factor size and flops, cached in `js`)
+/// the statistics known so far (assembly work -> nnz -> factor size and flops, cached in `js`)
 /// and without the costs already sunk, so an unaffordable factor is rejected as early as
 /// possible. Hard budget overruns (assembly work, nnz, factor entries) and numerical failure
 /// mark the joint factor as failed for good.
@@ -765,7 +802,10 @@ fn escalate_block(ops: &Ops, b: usize, cfg: &SolverConfig, cell_seg: &mut Option
     ctx.check()?;
     let out = match exact_csr {
         Some(csr) => match if cfg.sparse_chol { SparseChol::try_factor(&csr, pool)? } else { None } {
-            Some(f) => BlockPrecond::SparseChol { keep, f: Box::new(f) },
+            Some(f) => {
+                let rebuild = C_ASM * agg.work as f64 + C_ASM_NNZ * nnz_total as f64 + C_FLOP * f.flops() + C_ENTRY * f.len_val() as f64;
+                BlockPrecond::SparseChol { keep, f: Box::new(f), rebuild }
+            }
             None => match ApproxChol::factor(&csr) {
                 Ok(f) => BlockPrecond::ApproxChol { keep, f: Box::new(f) },
                 Err(_) => BlockPrecond::Jacobi,
@@ -810,7 +850,7 @@ struct System<'a> {
     small_deferred: bool,
     /// The deferred small factor was built during this solve (a restart, not an escalation).
     small_built: bool,
-    /// `pre.small` matches the current weights (a stale factor is a preconditioner, not S⁻¹).
+    /// `pre.small` matches the current weights (a stale factor is a preconditioner, not S^-1).
     small_fresh: bool,
     /// [`Dense::work`] of an earlier small factor of this solver, for the build-cost estimate.
     small_known: Option<SmallWork>,
@@ -907,16 +947,17 @@ impl Absorber for FeSolver {
         self.ws.w_rows.as_deref()
     }
 
-    fn set_weights(&mut self, w: Option<Vec<f64>>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
-        if w.as_ref().is_some_and(|v| v.len() != self.st.n || v.iter().any(|x| !(x.is_finite() && *x > 0.0))) {
+    fn set_weights(&mut self, w: Option<&[f64]>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
+        if w.is_some_and(|v| v.len() != self.st.n || !par::all_positive(v, pool)) {
             return Err(RfError::InvalidInput("weights must be positive and finite".into()));
         }
         ctx.check()?;
         let mut t = Instant::now();
         if self.pre.small.is_some() {
-            self.small_drift *= ratio_range(self.ws.w_rows.as_deref(), w.as_deref(), pool);
+            self.small_drift *= ratio_range(self.ws.w_rows.as_deref(), w, pool);
         }
-        self.ws = weight_state(&self.st, w, pool)?;
+        let w_rows = w.map(|v| par::copy_into(self.ws.w_rows.take(), v, pool)).transpose()?;
+        self.ws = weight_state(&self.st, w_rows, pool)?;
         log_phase(ctx, &mut t, "set_weights");
         self.joint.agg = None;
         self.basic_fresh = false;
@@ -938,7 +979,7 @@ impl Absorber for FeSolver {
     ) -> Result<SolveInfo, RfError> {
         let (n, m, g1) = (self.st.n, self.st.m, self.st.g1);
         if z.len() != n * r {
-            return Err(RfError::InvalidInput("residualize: block size differs from n·R".into()));
+            return Err(RfError::InvalidInput("residualize: block size differs from n*R".into()));
         }
         if warm.is_some_and(|wc| wc.r != r || wc.p != m + g1) {
             return Err(RfError::InvalidInput("residualize: warm start has a different shape".into()));
@@ -949,7 +990,7 @@ impl Absorber for FeSolver {
         ctx.check()?;
         let mut t = Instant::now();
         let mut joint_now = false;
-        if self.need_refactor {
+        if self.need_refactor || self.stale_refresh_pays(r, ctx) {
             self.refresh_large(pool, ctx)?;
             self.need_refactor = false;
         } else if self.pre.joint.is_some() && !self.large_fresh {
@@ -1039,6 +1080,7 @@ impl Absorber for FeSolver {
             };
             let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
+            self.last_iters = Some(iterations);
             exact = out.exact || ss0.iter().all(|&s| s == 0.0);
             let joint_built = sys.joint_built;
             // Building a deferred small factor restarts PCG; it is not a large-block escalation

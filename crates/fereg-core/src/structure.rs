@@ -1,6 +1,6 @@
 //! Cell structure of the intercept-only FE design (plan D5).
 //!
-//! Rows (observations) are ordered by π: sorted by (g1, g2, …, gQ, obs). A *cell* is a run of
+//! Rows (observations) are ordered by pi: sorted by (g1, g2, ..., gQ, obs). A *cell* is a run of
 //! rows with the same code tuple; a *segment* is the run of cells of one FE1 level. Blocks are
 //! the non-FE1 terms; the reduced unknown x stacks their levels: small blocks first (jointly at
 //! most [`SMALL_LIMIT`] levels, factored densely), then large blocks, each in term order.
@@ -54,21 +54,25 @@ pub struct Structure {
     pub cell_obs_off: Option<Vec<u32>>,
     /// Number of cells M.
     pub ncells: usize,
-    /// Number of blocks (Q − 1).
+    /// Number of blocks (Q - 1).
     pub nb: usize,
-    /// Codes of blocks 0..nb per cell, row-major M × nb.
-    pub cell_codes: Vec<u32>,
+    /// Codes of blocks 0..nb per cell, row-major M x nb ([`Structure::cell_codes`]). Private,
+    /// as is `code_bound`: [`build`] checks that every code of block b is below `code_bound[b]`,
+    /// and the operator kernels index the reduced vectors with the codes unchecked.
+    cell_codes: Vec<u32>,
+    /// Level count of each block at the build (the exclusive bound of its codes).
+    code_bound: Vec<usize>,
     pub blocks: Vec<Block>,
-    /// Reduced dimension Σ_b g_b.
+    /// Reduced dimension sum_b g_b.
     pub m: usize,
     /// Small coordinates occupy `0..m_small`.
     pub m_small: usize,
-    /// Fixed partition of the segments into parts of ≳ [`CHUNK`] cells (boundaries, len = parts + 1).
+    /// Fixed partition of the segments into parts of >~ [`CHUNK`] cells (boundaries, len = parts + 1).
     pub parts: Vec<u32>,
     /// Largest reduced vector (bytes) scattered entirely through accumulators
     /// (see `operator::Ops::accumulates_all`).
     pub acc_bytes_max: usize,
-    /// Σ_seg s², s = distinct small coordinates per segment (dense assembly work).
+    /// sum_seg s^2, s = distinct small coordinates per segment (dense assembly work).
     pub small_work: u64,
 }
 
@@ -100,6 +104,24 @@ impl Structure {
         &self.cell_codes[c * self.nb..(c + 1) * self.nb]
     }
 
+    /// Codes of blocks 0..nb per cell, row-major M x nb.
+    #[inline]
+    pub fn cell_codes(&self) -> &[u32] {
+        &self.cell_codes
+    }
+
+    /// Whether reading the rows of [`Structure::cell_codes`] with width `nb` gives every cell's
+    /// codes, and every code of the first `nblocks` blocks addresses `offs[b] + code*w .. + w`
+    /// within `len` values: the precondition of the unchecked gathers and scatters of the
+    /// operator kernels. It uses only private data (the codes and their bounds, checked in
+    /// [`build`]), so no change of the public fields can invalidate it.
+    pub fn codes_within(&self, nb: usize, offs: &[usize], w: usize, nblocks: usize, len: usize) -> bool {
+        nb == self.code_bound.len()
+            && nblocks <= nb
+            && offs.len() >= nblocks
+            && (0..nblocks).all(|b| self.code_bound[b].checked_mul(w).and_then(|e| e.checked_add(offs[b])).is_some_and(|e| e <= len))
+    }
+
     pub fn has_large(&self) -> bool {
         self.blocks.iter().any(|b| !b.small)
     }
@@ -108,7 +130,7 @@ impl Structure {
         self.parts.len() - 1
     }
 
-    /// Groups the fixed parts so that `ntasks × acc_len ≤ 2²²` (the per-task accumulators stay
+    /// Groups the fixed parts so that `ntasks x acc_len <= 2^22` (the per-task accumulators stay
     /// bounded). Returns segment boundaries of the tasks. Depends only on the data and `acc_len`.
     pub fn tasks(&self, acc_len: usize) -> Vec<u32> {
         let np = self.nparts();
@@ -181,23 +203,32 @@ const ELIM_CHEAP_PER_OBS: u64 = 64;
 /// The term eliminated exactly (the solver's FE1). With two or fewer terms, or one candidate,
 /// it is [`fe1_index`] (the most levels). With three or more terms, among the terms with at
 /// least 1/[`ELIM_CANDIDATE_SHARE`] of the largest G it is the one minimizing
-/// E = Σ_{other terms o} Σ_{levels s} d_{s,o}², d_{s,o} = distinct levels of o within level s:
+/// E = sum_{other terms o} sum_{levels s} d_{s,o}^2, d_{s,o} = distinct levels of o within level s:
 /// the assembly work of the reduced system, which also measures how densely its blocks are
 /// coupled. Measured on a 7.3M-row citation panel (stkcd#year 41k, lpid#year 121k,
 /// stkcd#lsid 151k levels): eliminating the largest term (E = 1.7e10) took 1665 PCG iterations
 /// (36 s), lpid#year (E = 1.7e9) 208 (3.5 s). On the usual panels (individual, firm, year) the
 /// largest term is the only candidate or its levels are small, so only a histogram is computed.
 pub fn elimination_index(terms: &[Term], pool: &Pool) -> Result<Option<usize>, RfError> {
+    Ok(choose_elimination(terms, pool)?.0)
+}
+
+/// Observation ids sorted by a term: its g + 1 level offsets and the ids ([`scatter_by_code`]).
+type SortedObs = (Vec<u32>, Vec<u32>);
+
+/// [`elimination_index`], with the observations sorted by the chosen term when the choice
+/// sorted them (several candidates).
+fn choose_elimination(terms: &[Term], pool: &Pool) -> Result<(Option<usize>, Option<SortedObs>), RfError> {
     let default = fe1_index(terms);
-    let Some(f0) = default else { return Ok(None) };
+    let Some(f0) = default else { return Ok((None, None)) };
     if terms.len() < 3 {
-        return Ok(default);
+        return Ok((default, None));
     }
     let cands: Vec<usize> = (0..terms.len()).filter(|&q| terms[q].g * ELIM_CANDIDATE_SHARE >= terms[f0].g).collect();
     if cands.len() < 2 {
-        return Ok(default);
+        return Ok((default, None));
     }
-    // E of the default is at most (Q − 1)·Σ_s n_s² (n_s: observations of level s): when that
+    // E of the default is at most (Q - 1)*sum_s n_s^2 (n_s: observations of level s): when that
     // is already small the reduced system is cheap whatever the choice (individual-level
     // panels), so the pair counts are skipped.
     let mut size = vec![0u64; terms[f0].g];
@@ -206,37 +237,58 @@ pub fn elimination_index(terms: &[Term], pool: &Pool) -> Result<Option<usize>, R
     }
     let bound = (terms.len() as u64 - 1) * size.iter().map(|n| n * n).sum::<u64>();
     if bound <= ELIM_CHEAP_PER_OBS * terms[f0].codes.len() as u64 {
-        return Ok(default);
+        return Ok((default, None));
     }
-    // d counts of every (candidate, other) pair: one sort of the distinct level pairs per
-    // unordered pair of terms gives both directions.
-    let q = terms.len();
-    let mut e = vec![0u64; q];
-    for a in 0..q {
-        for b in a + 1..q {
-            if !cands.contains(&a) && !cands.contains(&b) {
-                continue;
-            }
-            let (ta, tb) = (&terms[a], &terms[b]);
-            let mut keys = alloc_vec(ta.codes.len(), 0u64)?;
-            pool.install(|| {
-                keys.par_iter_mut()
-                    .zip(ta.codes.par_iter().zip(tb.codes.par_iter()))
-                    .for_each(|(k, (&x, &y))| *k = (u64::from(x) << 32) | u64::from(y));
-                keys.par_sort_unstable();
-            });
-            keys.dedup();
-            let (mut da, mut db) = (vec![0u64; ta.g], vec![0u64; tb.g]);
-            for &k in &keys {
-                da[(k >> 32) as usize] += 1;
-                db[(k & 0xFFFF_FFFF) as usize] += 1;
-            }
-            // da[s]: distinct levels of b within level s of a (and vice versa).
-            e[a] += da.iter().map(|d| d * d).sum::<u64>();
-            e[b] += db.iter().map(|d| d * d).sum::<u64>();
+    // E of every candidate from the observations sorted by it; the sort of the best one so far
+    // is kept for the structure.
+    let mut best: Option<((u64, std::cmp::Reverse<usize>, usize), SortedObs)> = None;
+    for &f in &cands {
+        let sorted = scatter_by_code(&terms[f].codes, terms[f].g, pool)?;
+        let key = (distinct_work(terms, f, &sorted, pool), std::cmp::Reverse(terms[f].g), f);
+        if best.as_ref().is_none_or(|(k, _)| key < *k) {
+            best = Some((key, sorted));
         }
     }
-    Ok(cands.iter().copied().min_by_key(|&f| (e[f], std::cmp::Reverse(terms[f].g), f)))
+    Ok(best.map_or((default, None), |((_, _, f), sorted)| (Some(f), Some(sorted))))
+}
+
+/// E of eliminating term `f` (see [`elimination_index`]): sum over the other terms o and the
+/// levels s of f of d_{s,o}^2, d_{s,o} the distinct levels of o among the observations of s.
+/// `sorted`: the observations sorted by f. One pass over the levels of f in parallel groups, each
+/// marking the levels of o it meets with the level s (stamp arrays); the integer sums do not
+/// depend on the grouping.
+fn distinct_work(terms: &[Term], f: usize, sorted: &SortedObs, pool: &Pool) -> u64 {
+    let (off, ids) = (&sorted.0, &sorted.1);
+    let others: Vec<&Term> = terms.iter().enumerate().filter(|&(q, _)| q != f).map(|(_, t)| t).collect();
+    let groups = obs_groups(off);
+    pool.install(|| {
+        groups
+            .par_windows(2)
+            .map_init(
+                || others.iter().map(|t| vec![0u32; t.g]).collect::<Vec<_>>(),
+                |stamps, w| {
+                    let mut e = 0u64;
+                    let mut d = vec![0u64; others.len()];
+                    for s in w[0] as usize..w[1] as usize {
+                        // Level s marks the levels of o it holds with s + 1 (0 = unmarked).
+                        let tag = s as u32 + 1;
+                        d.fill(0);
+                        for &i in &ids[off[s] as usize..off[s + 1] as usize] {
+                            for ((t, st), dk) in others.iter().zip(stamps.iter_mut()).zip(d.iter_mut()) {
+                                let c = t.codes[i as usize] as usize;
+                                if st[c] != tag {
+                                    st[c] = tag;
+                                    *dk += 1;
+                                }
+                            }
+                        }
+                        e += d.iter().map(|x| x * x).sum::<u64>();
+                    }
+                    e
+                },
+            )
+            .sum()
+    })
 }
 
 /// Builds the structure for intercept-only `terms` over `n` kept observations; small blocks
@@ -245,13 +297,13 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
     if terms.iter().any(|t| !t.slopes.is_empty() || !t.intercept) {
         return Err(RfError::Internal("structure::build: slope terms belong to slopes::SlopeSolver".into()));
     }
-    let fe1 = elimination_index(terms, pool)?;
+    let (fe1, sorted1) = choose_elimination(terms, pool)?;
     let (g1, code1): (usize, Option<&[u32]>) = match fe1 {
         Some(f) => (terms[f].g, Some(&terms[f].codes)),
         None => (1, None),
     };
 
-    // Small/large classification: ascending G while the running total stays ≤ small_limit.
+    // Small/large classification: ascending G while the running total stays <= small_limit.
     let others: Vec<usize> = (0..terms.len()).filter(|&q| Some(q) != fe1).collect();
     let mut by_g = others.clone();
     by_g.sort_by_key(|&q| (terms[q].g, q));
@@ -278,9 +330,10 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
     let bcodes: Vec<&[u32]> = blocks.iter().map(|b| terms[b.term].codes.as_slice()).collect();
 
     // 1. Observation ids by segment (ascending within each segment).
-    let (seg_obs_off, mut pi) = match code1 {
-        None => (vec![0u32, n as u32], identity(n, pool)?),
-        Some(c1) => scatter_by_code(c1, g1, pool)?,
+    let (seg_obs_off, mut pi) = match (code1, sorted1) {
+        (None, _) => (vec![0u32, n as u32], identity(n, pool)?),
+        (Some(_), Some(sorted)) => sorted,
+        (Some(c1), None) => scatter_by_code(c1, g1, pool)?,
     };
 
     // 2. Per segment: sort the rows by (codes, obs), find the cells, record their codes, first
@@ -362,9 +415,19 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
         // SAFETY: each group's piece holds its cells, all written above, and the last entry.
         cell_obs = unsafe { assume_init(co) };
     }
-    // SAFETY: the groups wrote the codes of all ncells cells, now at 0..ncells·nb.
+    // SAFETY: the groups wrote the codes of all ncells cells, now at 0..ncells*nb.
     let cell_codes = unsafe { assume_init(cell_codes) };
     drop(outs);
+    // Every cell code below its block's level count: the operator kernels index the reduced
+    // vectors with them unchecked ([`Structure::codes_within`]).
+    let code_bound: Vec<usize> = blocks.iter().map(|b| b.g).collect();
+    let in_range = nb == 0
+        || pool.install(|| {
+            cell_codes.par_chunks(CHUNK * nb).all(|ch| ch.chunks_exact(nb).all(|cc| cc.iter().zip(&code_bound).all(|(&c, &g)| (c as usize) < g)))
+        });
+    if !in_range {
+        return Err(RfError::Internal("cell code out of range of its level count".into()));
+    }
 
     // Fixed partition of the segments.
     let mut parts = vec![0u32];
@@ -387,6 +450,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
         ncells,
         nb,
         cell_codes,
+        code_bound,
         blocks,
         m,
         m_small,
@@ -394,7 +458,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
         acc_bytes_max: crate::operator::ACC_BYTES_MAX,
         small_work,
     };
-    // Dense small-block work Σ_seg s² too large: every block is treated as large.
+    // Dense small-block work sum_seg s^2 too large: every block is treated as large.
     if st.m_small > 0 && small_work > 64 * st.ncells as u64 {
         st.blocks.iter_mut().for_each(|b| b.small = false);
         st.m_small = 0;
@@ -411,7 +475,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
     Ok(st)
 }
 
-/// Segment boundaries grouping consecutive segments into ≳ CHUNK rows (for parallel passes).
+/// Segment boundaries grouping consecutive segments into >~ CHUNK rows (for parallel passes).
 pub(crate) fn obs_groups(seg_obs_off: &[u32]) -> Vec<u32> {
     let g = seg_obs_off.len() - 1;
     let mut out = vec![0u32];
@@ -438,7 +502,7 @@ impl<T> SyncPtr<T> {
     }
 }
 
-/// `0, 1, …, n − 1`.
+/// `0, 1, ..., n - 1`.
 fn identity(n: usize, pool: &Pool) -> Result<Vec<u32>, RfError> {
     let mut v = alloc_uninit::<u32>(n)?;
     pool.install(|| {
@@ -494,7 +558,7 @@ fn counting_sort(n: usize, g: usize, code: impl Fn(usize) -> u32 + Sync, pool: &
     off.fill(0);
     let mut ids = alloc_uninit::<u32>(n)?;
     let nt = pool.threads().min(nc).max(1);
-    // Parts: one per thread while their histograms (parts × g counters) stay within 2n.
+    // Parts: one per thread while their histograms (parts x g counters) stay within 2n.
     let parts = nt.min(2 * n / g.max(1)).max(1);
     if nt == 1 {
         for i in 0..n {
@@ -587,7 +651,7 @@ fn counting_sort(n: usize, g: usize, code: impl Fn(usize) -> u32 + Sync, pool: &
 }
 
 /// [`counting_sort`] for many levels (parallel): the (code, id) pairs are first scattered stably
-/// into buckets of 2^shift consecutive levels — large regions per (bucket, part) — and every
+/// into buckets of 2^shift consecutive levels -- large regions per (bucket, part) -- and every
 /// bucket is then counting-sorted on its own. `off` is zeroed (g + 1), `ids` has n slots.
 fn bucket_sort(
     n: usize,
@@ -747,7 +811,7 @@ struct GroupCells {
     cells: usize,
     /// First row of each cell; `None` while every cell holds one row (cell k starts at row k).
     starts: Option<Vec<u32>>,
-    /// Σ_seg s² over the group's segments.
+    /// sum_seg s^2 over the group's segments.
     small_work: u64,
 }
 
@@ -854,8 +918,8 @@ impl SegPass<'_> {
 
     /// [`Self::group`] specialized to `NB` blocks (the common small counts): one loop over the
     /// rows that checks the order as it goes (a segment found out of order is rolled back, sorted
-    /// and redone), and counts the distinct codes of block 0 — the most significant key part,
-    /// so ascending within a segment — by their changes rather than through marks.
+    /// and redone), and counts the distinct codes of block 0 -- the most significant key part,
+    /// so ascending within a segment -- by their changes rather than through marks.
     fn group_c<K: Packed, const NB: usize>(
         &self,
         segs: Range<usize>,
@@ -1011,7 +1075,7 @@ mod tests {
         assert_eq!(st.cell_codes, cc);
         starts.push(n as u32);
         assert_eq!(st.cell_obs_off, (ncells != n).then_some(starts));
-        // Small classification as documented, then Σ_seg s².
+        // Small classification as documented, then sum_seg s^2.
         let mut by_g: Vec<usize> = bt.clone();
         by_g.sort_by_key(|&q| (terms[q].g, q));
         let mut small = vec![false; terms.len()];
@@ -1089,7 +1153,7 @@ mod tests {
         cases.push((vec![term(codes(n, 2, &mut rng), 2), term(codes(n, 1500, &mut rng), 1500)], vec![4096]));
         cases.push((vec![term(codes(n, 700, &mut rng), 700)], vec![4096]));
         cases.push((Vec::new(), vec![4096]));
-        // 33–96 bit keys with two and three blocks, and five blocks (generic pass).
+        // 33-96 bit keys with two and three blocks, and five blocks (generic pass).
         let n = 6000;
         let wide_g = |rng: &mut SplitMix64, k: u32| term(codes(n, 6, rng).iter().map(|&c| c << 14).collect(), 1 << k);
         let k2 = vec![term(codes(n, 900, &mut rng), 1 << 20), wide_g(&mut rng, 17), wide_g(&mut rng, 17)];
@@ -1151,7 +1215,7 @@ mod tests {
     }
 
     /// Three comparable terms with dense coupling: the eliminated term minimizes
-    /// E = Σ_o Σ_s d_{s,o}² (brute force), here not the default (first of the largest).
+    /// E = sum_o sum_s d_{s,o}^2 (brute force), here not the default (first of the largest).
     #[test]
     fn elimination_minimizes_assembly_work() {
         let n = 4000usize;

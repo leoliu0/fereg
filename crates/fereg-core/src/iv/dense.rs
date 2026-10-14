@@ -82,7 +82,7 @@ impl M {
         M::from_fn(r1 - r0, c1 - c0, |i, j| self.at(r0 + i, c0 + j))
     }
 
-    /// Kronecker product A ⊗ B.
+    /// Kronecker product A (x) B.
     pub fn kron(&self, b: &M) -> M {
         M::from_fn(self.r * b.r, self.c * b.c, |i, j| self.at(i / b.r, j / b.c) * b.at(i % b.r, j % b.c))
     }
@@ -106,7 +106,7 @@ impl M {
         }
     }
 
-    /// x'·A·x for a square A.
+    /// x'*A*x for a square A.
     pub fn quad(&self, x: &[f64]) -> f64 {
         (0..self.r).map(|i| x[i] * (0..self.c).map(|j| self.at(i, j) * x[j]).sum::<f64>()).sum()
     }
@@ -169,7 +169,7 @@ pub(crate) fn spd_inv(a: &M) -> M {
     M::from_fn(n, n, |i, j| inv.at(i, j) * s[i] * s[j])
 }
 
-/// A⁻¹·B for SPD A (Mata `cholsolve`, with the generalized-inverse fallback of `cholqrsolve`).
+/// A^-1*B for SPD A (Mata `cholsolve`, with the generalized-inverse fallback of `cholqrsolve`).
 pub(crate) fn spd_solve(a: &M, b: &M) -> M {
     spd_inv(a).mul(b)
 }
@@ -192,7 +192,7 @@ pub(crate) fn sym_eig(a: &M) -> (Vec<f64>, M) {
     (idx.iter().map(|&i| vals[i]).collect(), M::from_fn(n, n, |i, j| v.at(i, idx[j])))
 }
 
-/// Symmetric PSD square root U·diag(√max(λ,0))·U'.
+/// Symmetric PSD square root U*diag(sqrt max(lambda,0))*U'.
 pub(crate) fn sqrtm_psd(a: &M) -> M {
     let (vals, u) = sym_eig(a);
     let n = a.r;
@@ -210,7 +210,7 @@ pub(crate) fn cond_sym(a: &M) -> f64 {
     if min == 0.0 { f64::NAN } else { max / min }
 }
 
-/// Inverse of a general square matrix (Gauss–Jordan with partial pivoting); `None` if singular.
+/// Inverse of a general square matrix (Gauss-Jordan with partial pivoting); `None` if singular.
 pub(crate) fn inv_general(a: &M) -> Option<M> {
     let n = a.r;
     let mut m = a.clone();
@@ -246,7 +246,7 @@ pub(crate) fn inv_general(a: &M) -> Option<M> {
     Some(inv)
 }
 
-/// Full SVD A = U·diag(s)·V' (Mata `fullsvd`): U is r×r, V is c×c, singular values descending.
+/// Full SVD A = U*diag(s)*V' (Mata `fullsvd`): U is r x r, V is c x c, singular values descending.
 pub(crate) fn svd_full(a: &M) -> (M, Vec<f64>, M) {
     let fa = faer::Mat::<f64>::from_fn(a.r, a.c, |i, j| a.at(i, j));
     let svd = fa.svd().expect("svd of a small dense matrix");

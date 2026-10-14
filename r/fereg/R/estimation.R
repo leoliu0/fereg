@@ -14,9 +14,18 @@
 #'   `sw()`, `sw0()`, `csw()`, `csw0()` (right-hand side and fixed-effects part) give multiple
 #'   estimations.
 #' @param data A data frame (or a list of equal-length vectors).
-#' @param vcov Variance type: `"iid"` (default), `"hetero"`, `"cluster"` (first fixed effect),
-#'   `"twoway"`, or a formula such as `~cl` or `~cl1 + cl2` (multiway clustering, up to four
-#'   dimensions; `~cl1^cl2` clusters on the interaction).
+#' @param vcov Variance type, as in fixest: a string (`"iid"`, the default; `"hetero"` (HC1),
+#'   `"hc2"`, `"hc3"`, `"cluster"` (first `panel.id` variable, else first fixed effect),
+#'   `"twoway"`, `"threeway"`, `"fourway"`, `"NW"` / `"newey_west"`, `"DK"` /
+#'   `"driscoll_kraay"`, `"conley"`, and fereg's extension `"crv3"`; case and unique
+#'   abbreviations are accepted), a one-sided formula (`~cl`, `~cl1 + cl2`, up to four
+#'   dimensions, `~cl1^cl2` clusters on the interaction), a formula `type ~ variables`
+#'   (`NW ~ id + period`, `NW(2) ~ id + period`, `NW ~ period` (time series without
+#'   `panel.id`), `DK(2) ~ period`, `conley(100) ~ lat + lon`, `conley("60mi") ~ lat + lon`,
+#'   `crv3 ~ g1 + g2`; `+ ssc(...)` among the variables sets the small-sample correction) or a
+#'   request object (see [vcov_requests]). Variables of Newey-West and Driscoll-Kraay variances
+#'   default to `panel.id`, Conley coordinates are guessed from the column names. Rows with
+#'   missing values in a variance variable are removed (counted as "vcov" in the NA note).
 #' @param weights Observation weights: a one-sided formula (`~w`), a column name or a vector.
 #' @param offset Offset on the link scale: a one-sided formula, a column name or a vector.
 #' @param subset Rows to use: logical or integer vector, or a one-sided formula (`~year > 2000`).
@@ -25,12 +34,16 @@
 #' @param cluster,se Former fixest ways of requesting a variance type (`cluster = ~g`,
 #'   `se = "hetero"`).
 #' @param ssc Small-sample correction, see [ssc()].
+#' @param panel.id Panel identifiers, as in fixest: a formula `~unit + time` or a string
+#'   `"unit,time"`. They are the default unit and time of Newey-West / Driscoll-Kraay variances
+#'   and the default cluster of `vcov = "cluster"`. (fereg has no lag operators.)
 #' @param fixef.rm `"perfect_fit"` (default; singletons, plus fixed-effect groups with a
 #'   perfectly fitted outcome in GLMs), `"singleton"` or `"none"`.
 #' @param fixef.tol,fixef.iter Tolerance and iteration cap of the fixed-effects solver.
 #' @param collin.tol Collinearity tolerance (fixest rule).
 #' @param nthreads Number of threads; `0` = all logical cores. Defaults to option
-#'   `fereg.nthreads`, else all cores (2 when `_R_CHECK_LIMIT_CORES_` is set).
+#'   `fereg.nthreads`, else all cores, capped at `OMP_THREAD_LIMIT` when set (2 under R CMD
+#'   check, i.e. when `_R_CHECK_LIMIT_CORES_` is set).
 #' @param lean If `TRUE`, residuals, fitted values and the estimation state are not kept
 #'   (post-hoc variances then need a new estimation).
 #' @param notes Print notes about removed observations (option `fereg.notes`, default `TRUE`).
@@ -43,7 +56,7 @@
 #' summary(m, vcov = ~id)
 #' @export
 feols <- function(fml, data, vcov, weights, offset, subset, split, fsplit, cluster, se, ssc,
-                  fixef.rm = "perfect_fit", fixef.tol = 1e-8, fixef.iter = 16000,
+                  panel.id, fixef.rm = "perfect_fit", fixef.tol = 1e-8, fixef.iter = 16000,
                   collin.tol = 1e-9, nthreads = getOption("fereg.nthreads", default_threads()),
                   lean = FALSE, notes = getOption("fereg.notes", TRUE), ...) {
   check_dots(...)
@@ -51,7 +64,7 @@ feols <- function(fml, data, vcov, weights, offset, subset, split, fsplit, clust
     method = "feols", family = NULL, data = data, env = parent.frame(), call = match.call(),
     vcov = arg_or_null(vcov), weights = arg_or_null(weights), offset = arg_or_null(offset),
     subset = arg_or_null(subset), split = arg_or_null(split), fsplit = arg_or_null(fsplit),
-    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc),
+    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc), panel.id = arg_or_null(panel.id),
     fixef.rm = fixef.rm, fixef.tol = fixef.tol, fixef.iter = fixef.iter, collin.tol = collin.tol,
     glm.tol = 1e-8, glm.iter = 25, nthreads = nthreads, lean = lean, notes = notes
   )
@@ -74,7 +87,7 @@ feols <- function(fml, data, vcov, weights, offset, subset, split, fsplit, clust
 #' p
 #' @export
 fepois <- function(fml, data, vcov, offset, weights, subset, split, fsplit, cluster, se, ssc,
-                   fixef.rm = "perfect_fit", fixef.tol = 1e-8, fixef.iter = 16000,
+                   panel.id, fixef.rm = "perfect_fit", fixef.tol = 1e-8, fixef.iter = 16000,
                    glm.iter = 25, glm.tol = 1e-8, collin.tol = 1e-9,
                    nthreads = getOption("fereg.nthreads", default_threads()), lean = FALSE,
                    notes = getOption("fereg.notes", TRUE), ...) {
@@ -83,7 +96,7 @@ fepois <- function(fml, data, vcov, offset, weights, subset, split, fsplit, clus
     method = "fepois", family = "poisson", data = data, env = parent.frame(), call = match.call(),
     vcov = arg_or_null(vcov), weights = arg_or_null(weights), offset = arg_or_null(offset),
     subset = arg_or_null(subset), split = arg_or_null(split), fsplit = arg_or_null(fsplit),
-    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc),
+    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc), panel.id = arg_or_null(panel.id),
     fixef.rm = fixef.rm, fixef.tol = fixef.tol, fixef.iter = fixef.iter, collin.tol = collin.tol,
     glm.tol = glm.tol, glm.iter = glm.iter, nthreads = nthreads, lean = lean, notes = notes
   )
@@ -93,7 +106,7 @@ fepois <- function(fml, data, vcov, offset, weights, subset, split, fsplit, clus
 #' @rdname fepois
 #' @export
 feglm <- function(fml, data, family = "logit", vcov, offset, weights, subset, split, fsplit,
-                  cluster, se, ssc, fixef.rm = "perfect_fit", fixef.tol = 1e-8,
+                  cluster, se, ssc, panel.id, fixef.rm = "perfect_fit", fixef.tol = 1e-8,
                   fixef.iter = 16000, glm.iter = 25, glm.tol = 1e-8, collin.tol = 1e-9,
                   nthreads = getOption("fereg.nthreads", default_threads()), lean = FALSE,
                   notes = getOption("fereg.notes", TRUE), ...) {
@@ -104,7 +117,7 @@ feglm <- function(fml, data, family = "logit", vcov, offset, weights, subset, sp
     env = parent.frame(), call = match.call(),
     vcov = arg_or_null(vcov), weights = arg_or_null(weights), offset = arg_or_null(offset),
     subset = arg_or_null(subset), split = arg_or_null(split), fsplit = arg_or_null(fsplit),
-    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc),
+    cluster = arg_or_null(cluster), se = arg_or_null(se), ssc = arg_or_null(ssc), panel.id = arg_or_null(panel.id),
     fixef.rm = fixef.rm, fixef.tol = fixef.tol, fixef.iter = fixef.iter, collin.tol = collin.tol,
     glm.tol = glm.tol, glm.iter = glm.iter, nthreads = nthreads, lean = lean, notes = notes
   )
@@ -114,7 +127,15 @@ feglm <- function(fml, data, family = "logit", vcov, offset, weights, subset, sp
 
 # ---- helpers ---------------------------------------------------------------------------------
 
-default_threads <- function() if (nzchar(Sys.getenv("_R_CHECK_LIMIT_CORES_"))) 2L else 0L
+# Default thread count: all cores (0), except 2 under R CMD check (`_R_CHECK_LIMIT_CORES_` set and
+# not "false", as CRAN's policy asks), and at most OMP_THREAD_LIMIT when that is set.
+default_threads <- function() {
+  check <- Sys.getenv("_R_CHECK_LIMIT_CORES_")
+  n <- if (nzchar(check) && !identical(tolower(check), "false")) 2L else 0L
+  limit <- suppressWarnings(as.integer(Sys.getenv("OMP_THREAD_LIMIT")))
+  if (!is.na(limit) && limit > 0L) n <- if (n == 0L) limit else min(n, limit)
+  n
+}
 
 check_dots <- function(...) {
   if (...length()) {
@@ -142,7 +163,7 @@ glm_family <- function(family) {
 }
 
 estimation_args <- function(method, family, data, env, call, vcov, weights, offset, subset,
-                            split, fsplit, cluster, se, ssc, fixef.rm, fixef.tol, fixef.iter,
+                            split, fsplit, cluster, se, ssc, panel.id, fixef.rm, fixef.tol, fixef.iter,
                             collin.tol, glm.tol, glm.iter, nthreads, lean, notes) {
   if (!is.list(data)) stop("fereg: `data` must be a data frame", call. = FALSE)
   if (!is.null(ssc) && !inherits(ssc, "ssc.type")) stop("fereg: `ssc` must be created with ssc()", call. = FALSE)
@@ -157,7 +178,7 @@ estimation_args <- function(method, family, data, env, call, vcov, weights, offs
   }
   list(
     method = method, family = family, data = data, env = env, call = call,
-    vcov = parse_vcov(vcov, cluster, se), ssc = ssc,
+    vcov = parse_vcov(vcov, cluster, se), ssc = ssc, panel_id = parse_panel_id(panel.id, data),
     weights = weights, offset = offset, subset = subset, split = split, fsplit = fsplit,
     fixef.rm = fixef.rm, fixef.tol = num(fixef.tol, "fixef.tol", 0), fixef.iter = num(fixef.iter, "fixef.iter", 1),
     collin.tol = num(collin.tol, "collin.tol", 0), glm.tol = num(glm.tol, "glm.tol", 0),
@@ -268,8 +289,8 @@ fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
   slope_reg <- new_slopes(data, env, cache)
   fe <- fe_design(m$fe_terms, reg, slope_reg)
   has_fe <- length(fe$terms) > 0
-  v <- resolve_vcov(args$vcov, fe$terms)
-  cluster_idx <- lapply(v$dims, function(d) vapply(d, function(e) factor_index(reg, e), 0))
+  v <- resolve_vcov(args$vcov, fe$terms, args$panel_id, names(data))
+  vc <- vcov_columns(v, reg)
 
   y_name <- deparse1l(m$lhs)
   y <- cached(cache, paste0("y:", y_name), function() as_num(eval_var(m$lhs, data, env), y_name))
@@ -282,14 +303,15 @@ fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
   # first stage has an intercept or fixed effects.
   inst <- if (is_iv) linear_design(lapply(m$inst, function(e) list(expr = e, sign = 1)), data, env, TRUE)
 
-  ssc_used <- effective_ssc(args$ssc, v$type)
+  ssc_used <- effective_ssc(v$ssc %||% args$ssc, v$type)
   input <- list(
     n = n, y = y, x = lin$cols, endog = endo, inst = if (is_iv) inst$cols else list(),
     factors = reg$cols, factor_names = reg$names, fe = fe$core,
-    slopes = slope_reg$cols, weights = w, offset = off, cluster = cluster_idx, drop = drop
+    slopes = slope_reg$cols, weights = w, offset = off, cluster = vc$cluster,
+    time = vc$time, panel = vc$panel, lat = vc$lat, lon = vc$lon, drop = drop
   )
   spec <- list(
-    model = model, intercept = lin$intercept, vcov = v$type, ssc = ssc_core(ssc_used),
+    model = model, intercept = lin$intercept, vcov = core_kind(v), ssc = ssc_core(ssc_used),
     fixef_rm = args$fixef.rm, collin_tol = args$collin.tol, fixef_tol = args$fixef.tol,
     fixef_maxiter = args$fixef.iter, glm_tol = args$glm.tol, glm_maxiter = args$glm.iter,
     keep_resid = !args$lean, keep_fixef = FALSE, keep_state = !args$lean
@@ -297,7 +319,7 @@ fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
   out <- fereg_fit(input, spec, args$nthreads)
 
   info <- list(
-    model = model, args = args, m = m, n = n, y = y, y_name = y_name, lin = lin,
+    model = model, args = args, m = m, n = n, env = env, y = y, y_name = y_name, lin = lin,
     x_names = lin$names, endo_names = endo_names, inst_names = if (is_iv) inst$names else character(0),
     fe = fe, reg = reg, slope_names = slope_reg$names,
     vcov = v, ssc = ssc_used, weights = w, offset = off, drop = drop
@@ -354,15 +376,21 @@ vcov_matrix <- function(vout, perm, names) {
 set_vcov <- function(res, vout, v, ssc_used) {
   V <- vcov_matrix(vout, res$coef_perm, names(res$coefficients))
   vinfo <- list(
-    type = v$type, dims = v$dims, label = vcov_label(v), ssc = ssc_used,
+    type = v$type, dims = v$dims, label = vcov_label(v, vout), ssc = ssc_used,
     df_k = vout$df_k, df_t = nan_na(vout$df_t), t_dist = vout$t_dist,
     n_clusters = stats::setNames(vout$n_clusters, vapply(v$dims, dim_label, "")),
-    psd_fixed = vout$psd_fixed
+    n_periods = nan_na(vout$n_periods), psd_fixed = vout$psd_fixed, request = v
   )
   attr(V, "type") <- vinfo$label
   attr(V, "df.K") <- vinfo$df_k
   attr(V, "df.t") <- vinfo$df_t
-  if (v$type == "cluster") attr(V, "G") <- vinfo$n_clusters
+  # fixest's attribute G: clusters per dimension; Newey-West / Driscoll-Kraay: time periods.
+  if (v$type %in% c("cluster", "crv3")) attr(V, "G") <- vinfo$n_clusters
+  if (v$type %in% c("nw", "dk")) attr(V, "G") <- vinfo$n_periods
+  apply_vcov(res, V, vinfo)
+}
+
+apply_vcov <- function(res, V, vinfo) {
   res$cov.scaled <- V
   res$vcov_info <- vinfo
   res$coeftable <- make_coeftable(res$coefficients, V, vinfo)
@@ -429,6 +457,10 @@ build_result <- function(out, info) {
       offset = args$offset, has_offset = !is.null(info$offset)
     ),
     model_info = list(),
+    panel.id = args$panel_id,
+    # What a re-estimation needs (CRV3 after estimation): the model, the arguments without the
+    # data (found again from the call), the formula environment and the dropped rows.
+    refit = list(m = info$m, args = args[setdiff(names(args), "data")], env = info$env, drop = info$drop),
     state = out$state,
     lean = args$lean
   )

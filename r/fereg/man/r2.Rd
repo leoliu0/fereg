@@ -18,3 +18,8 @@ A named numeric vector (\code{NA} where a type does not apply).
 \description{
 R-squared variants
 }
+\examples{
+data(trade_toy, package = "fereg")
+m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+r2(m)
+}

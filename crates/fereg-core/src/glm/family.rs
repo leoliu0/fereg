@@ -6,8 +6,8 @@ use crate::api::Family;
 /// Mata `epsilon(1)`.
 pub(crate) const EPS1: f64 = f64::EPSILON;
 
-/// Lower bound of μ (Mata `epsilon(100)`, ppmlhdfe `_vector_scalar_max(mu, epsilon(100))`);
-/// logit also caps μ at 1 − `MU_MIN`.
+/// Lower bound of mu (Mata `epsilon(100)`, ppmlhdfe `_vector_scalar_max(mu, epsilon(100))`);
+/// logit also caps mu at 1 - `MU_MIN`.
 pub(crate) const MU_MIN: f64 = 100.0 * f64::EPSILON;
 
 /// Numerically stable inverse logit.
@@ -21,13 +21,13 @@ pub(crate) fn invlogit(x: f64) -> f64 {
     }
 }
 
-/// ln(1 + eˣ) without overflow.
+/// ln(1 + e^x) without overflow.
 #[inline]
 pub(crate) fn softplus(x: f64) -> f64 {
     if x > 0.0 { x + (-x).exp().ln_1p() } else { x.exp().ln_1p() }
 }
 
-/// μ from the linear predictor η (offset included), clamped as ppmlhdfe does.
+/// mu from the linear predictor eta (offset included), clamped as ppmlhdfe does.
 #[inline]
 pub(crate) fn mean(f: Family, eta: f64) -> f64 {
     match f {
@@ -36,7 +36,7 @@ pub(crate) fn mean(f: Family, eta: f64) -> f64 {
     }
 }
 
-/// Link function η = g(μ).
+/// Link function eta = g(mu).
 #[inline]
 pub(crate) fn link(f: Family, mu: f64) -> f64 {
     match f {
@@ -45,7 +45,7 @@ pub(crate) fn link(f: Family, mu: f64) -> f64 {
     }
 }
 
-/// IRLS weight per unit of true weight: μ (Poisson) or μ(1 − μ) (logit).
+/// IRLS weight per unit of true weight: mu (Poisson) or mu(1 - mu) (logit).
 #[inline]
 pub(crate) fn irls_weight(f: Family, mu: f64) -> f64 {
     match f {
@@ -54,8 +54,8 @@ pub(crate) fn irls_weight(f: Family, mu: f64) -> f64 {
     }
 }
 
-/// Working response without the offset: η − 1 + y/μ (Poisson, ppmlhdfe) or
-/// η + (y − μ)/(μ(1 − μ)) (logit, written as η + 1/μ for y = 1 and η − 1/(1 − μ) for y = 0).
+/// Working response without the offset: eta - 1 + y/mu (Poisson, ppmlhdfe) or
+/// eta + (y - mu)/(mu(1 - mu)) (logit, written as eta + 1/mu for y = 1 and eta - 1/(1 - mu) for y = 0).
 #[inline]
 pub(crate) fn working(f: Family, eta: f64, y: f64, mu: f64) -> f64 {
     match f {
@@ -70,13 +70,13 @@ pub(crate) fn working(f: Family, eta: f64, y: f64, mu: f64) -> f64 {
     }
 }
 
-/// Logit log-likelihood contribution y·η − ln(1 + e^η) (η without clamping).
+/// Logit log-likelihood contribution y*eta - ln(1 + e^eta) (eta without clamping).
 #[inline]
 pub(crate) fn logit_ll(y: f64, eta: f64) -> f64 {
     y * eta - softplus(eta)
 }
 
-/// ln Γ(x) for x > 0 (Lanczos, g = 7, n = 9; relative error ≈ 1e-15).
+/// ln Gamma(x) for x > 0 (Lanczos, g = 7, n = 9; relative error ~= 1e-15).
 pub(crate) fn ln_gamma(x: f64) -> f64 {
     const G: f64 = 7.0;
     const C: [f64; 9] = [
@@ -91,7 +91,7 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
         1.505_632_735_149_311_6e-7,
     ];
     if x < 0.5 {
-        // Reflection: Γ(x)Γ(1 − x) = π / sin(πx).
+        // Reflection: Gamma(x)Gamma(1 - x) = pi / sin(pi x).
         let pi = std::f64::consts::PI;
         return (pi / (pi * x).sin()).abs().ln() - ln_gamma(1.0 - x);
     }
@@ -119,7 +119,7 @@ mod tests {
             let got = ln_gamma(f64::from(k) + 1.0);
             assert!((got - lf).abs() <= 1e-13 * lf.max(1.0), "k={k}: {got} vs {lf}");
         }
-        // Γ(1/2) = √π
+        // Gamma(1/2) = sqrt pi
         assert!((ln_gamma(0.5) - 0.5 * std::f64::consts::PI.ln()).abs() < 1e-14);
     }
 

@@ -27,6 +27,10 @@ is_glm <- function(x) identical(x$method_type, "feglm")
 #' @param simplify Return a plain vector when every statistic is a single number.
 #' @param ... Not used.
 #' @return An object of class `fereg_fitstat` (a named list), or a vector if `simplify`.
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+#' fitstat(m, ~ n + r2 + wr2)
 #' @export
 fitstat <- function(x, type, simplify = FALSE, ...) {
   if (inherits(x, "fereg_multi")) return(lapply(x, fitstat, type = type, simplify = simplify))
@@ -60,7 +64,7 @@ fitstat <- function(x, type, simplify = FALSE, ...) {
       wh = test_list(x$iv_wh),
       sargan = test_list(x$iv_sargan),
       my = dep_var_mean(x),
-      g = if (x$vcov_info$type == "cluster") x$vcov_info$n_clusters else NA
+      g = attr(x$cov.scaled, "G") %||% NA
     )
   }
   if (simplify && all(lengths(out) == 1)) return(unlist(out))
@@ -81,10 +85,18 @@ r2_value <- function(x, type) {
     ar2 = if (glm) NA else x$r2_all[["ar2"]],
     wr2 = if (glm || length(x$fixef_terms) == 0) NA else x$r2_all[["wr2"]],
     war2 = if (glm || length(x$fixef_terms) == 0) NA else x$r2_all[["war2"]],
-    pr2 = if (glm) x$pseudo_r2 else NA,
-    apr2 = if (glm) x$apr2 else NA,
+    pr2 = if (glm) x$pseudo_r2 else ols_pseudo_r2(x, adj = FALSE),
+    apr2 = if (glm) x$apr2 else ols_pseudo_r2(x, adj = TRUE),
     cor2 = x$sq.cor %||% NA
   )
+}
+
+# fixest's pseudo R2 of an OLS model from the Gaussian log-likelihoods (NA for a constant-only
+# model): 1 - ll/ll_null, adjusted 1 - (ll - nparams + 1)/ll_null.
+ols_pseudo_r2 <- function(x, adj) {
+  if (is.null(x$loglik) || is.null(x$ll_null)) return(NA)
+  if (x$nparams == 1 && identical(names(x$coefficients), "(Intercept)")) return(NA)
+  if (adj) 1 - (x$loglik - x$nparams + 1) / x$ll_null else 1 - x$loglik / x$ll_null
 }
 
 #' R-squared variants
@@ -93,6 +105,10 @@ r2_value <- function(x, type) {
 #' @param type Types among `"r2"`, `"ar2"`, `"wr2"`, `"war2"`, `"pr2"`, `"apr2"`, `"cor2"`, or
 #'   `"all"`.
 #' @return A named numeric vector (`NA` where a type does not apply).
+#' @examples
+#' data(trade_toy, package = "fereg")
+#' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+#' r2(m)
 #' @export
 r2 <- function(x, type = "all") {
   if (inherits(x, "fereg_multi")) return(do.call(rbind, lapply(x, r2, type = type)))
@@ -127,13 +143,16 @@ print.fereg_fitstat <- function(x, na.rm = FALSE, group.solo = FALSE, ...) {
     cols <- lapply(1:2, function(i) {
       col <- m[, i]
       txt <- number_format(col)
-      txt <- str_fill(txt, anchor = ".")
+      # fixest aligns the decimal points of |x| > 1 and of the other values separately.
+      gt1 <- abs(col) > 1 & !is.na(col)
+      if (any(gt1)) txt[gt1] <- str_fill(txt[gt1], anchor = ".")
+      if (any(!gt1)) txt[!gt1] <- str_fill(txt[!gt1], anchor = ".")
       txt <- str_fill(txt, right = TRUE)
       txt <- paste0(str_fill(ml[, i]), ": ", txt)
       txt[is.na(col)] <- strrep(" ", nchar(txt[1]))
       txt
     })
-    cat(sub("\\s+$", "", paste(cols[[1]], cols[[2]], sep = "   ")), sep = "\n")
+    cat(paste(cols[[1]], cols[[2]], sep = "   "), sep = "\n")
   }
   if (length(x) == 0) return(invisible(NULL))
   # Test statistics share one number of decimals and are right-aligned; p-values are padded

@@ -6,7 +6,8 @@
 #' [etable()], [fixef()], ...); estimation runs in a parallel Rust core that eliminates the
 #' largest fixed effect exactly and solves the rest by preconditioned conjugate gradient.
 #'
-#' Options: `fereg.nthreads` (threads, `0` = all cores) and `fereg.notes` (print notes on removed
+#' Options: `fereg.nthreads` (threads, `0` = all cores; default all cores, capped at
+#' `OMP_THREAD_LIMIT`, and 2 under R CMD check) and `fereg.notes` (print notes on removed
 #' observations).
 #'
 #' @keywords internal

@@ -3,7 +3,7 @@
 # Builds the Rust static library (src/rust) with cargo and links it into fereg.so.
 # - CARGO_HOME lives inside the build directory (CRAN forbids writing to $HOME) and is removed
 #   afterwards together with the cargo target directory.
-# - Release tarballs carry the vendored crates (rust/vendor.tar.xz, see tools/vendor-crates.sh):
+# - Release tarballs carry the vendored crates (rust/vendor.tar.xz, see tools/vendor-crates.py):
 #   cargo then builds offline from them. Without the tarball cargo downloads the crates.
 # - FEREG_CARGO_TARGET_DIR (development only) keeps the cargo target directory between installs.
 

@@ -4,7 +4,7 @@
 //!
 //! Deviations from the source, all confined to solver bookkeeping:
 //! - ppmlhdfe accumulates the partialled-out working variable across iterations
-//!   (`data[.,1] + z − z_last`); here a fresh copy of [z, X] is residualized every iteration with
+//!   (`data[.,1] + z - z_last`); here a fresh copy of [z, X] is residualized every iteration with
 //!   the previous FE coefficients as warm start. Both are the same projection.
 //! - ppmlhdfe compares the realized accuracy of its MAP solver (`HDFE.accuracy`) with the target
 //!   inner tolerance; the absorber does not report one, so the requested inner tolerance (an upper
@@ -16,10 +16,11 @@ use super::GlmData;
 use super::family::{self, EPS1, MU_MIN};
 use super::wls;
 use crate::absorber::{Absorber, FeCoefs, SolveOpts};
-use crate::api::{Ctx, Family};
+use crate::api::{Ctx, Family, GlmCollinear};
 use crate::error::RfError;
 use crate::par::{self, CHUNK, Pool};
 use crate::stats;
+use crate::vcov::{chol_collin, chol_collin_certain};
 
 /// ppmlhdfe `start_inner_tol`.
 pub(crate) const START_INNER_TOL: f64 = 1e-4;
@@ -27,12 +28,17 @@ pub(crate) const START_INNER_TOL: f64 = 1e-4;
 const MU_TOL: f64 = 1e-6;
 /// Logit step halving: at most this many halvings per iteration.
 const MAX_HALVINGS: usize = 25;
+/// Safety factor on the error of a residualized column, tol_in * its W-norm (see `cg`), when
+/// the first iteration certifies the fixest / pyfixest collinearity outcome: the CG stopping
+/// estimate is a lower bound (the error drop over its window; within 10x for a contraction of
+/// up to 0.99 over the window), and the certificate uses the coefficients of the loose columns.
+const COLLIN_MARGIN: f64 = 100.0;
 
 pub(crate) struct IrlsCfg {
     /// IRLS deviance tolerance.
     pub tol: f64,
     pub maxiter: usize,
-    /// ppmlhdfe `highest_inner_tol` = max(1e-12, min(target_inner_tol, 0.1·tol)).
+    /// ppmlhdfe `highest_inner_tol` = max(1e-12, min(target_inner_tol, 0.1*tol)).
     pub highest: f64,
     /// Inner tolerance of the first iteration (ppmlhdfe `HDFE.tolerance` persists across the
     /// re-run of IRLS after `mu` separation: max(start_inner_tol, tol) first, then the last value).
@@ -44,12 +50,15 @@ pub(crate) struct IrlsCfg {
     /// precision; see `glm::map_exact`).
     pub exact: bool,
     pub log: bool,
-    /// Scale of y (deviance is reported as deviance·sd_y).
+    /// Scale of y (deviance is reported as deviance*sd_y).
     pub sd_y: f64,
     /// Run the `mu` separation rule.
     pub check_sep: bool,
     /// fixest stopping rule and cap ([`crate::api::GlmConvention::Fixest`]).
     pub fixest: bool,
+    /// fixest / pyfixest collinearity rule, applied in the first iteration (`Ppmlhdfe`: the
+    /// columns were checked before IRLS).
+    pub collinear: GlmCollinear,
 }
 
 pub(crate) struct IrlsOut {
@@ -59,10 +68,10 @@ pub(crate) struct IrlsOut {
     pub deviance: f64,
     /// Residualized [z, X] block of the final iteration (row-major, R = 1 + k).
     pub block: Vec<f64>,
-    /// IRLS weights of the final iteration (true weight × μ or μ(1 − μ)).
+    /// IRLS weights of the final iteration (true weight * mu or true weight * mu(1 - mu)).
     pub w: Vec<f64>,
     pub beta: Vec<f64>,
-    /// Working residuals z̃ − X̃β of the final iteration.
+    /// Working residuals z~ - X~beta of the final iteration.
     pub resid: Vec<f64>,
     /// FE coefficients of the final residualization (columns [z, X]).
     pub coefs: Option<FeCoefs>,
@@ -73,9 +82,11 @@ pub(crate) struct IrlsOut {
     pub tol_in: f64,
     /// False only in fixest mode when `maxiter` was reached first.
     pub converged: bool,
+    /// Columns of X excluded by the fixest / pyfixest collinearity rule (coefficient 0).
+    pub excluded: Vec<bool>,
 }
 
-/// Mata `x :<= lb ... ub` with missing (NaN) bounds treated as +∞ (ftools `inrange`).
+/// Mata `x :<= lb ... ub` with missing (NaN) bounds treated as +inf (ftools `inrange`).
 fn inrange(x: f64, lb: f64, ub: f64) -> bool {
     !lb.is_nan() && lb <= x && (ub.is_nan() || x <= ub)
 }
@@ -96,7 +107,7 @@ fn predict_eps(hist: &mut [f64; 3], eps: f64) -> f64 {
     if abort || hist.iter().any(|v| v.is_nan()) {
         return f64::NAN;
     }
-    // Solve [i, i², i³]·c = h for i = 1..3, then forecast at i = 4.
+    // Solve [i, i^2, i^3]*c = h for i = 1..3, then forecast at i = 4.
     let mut a = [[1.0, 1.0, 1.0, hist[0]], [2.0, 4.0, 8.0, hist[1]], [3.0, 9.0, 27.0, hist[2]]];
     for p in 0..3 {
         let pivot = a[p];
@@ -118,7 +129,7 @@ fn predict_eps(hist: &mut [f64; 3], eps: f64) -> f64 {
     (4.0 * c[0] + 16.0 * c[1] + 64.0 * c[2]).exp()
 }
 
-/// Mata `_edittozerotol(A, tol)`: |a| ≤ tol → 0.
+/// Mata `_edittozerotol(A, tol)`: |a| <= tol -> 0.
 pub(crate) fn edit_to_zero(v: &mut [f64], tol: f64, pool: &Pool) {
     pool.install(|| {
         v.par_chunks_mut(CHUNK).for_each(|c| {
@@ -129,6 +140,22 @@ pub(crate) fn edit_to_zero(v: &mut [f64], tol: f64, pool: &Pool) {
             }
         })
     });
+}
+
+/// fixest `cpp_cholesky` input: the cross-product of the residualized X (columns 1.. of the
+/// [z, X] block) on its original scale (x*sd_x; the Poisson IRLS weights scale by sd_y),
+/// weighted by `w` (fixest) or not (pyfixest).
+fn collin_gram(block: &[f64], r: usize, w: Option<&[f64]>, sd_x: &[f64], sd_y: f64, pool: &Pool) -> Vec<f64> {
+    let k = r - 1;
+    let g = stats::gram(block, r, w, pool).0;
+    let wscale = if w.is_some() { sd_y } else { 1.0 };
+    (0..k * k).map(|ab| g[(1 + ab / k) * r + 1 + ab % k] * sd_x[ab / k] * sd_x[ab % k] * wscale).collect()
+}
+
+/// sqrt(max w / min w) over the rows (+inf when some weight is 0).
+fn weight_spread(w: &[f64], pool: &Pool) -> f64 {
+    let (lo, hi) = pool.install(|| w.par_iter().fold(|| (f64::INFINITY, 0.0f64), |(lo, hi), &v| (lo.min(v), hi.max(v))).reduce(|| (f64::INFINITY, 0.0), |a, b| (a.0.min(b.0), a.1.max(b.1))));
+    (hi / lo).sqrt()
 }
 
 /// Stata-like `%.{prec}e` (two-digit exponent); missing prints as `.`.
@@ -142,7 +169,7 @@ pub(crate) fn fmt_e(x: f64, prec: usize) -> String {
     format!("{m}e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs())
 }
 
-/// ppmlhdfe `censor_mu`: μ ← max(μ, 0.05·y, 1e-3).
+/// ppmlhdfe `censor_mu`: mu <- max(mu, 0.05*y, 1e-3).
 fn censor_mu(mu: &mut [f64], y: &[f64]) {
     for (m, &yi) in mu.iter_mut().zip(y) {
         let c = (0.05 * yi).max(1e-3);
@@ -172,11 +199,25 @@ fn ln_y(fam: Family, y: &[f64], pool: &Pool) -> Result<Vec<f64>, RfError> {
     Ok(out)
 }
 
-/// μ from η with the separated observations pinned to the boundary, and the deviance of the new
-/// μ (standardized scale) in the same pass. Each fixed chunk sums its rows in order and the chunk
+/// mu of row `i` from its eta (separated rows pinned to the boundary) and the row's deviance term
+/// (standardized scale). Shared by [`update_mu_deviance`] and the fused pass of [`irls`], so both
+/// compute identical values.
+#[inline(always)]
+fn mu_dev_row(fam: Family, d: &GlmData, i: usize, eta: f64, sep: bool, lny: &[f64]) -> (f64, f64) {
+    let yi = d.y[i];
+    let m = if sep { if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN } } else { family::mean(fam, eta) };
+    let w = d.tw.as_deref().map_or(1.0, |t| t[i]);
+    let dev = match fam {
+        Family::Logit => -w * family::logit_ll(yi, eta),
+        _ => w * (m - yi) + if yi > 0.0 { w * yi * (lny[i] - eta) } else { 0.0 },
+    };
+    (m, dev)
+}
+
+/// mu from eta with the separated observations pinned to the boundary, and the deviance of the new
+/// mu (standardized scale) in the same pass. Each fixed chunk sums its rows in order and the chunk
 /// sums are added in chunk order, so the result does not depend on the thread count.
 fn update_mu_deviance(fam: Family, d: &GlmData, eta: &[f64], sep: &[bool], lny: &[f64], mu: &mut [f64], pool: &Pool) -> f64 {
-    let (y, tw) = (&d.y, d.tw.as_deref());
     let parts: Vec<f64> = pool.install(|| {
         mu.par_chunks_mut(CHUNK)
             .enumerate()
@@ -185,13 +226,9 @@ fn update_mu_deviance(fam: Family, d: &GlmData, eta: &[f64], sep: &[bool], lny: 
                 let mut acc = 0.0;
                 for (k, m) in mc.iter_mut().enumerate() {
                     let i = base + k;
-                    let yi = y[i];
-                    *m = if sep[i] { if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN } } else { family::mean(fam, eta[i]) };
-                    let w = tw.map_or(1.0, |t| t[i]);
-                    acc += match fam {
-                        Family::Logit => -w * family::logit_ll(yi, eta[i]),
-                        _ => w * (*m - yi) + if yi > 0.0 { w * yi * (lny[i] - eta[i]) } else { 0.0 },
-                    };
+                    let (mi, dev) = mu_dev_row(fam, d, i, eta[i], sep[i], lny);
+                    *m = mi;
+                    acc += dev;
                 }
                 acc
             })
@@ -221,7 +258,13 @@ pub(crate) fn irls(
         *e = family::link(fam, m);
     }
     let log_septol = MU_TOL.ln();
-    let xcols: Vec<usize> = (1..r).collect();
+    let mut xcols: Vec<usize> = (1..r).collect();
+    let mut excluded = vec![false; k];
+    let rule = match c.collinear {
+        GlmCollinear::Ppmlhdfe => None,
+        GlmCollinear::Fixest { tol } => Some((tol, true)),
+        GlmCollinear::Pyfixest { tol } => Some((tol, false)),
+    };
     let mut tol_in = c.start_tol;
     let mut alt_tol = f64::NAN;
     let mut hist = [f64::NAN; 3];
@@ -239,9 +282,9 @@ pub(crate) fn irls(
     let mut resid = par::alloc_vec(n, 0.0)?;
     let lny = ln_y(fam, &d.y, pool)?;
     let ztol = c.tol.min(1e-12);
-    // fixest: the deviance before the first iteration is that of η = 1e-5 without the offset,
+    // fixest: the deviance before the first iteration is that of eta = 1e-5 without the offset,
     // and the first step halves toward fitted values 1e-5 (plus the offset); on the
-    // standardized scale η shifts by −ln sd_y.
+    // standardized scale eta shifts by -ln sd_y.
     let (dev0, anchor) = if c.fixest {
         let shift = 1e-5 - c.sd_y.ln();
         let mut scratch = vec![0.0; n];
@@ -261,7 +304,7 @@ pub(crate) fn irls(
         ctx.check()?;
         let predicted = predict_eps(&mut hist, eps);
         // ppmlhdfe `iter_fast_solver` (normal equations while far from convergence).
-        // (Mata: a missing prediction compares as +∞, so it allows the fast solver.)
+        // (Mata: a missing prediction compares as +inf, so it allows the fast solver.)
         let fast = k > 0 && tol_in > c.tol * 11.0 && (predicted.is_nan() || predicted > c.tol);
 
         // (a) weights, (b) working variable, written with X into the [z, X] block (values within
@@ -286,7 +329,7 @@ pub(crate) fn irls(
                 }
             })
         });
-        abs.set_weights(Some(w.clone()), pool, ctx)?;
+        abs.set_weights(Some(&w), pool, ctx)?;
 
         // (c)-(d) residualize [z, X].
         let opts = SolveOpts { tol: tol_in, maxiter: c.inner_maxiter, want_coefs: true };
@@ -294,35 +337,94 @@ pub(crate) fn irls(
         edit_to_zero(&mut block, ztol, pool);
         subiter += info.iterations;
         warm = info.coefs;
+        // The first iteration decides the fixest / pyfixest collinearity. The outcome on the
+        // residualized X stands unless the solve error could change it; then the block is
+        // residualized again at the final tolerance (its error lies in the FE space, so this
+        // yields the exactly residualized block to that tolerance).
+        if let Some((ctol, weighted)) = rule.filter(|_| iter == 1 && k > 0) {
+            let wr = weighted.then_some(w.as_slice());
+            let raw = collin_gram(&block, r, wr, &d.sd_x, c.sd_y, pool);
+            let certain = if info.exact {
+                Some(chol_collin(&raw, k, ctol).0)
+            } else {
+                // Errors in the metric of `raw`; the unweighted norm of a W-norm error is at most
+                // sqrt(max w / min w) times larger relative to the column.
+                let spread = if weighted { 1.0 } else { weight_spread(&w, pool) };
+                let err: Vec<f64> = (0..k).map(|j| COLLIN_MARGIN * tol_in * spread * raw[j * k + j].sqrt()).collect();
+                chol_collin_certain(&raw, k, ctol, &err)
+            };
+            excluded = match certain {
+                Some(e) => e,
+                None => {
+                    let opts = SolveOpts { tol: tol_in.min(c.highest), maxiter: c.inner_maxiter, want_coefs: false };
+                    subiter += abs.residualize(&mut block, r, &opts, None, pool, ctx)?.iterations;
+                    edit_to_zero(&mut block, ztol, pool);
+                    chol_collin(&collin_gram(&block, r, wr, &d.sd_x, c.sd_y, pool), k, ctol).0
+                }
+            };
+            xcols = (1..r).filter(|&j| !excluded[j - 1]).collect();
+        }
 
         let beta = if k == 0 {
             Vec::new()
+        } else if xcols.len() < k {
+            // Excluded columns: coefficient 0, the kept ones as below.
+            let kept = if fast {
+                let g = stats::gram(&block, r, Some(&w), pool).0;
+                let cols: Vec<usize> = std::iter::once(0).chain(xcols.iter().copied()).collect();
+                let sub: Vec<f64> = cols.iter().flat_map(|&a| cols.iter().map(|&b| g[a * r + b]).collect::<Vec<_>>()).collect();
+                wls::normal_coefs(&sub, cols.len())
+            } else {
+                wls::qr_coefs(&block, r, 0, &xcols, Some(&w), pool)
+            };
+            let mut b = vec![0.0; k];
+            for (&j, v) in xcols.iter().zip(kept) {
+                b[j - 1] = v;
+            }
+            b
         } else if fast {
             wls::normal_coefs(&stats::gram(&block, r, Some(&w), pool).0, r)
         } else {
             wls::qr_coefs(&block, r, 0, &xcols, Some(&w), pool)
         };
 
-        // (e) working residuals and η = z − resid (+ offset).
-        old_eta.copy_from_slice(eta);
-        pool.install(|| {
-            resid.par_chunks_mut(CHUNK).zip(eta.par_chunks_mut(CHUNK)).enumerate().for_each(|(c, (rc, ec))| {
-                let base = c * CHUNK;
-                for (j, (e, et)) in rc.iter_mut().zip(ec.iter_mut()).enumerate() {
-                    let i = base + j;
-                    let row = &block[i * r..(i + 1) * r];
-                    *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
-                    *et = z[i] - *e + off.map_or(0.0, |o| o[i]);
-                }
-            })
+        // (e) working residuals and eta = z - resid (+ offset), keeping the previous eta; without
+        // the mu separation check (which needs the new eta first), (f) mu and the deviance terms
+        // in the same pass (same per-row arithmetic and chunk sums as update_mu_deviance).
+        let fused = !c.check_sep;
+        let parts: Vec<f64> = pool.install(|| {
+            resid
+                .par_chunks_mut(CHUNK)
+                .zip(eta.par_chunks_mut(CHUNK))
+                .zip(old_eta.par_chunks_mut(CHUNK))
+                .zip(mu.par_chunks_mut(CHUNK))
+                .enumerate()
+                .map(|(c, (((rc, ec), oc), mc))| {
+                    let base = c * CHUNK;
+                    let mut acc = 0.0;
+                    for (j, (((e, et), o), m)) in rc.iter_mut().zip(ec.iter_mut()).zip(oc.iter_mut()).zip(mc.iter_mut()).enumerate() {
+                        let i = base + j;
+                        let row = &block[i * r..(i + 1) * r];
+                        *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
+                        *o = *et;
+                        *et = z[i] - *e + off.map_or(0.0, |o| o[i]);
+                        if fused {
+                            let (mi, dev) = mu_dev_row(fam, d, i, *et, sep[i], &lny);
+                            *m = mi;
+                            acc += dev;
+                        }
+                    }
+                    acc
+                })
+                .collect()
         });
         if c.check_sep {
-            // ppmlhdfe: tolerance in terms of μ, made more conservative when η is low for y > 0.
+            // ppmlhdfe: tolerance in terms of mu, made more conservative when eta is low for y > 0.
             let y = &d.y;
             let min_pos = (0..n).filter(|&i| y[i] > 0.0).map(|i| eta[i]).fold(f64::INFINITY, f64::min);
             let adj0 = log_septol + (min_pos + 5.0).min(0.0);
             let max_zero = (0..n).filter(|&i| y[i] == 0.0).map(|i| eta[i]).fold(f64::NEG_INFINITY, f64::max);
-            // Logit: the mirror rule for y = 1 (μ within mu_tol of 1).
+            // Logit: the mirror rule for y = 1 (mu within mu_tol of 1).
             let adj1 = log_septol + (-max_zero + 5.0).min(0.0);
             for i in 0..n {
                 let at_zero = y[i] == 0.0 && eta[i] <= adj0;
@@ -333,16 +435,16 @@ pub(crate) fn irls(
             }
             n_sep = sep.iter().filter(|s| **s).count();
         }
-        // (f) μ, deviance.
+        // (f) mu, deviance.
         let old_dev = if c.fixest && iter == 1 { dev0 } else { dev };
         if c.fixest && iter == 1 {
             old_eta.copy_from_slice(&anchor);
         }
-        dev = update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool);
+        dev = if fused { finish_deviance(parts.iter().fold(0.0, |a, p| a + p), d.n) } else { update_mu_deviance(fam, d, eta, &sep, &lny, mu, pool) };
         let mut halved = false;
         if c.fixest {
             // fixest step halving (both families): unless the deviance change is already below
-            // glm.tol, a non-finite or higher deviance halves the step toward the previous η
+            // glm.tol, a non-finite or higher deviance halves the step toward the previous eta
             // until it is finite and not higher; in the first iteration at most twice when finite,
             // otherwise at most glm.iter times.
             let evol = |dev: f64| (dev - old_dev) * c.sd_y;
@@ -376,16 +478,16 @@ pub(crate) fn irls(
                 eps = delta.abs() / denom;
             }
             let converged = if c.fixest {
-                // fixest: |dev − dev_old| / (0.1 + |dev|) on the original deviance scale; an
+                // fixest: |dev - dev_old| / (0.1 + |dev|) on the original deviance scale; an
                 // iteration with step halving never converges (fixest sets dev_evol = Inf). The
                 // iteration's FE solve must have been exact or at the final inner tolerance, so
-                // the reported β is as accurate as a fixest fit at fixef.tol = itol.
+                // the reported beta is as accurate as a fixest fit at fixef.tol = itol.
                 let crit = if halved { f64::INFINITY } else { ((old_dev - dev) * c.sd_y).abs() / (0.1 + (dev * c.sd_y).abs()) };
                 crit < c.tol && (info.exact || c.exact || tol_in <= 1.1 * c.highest)
             } else {
                 // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations
-                // ppmlhdfe spends tightening tol_in to `highest` also refine β beyond eps < tol
-                // (stopping at eps < tol moves β by ~2e-6 relative on fixture p_problem1).
+                // ppmlhdfe spends tightening tol_in to `highest` also refine beta beyond eps < tol
+                // (stopping at eps < tol moves beta by ~2e-6 relative on fixture p_problem1).
                 eps < c.tol && !fast && (tol_in <= 1.1 * c.highest || c.exact)
             };
             if converged {
@@ -430,14 +532,15 @@ pub(crate) fn irls(
                 n_sep,
                 tol_in,
                 converged: ok >= 1,
+                excluded,
             });
         }
 
         if c.fixest {
-            // Inexact Newton: Δdev ∝ ‖Δβ‖², so eps^{1/2} measures the relative step and the next
+            // Inexact Newton: Delta dev proportional to ||Delta beta||^2, so eps^{1/2} measures the relative step and the next
             // FE solve is asked for eps^{3/2}, a cube of the step. Measured on the bench DGPs
             // (fx_simple/fx_difficult, n = 1e5 and 1e6, 2-3 FEs, glm.tol = 1e-8): 6-8 IRLS
-            // iterations, as many as fixest; ppmlhdfe's schedule needs 1-2 more for the same β.
+            // iterations, as many as fixest; ppmlhdfe's schedule needs 1-2 more for the same beta.
             if iter > 1 {
                 tol_in = (eps * eps.sqrt()).min(tol_in).max(c.highest);
             }

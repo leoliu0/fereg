@@ -3,6 +3,7 @@ name = "fereg-core"
 description = "High-dimensional fixed-effects OLS, IV, Poisson and logit estimation (exact FE elimination + preconditioned CG)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

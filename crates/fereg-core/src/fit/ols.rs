@@ -7,21 +7,23 @@
 use rayon::prelude::*;
 
 use super::design::{self, Reg, regress, residual_pass, unit};
+use super::extra::{self, JkData, VcovInputs, fe_leverage, jk_model};
 use super::input::Sample;
 use super::fixef::{self, FeLevels};
 use super::state::{State, state_terms, term_refs};
-use super::vcov::{self, ClusterInfo, FeInfo, Model};
-use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, IvFirstStage, IvStats, TestStat, WeightsType, dist};
+use super::vcov::{self, ClusterInfo, FeInfo, Jackknife, Model};
+use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, IvFirstStage, IvStats, TestStat, VcovData, VcovKind, WeightsType, dist};
 use crate::absorber::SolveOpts;
 use crate::api::Ctx;
 use crate::error::RfError;
 use crate::gather::Col;
 use crate::par::{self, CHUNK, Pool};
+use crate::leverage::FeCols;
 use crate::session::Session;
 use crate::stats;
 
 /// fixest `nparams`: kept coefficients plus FE parameters (fixest_env.R): every intercept term
-/// counts G·(1 + #slopes), a slope-only term G·#slopes, minus one per intercept term beyond the first.
+/// counts G*(1 + #slopes), a slope-only term G*#slopes, minus one per intercept term beyond the first.
 pub(crate) fn nparams(k: usize, session: &Session) -> usize {
     let sizes: Vec<usize> = session.terms().iter().map(|t| t.g).collect();
     nparams_with(k, session.terms(), &sizes)
@@ -34,8 +36,8 @@ pub(crate) fn nparams_with(k: usize, terms: &[crate::session::Term], sizes: &[us
     k + fe - n_icpt.saturating_sub(1)
 }
 
-/// Weighted mean and Σw(y − ȳ_w)² of the input y over the kept rows (kept order weights),
-/// chunked with Chan's merge in chunk order. Returns (Σw, ȳ_w, ssr_null).
+/// Weighted mean and sum w(y - ybar_w)^2 of the input y over the kept rows (kept order weights),
+/// chunked with Chan's merge in chunk order. Returns (sum w, ybar_w, ssr_null).
 pub(crate) fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -> (f64, f64, f64) {
     let parts = par::map_chunks(pool, kept.len(), CHUNK, |_, range| {
         let wi = |i: usize| w.map_or(1.0, |w| w[i]);
@@ -54,7 +56,7 @@ pub(crate) fn y_stats(y: &[f64], kept: &[u32], w: Option<&[f64]>, pool: &Pool) -
     (sw, mean, m2)
 }
 
-/// Partial sums of one chunk for [`sq_cor`]: count, means of y and f, centered Σy², Σf², Σyf.
+/// Partial sums of one chunk for [`sq_cor`]: count, means of y and f, centered sum y^2, sum f^2, sum yf.
 pub(crate) fn cor_part(pairs: impl Iterator<Item = (f64, f64)> + Clone) -> [f64; 6] {
     let (mut c, mut sy, mut sf) = (0.0, 0.0, 0.0);
     for (y, f) in pairs.clone() {
@@ -87,7 +89,7 @@ pub(crate) fn sq_cor(parts: Vec<[f64; 6]>) -> f64 {
     if a[4] == 0.0 { f64::NAN } else { a[5] * a[5] / (a[3] * a[4]) }
 }
 
-/// Fitted values y − e (kept order) and their squared correlation with y, in one chunked pass.
+/// Fitted values y - e (kept order) and their squared correlation with y, in one chunked pass.
 fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec<f64>, f64), RfError> {
     let mut fitted = par::alloc_vec(kept.len(), 0.0)?;
     let parts: Vec<[f64; 6]> = pool.install(|| {
@@ -105,7 +107,7 @@ fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec
     Ok((fitted, sq_cor(parts)))
 }
 
-/// Columns of the row block: [y, endog…, (1), inst…, x…].
+/// Columns of the row block: [y, endog..., (1), inst..., x...].
 struct Layout {
     r: usize,
     m: usize,
@@ -128,15 +130,15 @@ impl Layout {
     }
 }
 
-/// `a·b` for a k-vector and a k×k row-major inverse: c'·A·c.
+/// `a*b` for a k-vector and a k x k row-major inverse: c'*A*c.
 fn quad_form(c: &[f64], a: &[f64]) -> f64 {
     let k = c.len();
     (0..k).map(|i| c[i] * (0..k).map(|j| a[i * k + j] * c[j]).sum::<f64>()).sum()
 }
 
-/// fixest `.wald` on the coefficients `idx` of a model with variance `v` (k×k): stat = c'V⁻¹c / q
-/// with V⁻¹ by `cpp_cholesky` (tolerance 1e-10; dropped coefficients are left out), p from
-/// F(df1, df2). Pyfixest: c'·pinv(V)·c / q with p from χ²(q) on c'·pinv(V)·c.
+/// fixest `.wald` on the coefficients `idx` of a model with variance `v` (k x k): stat = c'V^-1 c / q
+/// with V^-1 by `cpp_cholesky` (tolerance 1e-10; dropped coefficients are left out), p from
+/// F(df1, df2). Pyfixest: c'*pinv(V)*c / q with p from chi^2 (q) on c'*pinv(V)*c.
 fn first_stage_wald(flavor: Flavor, coef: &[f64], v: &[f64], idx: &[usize], df1: f64, df2: f64) -> TestStat {
     let k = coef.len();
     if idx.is_empty() {
@@ -146,7 +148,7 @@ fn first_stage_wald(flavor: Flavor, coef: &[f64], v: &[f64], idx: &[usize], df1:
     let q = idx.len();
     match flavor {
         Flavor::Fixest => {
-            let (excl, inv) = design::chol_collin(&sub, q, 1e-10);
+            let (excl, inv) = crate::vcov::chol_collin(&sub, q, 1e-10);
             let c: Vec<f64> = idx.iter().zip(&excl).filter(|(_, e)| !**e).map(|(&a, _)| coef[a]).collect();
             if c.is_empty() {
                 return TestStat { stat: 1e6, p: dist::pf_upper(1e6, df1, df2), df1, df2 };
@@ -160,6 +162,23 @@ fn first_stage_wald(flavor: Flavor, coef: &[f64], v: &[f64], idx: &[usize], df1:
             TestStat { stat: w / q as f64, p: dist::pchisq_upper(w, q as f64), df1: q as f64, df2: f64::NAN }
         }
     }
+}
+
+/// The input columns of the sources `which` selects, in `sources` order (CRV3 refit problems).
+fn pick<'c>(sources: &[CoefSource], which: fn(&CoefSource) -> Option<usize>, cols: &[&'c [f64]]) -> Vec<&'c [f64]> {
+    sources.iter().filter_map(which).map(|j| cols[j]).collect()
+}
+
+fn x_of(s: &CoefSource) -> Option<usize> {
+    if let CoefSource::X(j) = s { Some(*j) } else { None }
+}
+
+fn endog_of(s: &CoefSource) -> Option<usize> {
+    if let CoefSource::Endog(j) = s { Some(*j) } else { None }
+}
+
+fn inst_of(s: &CoefSource) -> Option<usize> {
+    if let CoefSource::Inst(j) = s { Some(*j) } else { None }
 }
 
 /// One regressor of the reported model: its source, the combo regressed on (IV: the fitted
@@ -217,7 +236,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     exog.extend((0..input.x.len()).map(|j| Regressor { source: CoefSource::X(j), design: unit(r, lay.x(j)), actual: unit(r, lay.x(j)) }));
     let exog_design: Vec<Vec<f64>> = exog.iter().map(|x| x.design.clone()).collect();
 
-    // IV first stages: each endogenous variable on Z = [(1), inst…, x…].
+    // IV first stages: each endogenous variable on Z = [(1), inst..., x...].
     struct First {
         reg: Reg,
         no_inst: Reg,
@@ -225,7 +244,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     let mut z_sources: Vec<CoefSource> = Vec::new();
     let mut z_design: Vec<Vec<f64>> = Vec::new();
     let mut firsts: Vec<First> = Vec::new();
-    // The second-stage regressors in fixest order: [(1), fit_endog…, x…].
+    // The second-stage regressors in fixest order: [(1), fit_endog..., x...].
     let mut second: Vec<Regressor> = Vec::new();
     if iv {
         if intercept {
@@ -267,7 +286,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     let e2 = reg2.resid.clone();
 
     // Auxiliary IV regressions: y on the exogenous regressors (F of the endogenous block),
-    // Wu-Hausman (y on [endog…, (1), fit…, x…]) and Sargan (corrected residual on Z).
+    // Wu-Hausman (y on [endog..., (1), fit..., x...]) and Sargan (corrected residual on Z).
     let mut aux: Vec<Vec<f64>> = vec![e.clone()];
     let (mut wh_reg, mut sargan_reg) = (None, None);
     if iv {
@@ -313,7 +332,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         }
     }
 
-    // Reported coefficients: intercept, x…, endog… (the contract's order).
+    // Reported coefficients: intercept, x..., endog... (the contract's order).
     let rank = |s: &CoefSource| match s {
         CoefSource::Intercept => (0, 0),
         CoefSource::X(j) => (1, *j),
@@ -368,7 +387,52 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         fweights,
         row_order: session.row_order(),
     };
-    let (vcov, notes) = vcov::compute(&model, spec.vcov, &spec.ssc, &fe_info, &cl_info, &refs, pool)?;
+    // Inputs of the HC2/HC3, HAC, Conley and CRV3 variance matrices.
+    let kept_index = session.kept_index();
+    let vdata = VcovData {
+        factors: &input.factors,
+        factor_names: &input.factor_names,
+        cluster: &input.cluster,
+        time: input.time,
+        panel: input.panel,
+        lat: input.lat,
+        lon: input.lon,
+    };
+    let inputs = VcovInputs::read(spec.vcov, spec.flavor, &vdata, kept_index, pool)?;
+    let hc = matches!(spec.vcov, VcovKind::Hc2 | VcovKind::Hc3);
+    let fe_hat = if hc && has_fe {
+        let terms: Vec<(&[u32], usize, bool, Vec<&[f64]>)> =
+            terms.iter().map(|t| (t.codes.as_slice(), t.g, t.intercept, t.slopes.iter().map(Vec::as_slice).collect())).collect();
+        Some(fe_leverage(&terms, session.weights(), n, ctx, pool)?)
+    } else {
+        None
+    };
+    let crv3 = spec.vcov == VcovKind::Crv3;
+    let fe_cols = || -> Vec<FeCols> {
+        terms.iter().map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() }).collect()
+    };
+    // The 2SLS refits use the instruments the first stages kept.
+    let z_kept: Vec<CoefSource> = firsts.first().map_or(Vec::new(), |f| f.reg.kept.iter().map(|&a| z_sources[a]).collect());
+    let jk_data = crv3.then(|| {
+        JkData::new(
+            input.y,
+            &pick(&coef_source, x_of, &input.x),
+            &pick(&coef_source, endog_of, &input.endog),
+            &pick(&z_kept, inst_of, &input.inst),
+            None,
+            session.weights(),
+            fe_cols(),
+            kept_index,
+            pool,
+        )
+    });
+    let jk_problem = jk_data.as_ref().map(|d| d.problem(jk_model(spec.model), intercept, &coef, spec));
+    let jk_fn = jk_problem.as_ref().map(|p| move |codes: &[u32], g: usize| extra::jackknife_meat(p, codes, g, ctx, pool));
+    let intercept_idx = coef_source.iter().position(|s| *s == CoefSource::Intercept);
+    let mut extra2 = inputs.extra(has_fe, intercept_idx);
+    extra2.fe_hat = fe_hat.as_deref();
+    extra2.jackknife = jk_fn.as_ref().map(|f| f as &Jackknife);
+    let (vcov, notes) = vcov::compute(&model, spec.vcov, &spec.ssc, &fe_info, &cl_info, &extra2, &refs, pool)?;
     crate::solve::log_phase(ctx, &mut t, "fit: vcov");
 
     // IV statistics.
@@ -384,7 +448,18 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         for (j, f) in firsts.iter().enumerate() {
             let design1: Vec<Vec<f64>> = f.reg.kept.iter().map(|&a| z_design[a].clone()).collect();
             let model1 = Model { nparams: np1, bread: &f.reg.inv, iid_scale: ssr_first[j] / (n_eff - 1.0), design: &design1, resid: &f.reg.resid, ..model };
-            let (v1, _) = vcov::compute(&model1, spec.vcov, &spec.ssc, &fe_info, cl_first, &refs, pool)?;
+            // The first stage of endogenous variable j: [(1), inst..., x...] (kept) on endog_j.
+            let sources1: Vec<CoefSource> = f.reg.kept.iter().map(|&a| z_sources[a]).collect();
+            let jk_data1 = crv3.then(|| {
+                let mut x1 = pick(&sources1, inst_of, &input.inst);
+                x1.extend(pick(&sources1, x_of, &input.x));
+                JkData::new(input.endog[j], &x1, &[], &[], None, session.weights(), fe_cols(), kept_index, pool)
+            });
+            let jk_problem1 = jk_data1.as_ref().map(|d| d.problem(jk_model(spec.model), intercept, &f.reg.coef, spec));
+            let jk_fn1 = jk_problem1.as_ref().map(|p| move |codes: &[u32], g: usize| extra::jackknife_meat(p, codes, g, ctx, pool));
+            let mut extra1 = inputs.extra(has_fe, sources1.iter().position(|s| *s == CoefSource::Intercept));
+            extra1.jackknife = jk_fn1.as_ref().map(|f| f as &Jackknife);
+            let (v1, _) = vcov::compute(&model1, spec.vcov, &spec.ssc, &fe_info, cl_first, &extra1, &refs, pool)?;
             if j == 0 {
                 df2_first = (nf - v1.df_k).max(1.0);
             }
@@ -413,7 +488,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
             let qui: Vec<usize> = (m + usize::from(intercept)..2 * m + usize::from(intercept)).collect();
             let s2 = sums.wss[base] / df2;
             let sub: Vec<f64> = qui.iter().flat_map(|&a| qui.iter().map(move |&b| wh.inv[a * kw + b] * s2)).collect();
-            let (_, sub_inv) = design::chol_collin(&sub, m, f64::MIN_POSITIVE);
+            let (_, sub_inv) = crate::vcov::chol_collin(&sub, m, f64::MIN_POSITIVE);
             let c: Vec<f64> = qui.iter().map(|&a| wh.coef[a]).collect();
             let stat = quad_form(&c, &sub_inv) / df1;
             TestStat { stat, p: dist::pf_upper(stat, df1, df2), df1, df2 }
@@ -444,7 +519,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     let only_intercept = np == 1 && intercept && k == 1;
     let n_stat = if spec.flavor == Flavor::Pyfixest { n_eff } else { nf };
     let di = if has_fe || intercept { 1.0 } else { 0.0 };
-    // fixest's R² family uses the uncorrected second-stage residuals for IV, unweighted
+    // fixest's R^2 family uses the uncorrected second-stage residuals for IV, unweighted
     // (fitstats.R `r2`: `cpp_ssq(x$iv_residuals)`); its F test the weighted ones.
     let ssr_r2 = if iv { sums.uss[1] } else { ssr };
     let (mut r2, mut ar2) = match spec.flavor {
@@ -472,7 +547,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         Flavor::Pyfixest => (ssr / n_eff).sqrt(),
     };
     if iv && spec.flavor == Flavor::Pyfixest {
-        // pyfixest reports no R² or RMSE for IV.
+        // pyfixest reports no R^2 or RMSE for IV.
         (r2, ar2, wr2, war2, rmse) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
     }
     let f_test = match vcov.df_t {
@@ -506,9 +581,9 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
         converged: true,
     };
 
-    // Fixed effects (fixest `sumFE`): the FE part of y − Xβ with the original endogenous
+    // Fixed effects (fixest `sumFE`): the FE part of y - X beta with the original endogenous
     // variables, i.e. of the corrected residual's combo. For IV this equals fixest's
-    // y − Ûβ − e₂ with Û the first-stage fitted values including the first-stage FE.
+    // y - Uhat beta - e_2 with Uhat the first-stage fitted values including the first-stage FE.
     let fe_levels = coefs.as_ref().map(|c| FeLevels { slots: session.absorber().term_values(&c.combine(&e), 0), subset: None });
     let obs = kept_index.to_vec();
     let fe_sizes: Vec<usize> = terms.iter().map(|t| t.g).collect();
@@ -539,6 +614,9 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
             obs: obs.clone(),
             fe: state_fe,
             fixef: fe_levels,
+            iv,
+            intercept: intercept_idx,
+            fe_hat: fe_hat.map(std::sync::OnceLock::from).unwrap_or_default(),
         },
     });
     Ok(FitOutput {

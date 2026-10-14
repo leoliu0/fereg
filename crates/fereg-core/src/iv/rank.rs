@@ -2,8 +2,8 @@
 //! (`ranktest (endog) (inst), partial(exog) full noconstant [wald] [robust|cluster()]`;
 //! ivreghdfe.ado l.1727-1840, ranktest.ado `s_jstat` l.1010-1931 and `m_svd` l.2083-2137).
 //!
-//! iid: Anderson canonical-correlations LM = N·λ_min and Cragg–Donald F. Robust/cluster:
-//! Kleibergen–Paap rk LM (underidentification) and rk Wald F (weak identification); with one
+//! iid: Anderson canonical-correlations LM = N*lambda_min and Cragg-Donald F. Robust/cluster:
+//! Kleibergen-Paap rk LM (underidentification) and rk Wald F (weak identification); with one
 //! endogenous regressor ranktest's rank-0 block applies, with several the SVD algorithm.
 
 use super::dense::{self, M};
@@ -18,13 +18,13 @@ pub(crate) struct IdStats {
     pub widstat: f64,
     /// KP rk Wald F (robust/cluster only).
     pub rkf: Option<f64>,
-    /// Squared canonical correlations and cc²/(1−cc²), descending (`e(ccev)`, `e(cdev)`).
+    /// Squared canonical correlations and cc^2/(1-cc^2), descending (`e(ccev)`, `e(cdev)`).
     pub ev: Option<(Vec<f64>, Vec<f64>)>,
 }
 
 /// Endog and excluded instruments with the exogenous regressors partialled out.
 struct Partialled {
-    /// R×K1 and R×L1 coefficients of the partialled columns over the row columns.
+    /// R x K1 and R x L1 coefficients of the partialled columns over the row columns.
     ce: M,
     cz: M,
     qyy: M,
@@ -74,13 +74,13 @@ fn partial_out(m: &Model) -> Partialled {
     Partialled { ce, cz, qyy, qzz, qzy }
 }
 
-/// KP statistic of the test rank = K1−1 (`r(chi2)` of `ranktest …, full`) given the
-/// un-normalized meat of vhat ⊗ z.
+/// KP statistic of the test rank = K1-1 (`r(chi2)` of `ranktest ..., full`) given the
+/// un-normalized meat of vhat (x) z.
 fn kp_stat(p: &Partialled, shat_raw: &M, n: f64) -> f64 {
     let (k1, l1) = (p.qyy.r, p.qzz.r);
-    let gvec = p.qzy.vec(); // vec(Qzy): index c·L1 + k
+    let gvec = p.qzy.vec(); // vec(Qzy): index c*L1 + k
     if k1 == 1 {
-        // Rank-0 block (ranktest l.1600-1628): j = gbar'·invsym(Ŝ0)·gbar·N with Ŝ0 = meat/N.
+        // Rank-0 block (ranktest l.1600-1628): j = gbar'*invsym(Shat0)*gbar*N with Shat0 = meat/N.
         let (inv, _) = dense::ginv(&shat_raw.scale(1.0 / n));
         return inv.quad(&gvec) * n;
     }
@@ -89,7 +89,7 @@ fn kp_stat(p: &Partialled, shat_raw: &M, n: f64) -> f64 {
     let lyi = dense::tri_lower_inv(&ly);
     let lzi = dense::tri_lower_inv(&lz);
     let pihat = dense::spd_solve(&p.qzz, &p.qzy);
-    // kpthat = rQzz'·pihat·irQyy with irQyy = (Ly')⁻¹.
+    // kpthat = rQzz'*pihat*irQyy with irQyy = (Ly')^-1.
     let that = lz.t().mul(&pihat).mul(&lyi.t());
     let (u, _s, v) = dense::svd_full(&that);
     let kron = lyi.kron(&lzi);
@@ -117,7 +117,7 @@ pub(crate) fn id_stats(m: &Model, passes: &Passes) -> Result<IdStats, RfError> {
     let n = m.n;
     let p = partial_out(m);
 
-    // Canonical correlations: eigenvalues of Qyy^{-1/2}·Qzy'·Qzz⁻¹·Qzy·Qyy^{-1/2}.
+    // Canonical correlations: eigenvalues of Qyy^{-1/2}*Qzy'*Qzz^-1*Qzy*Qyy^{-1/2}.
     let ly = dense::chol(&p.qyy);
     let ev = ly.map(|ly| {
         let lyi = dense::tri_lower_inv(&ly);
@@ -146,12 +146,15 @@ pub(crate) fn id_stats(m: &Model, passes: &Passes) -> Result<IdStats, RfError> {
     let iddf = (l1 - k1 + 1) as f64;
     let (idstat, rkf) = match m.mode {
         Mode::Iid => (n * ccev[k1 - 1], None),
-        Mode::Robust | Mode::Cluster { .. } => {
-            let lm = kp_stat(&p, &passes.meat(&p.ce, &p.cz)?, n);
-            // Wald version: vhat = y − z·pihat.
+        // kiefer: ranktest without robust, cluster or bw: Anderson LM, and the rk Wald F of an
+        // iid ranktest is the Cragg-Donald F.
+        Mode::Ac if passes.ranktest_iid() => (n * ccev[k1 - 1], Some(cdf)),
+        Mode::Robust | Mode::Ac | Mode::Cluster { .. } => {
+            let lm = kp_stat(&p, &passes.meat_rank(&p.ce, &p.cz)?, n);
+            // Wald version: vhat = y - z*pihat.
             let pihat = dense::spd_solve(&p.qzz, &p.qzy);
             let cw = p.ce.sub(&p.cz.mul(&pihat));
-            let wald = kp_stat(&p, &passes.meat(&cw, &p.cz)?, n);
+            let wald = kp_stat(&p, &passes.meat_rank(&cw, &p.cz)?, n);
             let rkf = match m.mode {
                 Mode::Cluster { g } => wald / (n - 1.0) * (n - l - m.sdof) * (g - 1.0) / g / l1 as f64,
                 _ => wald / n * (n - l - m.sdof) / l1 as f64,

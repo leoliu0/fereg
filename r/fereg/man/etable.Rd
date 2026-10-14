@@ -11,22 +11,37 @@ etable(
   tex = FALSE,
   digits = 4,
   digits.stats = 5,
-  fitstat = NULL
+  fitstat = NULL,
+  keep = NULL,
+  drop = NULL,
+  family = NULL
 )
 }
 \arguments{
 \item{...}{\code{fereg} or \code{fereg_multi} objects (named arguments set the column titles).}
 
-\item{vcov, ssc}{Variance for every model (see \link[=fereg-methods]{summary()}).}
+\item{vcov, ssc}{Variance for every model (see \link[=fereg-methods]{summary()}); \code{vcov} may also be
+a list with one variance per model, as in fixest.}
 
 \item{tex}{Return LaTeX code instead of a data frame.}
 
 \item{digits}{Significant digits of coefficients and standard errors.}
 
-\item{digits.stats}{Decimals of the fit statistics.}
+\item{digits.stats}{Digits of the fit statistics, as in fixest: a number (significant digits,
+at least one decimal for large values), or \code{"rN"} (round to N decimals) / \code{"sN"}.}
 
-\item{fitstat}{Fit statistics (see \code{\link[=fitstat]{fitstat()}}); by default observations, R2 (pseudo R2 and
-BIC for GLMs) and within R2 when there are fixed effects.}
+\item{fitstat}{Fit statistics (see \code{\link[=fitstat]{fitstat()}}). The default is fixest's: observations, R2 and
+within R2 (adjusted R2 without fixed effects) when every model is OLS, else observations,
+squared correlation, pseudo R2 and BIC.}
+
+\item{keep, drop}{Character vectors of regular expressions (Perl syntax) selecting the
+coefficient rows, as in fixest: \code{keep} shows the coefficients matching any of them, then
+\code{drop} removes those matching any of them. Names are matched as displayed (the intercept is
+\code{"Constant"}); a leading \code{"\%"} matches the original names instead (\code{"(Intercept)"}), and a
+leading \code{"!"} negates the expression.}
+
+\item{family}{Show the row "Family" (OLS, Poisson, Logit); by default only when the models
+are of different families.}
 }
 \value{
 A data frame (class \code{fereg_etable}) or, with \code{tex = TRUE}, a character string (class
@@ -36,4 +51,11 @@ A data frame (class \code{fereg_etable}) or, with \code{tex = TRUE}, a character
 Side-by-side table of several estimations in fixest's \code{etable()} layout: coefficients with
 standard errors in parentheses and significance stars, fixed effects, variance type and fit
 statistics.
+}
+\examples{
+data(trade_toy, package = "fereg")
+m1 <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+m2 <- fepois(count ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
+etable(m1, m2, vcov = ~id)
+etable(m1, tex = TRUE)
 }

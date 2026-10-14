@@ -6,23 +6,25 @@
 
 use rayon::prelude::*;
 
-use super::design::chol_collin;
+use super::extra::{self, JkData, VcovInputs, fe_leverage, jk_model};
 use super::fixef::{self, FeLevels, FeSubset};
 use super::input::{Excluded, Sample};
 use super::ols::{cor_part, sq_cor, y_stats};
 use super::state::{State, StateFe, term_refs};
-use super::vcov::{self, ClusterInfo, FeInfo, Model as VModel};
-use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, Model, TestStat, WeightsType, dist};
-use crate::api::{Ctx, DofOptions, Family, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Spec};
+use super::vcov::{self, ClusterInfo, FeInfo, Jackknife, Model as VModel};
+use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, Model, TestStat, VcovData, VcovKind, WeightsType, dist};
+use crate::api::{Ctx, DofOptions, Family, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Spec};
 use crate::error::RfError;
 use crate::factor::{self, Codes};
 use crate::glm::family::MU_MIN;
 use crate::gather::Col;
 use crate::par::{self, CHUNK, Pool};
-use crate::session::Session;
+use crate::leverage::FeCols;
+use crate::session::{Session, Term};
 use crate::stats;
+use crate::vcov::chol_collin;
 
-/// Checks the outcome on the estimation rows: Poisson y ≥ 0, logit y ∈ {0, 1}.
+/// Checks the outcome on the estimation rows: Poisson y >= 0, logit y in {0, 1}.
 fn check_outcome(y: &[f64], kept: &[u32], family: Family, pool: &Pool) -> Result<(), RfError> {
     let bad = pool.install(|| match family {
         Family::Logit => kept.par_iter().any(|&i| y[i as usize] != 0.0 && y[i as usize] != 1.0),
@@ -35,16 +37,16 @@ fn check_outcome(y: &[f64], kept: &[u32], family: Family, pool: &Pool) -> Result
     }
 }
 
-/// ln C(m, k) for integers 0 ≤ k ≤ m.
+/// ln C(m, k) for integers 0 <= k <= m.
 fn ln_choose(m: f64, k: f64) -> f64 {
     dist::ln_gamma(m + 1.0) - dist::ln_gamma(k + 1.0) - dist::ln_gamma(m - k + 1.0)
 }
 
 /// fixest's log-likelihood and that of its null (constant-only) model.
-/// Poisson: Σw(y·η − μ − lnΓ(y+1)); null `sy·ln(sy/N) − sy − ΣlnΓ(y+1)` with sy = Σwy, N = Σw
+/// Poisson: sum w(y*eta - mu - ln Gamma(y+1)); null `sy*ln(sy/N) - sy - sum ln Gamma(y+1)` with sy = sum wy, N = sum w
 /// and the factorial term unweighted (femlm.R `get_model_null`); the offset is ignored there.
-/// Logit: `binomial()$aic` with the weights as trial counts, Σ ln dbinom(round(w·y), round(w), μ);
-/// null `sy·ln p + (N − sy)·ln(1 − p)` with p = sy/N.
+/// Logit: `binomial()$aic` with the weights as trial counts, sum ln dbinom(round(w*y), round(w), mu);
+/// null `sy*ln p + (N - sy)*ln(1 - p)` with p = sy/N.
 fn loglik(y: &[f64], kept: &[u32], eta: &[f64], mu: &[f64], w: Option<&[f64]>, family: Family, pool: &Pool) -> (f64, f64) {
     let a = par::sum_chunks(pool, kept.len(), CHUNK, 4, |range, acc| {
         for i in range {
@@ -82,7 +84,7 @@ fn loglik(y: &[f64], kept: &[u32], eta: &[f64], mu: &[f64], w: Option<&[f64]>, f
     (a[0], ll_null)
 }
 
-/// Deviance of the constant-only model without offset (Poisson: μ₀ = ȳ_w; logit: p = ȳ_w).
+/// Deviance of the constant-only model without offset (Poisson: mu_0 = ybar_w; logit: p = ybar_w).
 fn null_deviance(y: &[f64], kept: &[u32], w: Option<&[f64]>, ybar: f64, family: Family, pool: &Pool) -> f64 {
     par::sum_chunks(pool, kept.len(), CHUNK, 1, |range, acc| {
         for i in range {
@@ -136,8 +138,8 @@ struct Reported {
 }
 
 /// Pyfixest-flavor logit: the reported sample with the rows left out of IRLS at the bound
-/// μ = 1 − `MU_MIN` (y = 1) or `MU_MIN` (y = 0), the limit pyfixest's IRLS approaches (its
-/// tolerance stops near η ≈ ±25), with zero working residual and design row: they add nothing
+/// mu = 1 - `MU_MIN` (y = 1) or `MU_MIN` (y = 0), the limit pyfixest's IRLS approaches (its
+/// tolerance stops near eta ~= +/-25), with zero working residual and design row: they add nothing
 /// to the information matrix or the scores.
 fn expand(input: &FitInput, session: &Session, parts: &GlmParts, ex: Excluded, pool: &Pool) -> Result<Reported, RfError> {
     let solved = session.kept_index();
@@ -206,7 +208,7 @@ fn expand(input: &FitInput, session: &Session, parts: &GlmParts, ex: Excluded, p
         .zip(&input.fe)
         .map(|(c, ft)| (c, ft.slopes.iter().map(|&j| pool.install(|| kept.par_iter().map(|&i| input.slopes[j][i as usize]).collect())).collect()))
         .collect();
-    // Levels without a solved row: +∞ / −∞ when all their outcomes are 1 / 0 (the direction
+    // Levels without a solved row: +inf / -inf when all their outcomes are 1 / 0 (the direction
     // their fixed effect diverges), 0 otherwise and for slopes (not identified).
     let mut limits = Vec::new();
     for ((c, _), ft) in codes.iter().zip(&input.fe) {
@@ -287,6 +289,10 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
         // Ignored under the fixest convention (fixest's starting values).
         guess: Guess::Simple,
         log: false,
+        collinear: match spec.flavor {
+            Flavor::Fixest => GlmCollinear::Fixest { tol: spec.collin_tol },
+            Flavor::Pyfixest => GlmCollinear::Pyfixest { tol: spec.collin_tol },
+        },
     };
     let (_, mut parts) = session.glm_parts(rows, &Layout::ols(nsent), offset, &s, &g, GlmConvention::Fixest, ctx)?;
     let mut t = std::time::Instant::now();
@@ -322,6 +328,8 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
     // The reported sample: the session's rows, plus the rows left out of IRLS reported at the
     // bound (Pyfixest-flavor logit). Fixed-effect values are taken on the session's rows.
     let solved_slots = (has_fe && (spec.keep_fixef || spec.keep_state)).then(|| slot_levels(session.terms(), &parts.fe));
+    // CRV3 refits run on the session's rows (the rows left out of IRLS carry no information on beta).
+    let jk_rows: Option<(Vec<u32>, Vec<Term>)> = (spec.vcov == VcovKind::Crv3).then(|| (session.kept_index().to_vec(), session.terms().to_vec()));
     let rep = if let Some(ex) = excluded {
         expand(input, &session, &parts, ex, pool)?
     } else {
@@ -348,9 +356,9 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
     let (sumw, ybar, ssr_null) = y_stats(input.y, kept_index, w_obs, pool);
     let deviance = parts.deviance + rep.excluded_deviance;
 
-    // Variance: block [working residual, design…] in kept order under the final IRLS weights.
-    // With FE terms the design is x̃ (`xt`, the ones column included when sent); without, the
-    // raw [1, x] (x = x̃ + x̄_w), as fixest's unresidualized design.
+    // Variance: block [working residual, design...] in kept order under the final IRLS weights.
+    // With FE terms the design is x~ (`xt`, the ones column included when sent); without, the
+    // raw [1, x] (x = x~ + xbar_w), as fixest's unresidualized design.
     let kk = parts.k;
     let r = 1 + k;
     let mut block = par::alloc_vec(n * r, 0.0)?;
@@ -421,7 +429,52 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
         fweights,
         row_order: &row_order,
     };
-    let (vcov, mut notes) = vcov::compute(&model, spec.vcov, &spec.ssc, &fe_info, &cl_info, &refs, pool)?;
+    // Inputs of the HC2/HC3, HAC, Conley and CRV3 variance matrices.
+    let vdata = VcovData {
+        factors: &input.factors,
+        factor_names: &input.factor_names,
+        cluster: &input.cluster,
+        time: input.time,
+        panel: input.panel,
+        lat: input.lat,
+        lon: input.lon,
+    };
+    let inputs = VcovInputs::read(spec.vcov, spec.flavor, &vdata, kept_index, pool)?;
+    let fe_hat = if matches!(spec.vcov, VcovKind::Hc2 | VcovKind::Hc3) && has_fe {
+        // fixest `hatvalues` for `feglm`: the projection under the IRLS weights.
+        let terms: Vec<(&[u32], usize, bool, Vec<&[f64]>)> = rep
+            .codes
+            .iter()
+            .zip(&rep.terms)
+            .map(|((c, slopes), &(icpt, _))| (c.codes.as_slice(), c.n as usize, icpt, slopes.iter().map(Vec::as_slice).collect()))
+            .collect();
+        Some(fe_leverage(&terms, Some(&rep.w), n, ctx, pool)?)
+    } else {
+        None
+    };
+    let jk_data = jk_rows.as_ref().map(|(solved, terms)| {
+        let x: Vec<&[f64]> = coef_source.iter().filter_map(|s| if let CoefSource::X(j) = s { Some(input.x[*j]) } else { None }).collect();
+        let w = input.weights.map(|w| extra::kept_values(w, solved, pool));
+        let fe = terms.iter().map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() }).collect();
+        JkData::new(input.y, &x, &[], &[], input.offset, w.as_deref(), fe, solved, pool)
+    });
+    let jk_problem = jk_data.as_ref().map(|d| d.problem(jk_model(spec.model), intercept, &coef, spec));
+    // Cluster codes over the reported rows -> over the session's rows.
+    let solved_at = rep.subset.as_ref().map(|s| s.rows.as_slice());
+    let jk_fn = jk_problem.as_ref().map(|p| {
+        move |codes: &[u32], g: usize| match solved_at {
+            None => extra::jackknife_meat(p, codes, g, ctx, pool),
+            Some(at) => {
+                let c = factor::restrict(&Codes { codes: codes.to_vec(), n: g as u32 }, at, pool)?;
+                extra::jackknife_meat(p, &c.codes, c.n as usize, ctx, pool)
+            }
+        }
+    });
+    let intercept_idx = coef_source.iter().position(|s| *s == CoefSource::Intercept);
+    let mut extra_in = inputs.extra(has_fe, intercept_idx);
+    extra_in.fe_hat = fe_hat.as_deref();
+    extra_in.jackknife = jk_fn.as_ref().map(|f| f as &Jackknife);
+    let (vcov, mut notes) = vcov::compute(&model, spec.vcov, &spec.ssc, &fe_info, &cl_info, &extra_in, &refs, pool)?;
     drop(fe_info);
     crate::solve::log_phase(ctx, &mut t, "fit: vcov");
     if !parts.converged {
@@ -467,7 +520,7 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
         converged: parts.converged,
     };
 
-    // Fixed effects: the saved slots sum to η − offset − x'β (constant included).
+    // Fixed effects: the saved slots sum to eta - offset - x'beta (constant included).
     let Reported { kept, terms, codes, eta, mu, w, subset, .. } = rep;
     let fe_sizes: Vec<usize> = codes.iter().map(|(c, _)| c.n as usize).collect();
     let state_fe: Vec<StateFe> = codes
@@ -516,6 +569,9 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
             obs: obs.clone(),
             fe: state_fe,
             fixef: fe_levels,
+            iv: false,
+            intercept: intercept_idx,
+            fe_hat: fe_hat.map(std::sync::OnceLock::from).unwrap_or_default(),
         },
     });
     Ok(FitOutput {

@@ -10,8 +10,8 @@ fereg_fit <- function(input, spec, nthreads) {
   rust_result(.Call(wrap__fereg_fit, input, spec, as.integer(nthreads)))
 }
 
-fereg_vcov <- function(state, kind, ssc, factors, factor_names, cluster, nthreads) {
-  rust_result(.Call(wrap__fereg_vcov, state, kind, ssc, factors, factor_names, cluster, as.integer(nthreads)))
+fereg_vcov <- function(state, kind, ssc, factors, factor_names, cluster, vars, nthreads) {
+  rust_result(.Call(wrap__fereg_vcov, state, kind, ssc, factors, factor_names, cluster, vars, as.integer(nthreads)))
 }
 
 fereg_core_version <- function() .Call(wrap__fereg_core_version)

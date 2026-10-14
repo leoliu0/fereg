@@ -30,7 +30,7 @@ pub(crate) struct FeSubset {
     /// Positions (kept order of the reported sample) of the solved rows, ascending.
     pub rows: Vec<u32>,
     /// Per term slot and level of the reported sample: the value reported for levels without a
-    /// solved row (+∞ / −∞ for intercept slots of levels whose outcomes are all 1 / all 0, else 0).
+    /// solved row (+inf / -inf for intercept slots of levels whose outcomes are all 1 / all 0, else 0).
     pub limits: Vec<Vec<f64>>,
 }
 
@@ -51,7 +51,7 @@ impl Scatter {
 }
 
 /// Rows of every level, ascending within a level (CSR: level `l` owns `rows[off[l]..off[l+1]]`).
-/// Few levels (g × chunks ≤ n): per-chunk histograms, each chunk scattering its rows in order
+/// Few levels (g x chunks <= n): per-chunk histograms, each chunk scattering its rows in order
 /// into its own range of every level. Many levels: an atomic counting sort (little contention)
 /// and a per-level sort. Neither depends on the thread count.
 fn level_rows(codes: &[u32], g: usize, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
@@ -133,7 +133,7 @@ fn level_rows(codes: &[u32], g: usize, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
     (off, rows)
 }
 
-/// A set of row indices with O(log₆₄ n) insert and minimum: a bitset per level, each word of a
+/// A set of row indices with O(log_64 n) insert and minimum: a bitset per level, each word of a
 /// level summarized by one bit of the level above, up to a single word. Deletion is lazy:
 /// [`MinSet::first_valid`] drops the invalid entries it meets on the way to the minimum.
 struct MinSet {
@@ -233,10 +233,10 @@ fn first_rows(codes: &[u32], g: usize, pool: &Pool) -> Vec<u32> {
 /// - repeat until every level is determined.
 ///
 /// The references do not depend on the order of the propagation (the set of determined levels
-/// is its closure). Rows waiting with r determined terms (1 ≤ r ≤ q − 2) are kept in one
-/// [`MinSet`] per r (lazy deletion), rows with q − 1 in a stack; the per-term row lists are
+/// is its closure). Rows waiting with r determined terms (1 <= r <= q - 2) are kept in one
+/// [`MinSet`] per r (lazy deletion), rows with q - 1 in a stack; the per-term row lists are
 /// built in parallel. The state of a row is two bytes: the number of its determined terms and
-/// their XOR, which names the last undetermined one (q ≤ 255). For two terms this is one
+/// their XOR, which names the last undetermined one (q <= 255). For two terms this is one
 /// reference in the second term per connected component.
 fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Pool) -> (Vec<usize>, Vec<Vec<f64>>) {
     let q = codes.len();
@@ -260,7 +260,7 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
     let xor_all = (0..q as u16).fold(0, |a, t| a ^ t);
     let last = q as u16 - 1;
     let mut done: Vec<Vec<bool>> = sizes.iter().map(|&g| vec![false; g]).collect();
-    // Rows that reached r determined terms (1 ≤ r ≤ q − 2), with lazy deletion: a row stays in
+    // Rows that reached r determined terms (1 <= r <= q - 2), with lazy deletion: a row stays in
     // the set of r after moving on, and is removed when it surfaces as its minimum.
     let mut waiting: Vec<MinSet> = (1..q - 1).map(|_| MinSet::new(n)).collect();
     let mut queue: Vec<u32> = Vec::new();
@@ -353,9 +353,9 @@ fn find(parent: &mut [u32], mut a: u32) -> u32 {
 }
 
 /// pyfixest's normalization of intercept terms `vals` (the first free, every other term's first
-/// level pinned at 0, as its `C(f1) + C(f2) + …` dummies without intercept) with the remaining
+/// level pinned at 0, as its `C(f1) + C(f2) + ...` dummies without intercept) with the remaining
 /// indeterminacy resolved by minimum norm, as its `lsqr` solve does. The indeterminacy is taken
-/// to be spanned by the shifts v_{t,c} = +1 on the first term's levels and −1 on term t's levels
+/// to be spanned by the shifts v_{t,c} = +1 on the first term's levels and -1 on term t's levels
 /// of each connected component c of the (first term, term t) level graph: each is in the null
 /// space of the dummies (every row has both levels in c or neither), so the fit is unchanged,
 /// and they span it for two terms and for the usual designs with more (e.g. worker, firm, year).
@@ -365,7 +365,7 @@ fn min_norm(codes: &[&[u32]], sizes: &[usize], vals: &mut [Vec<f64>]) {
         return;
     }
     let g1 = sizes[0];
-    // Per term t ≥ 1: component of every first-term level and of every term-t level, and the
+    // Per term t >= 1: component of every first-term level and of every term-t level, and the
     // index of each component's unknown shift (`None`: the pinned component).
     let mut c1: Vec<Vec<usize>> = Vec::with_capacity(q - 1);
     let mut ct: Vec<Vec<usize>> = Vec::with_capacity(q - 1);
@@ -413,9 +413,9 @@ fn min_norm(codes: &[&[u32]], sizes: &[usize], vals: &mut [Vec<f64>]) {
     if nvar == 0 {
         return;
     }
-    // Minimize ‖vals + Σ s_v v‖² over the shifts s: normal equations A s = b with
-    // (A s)_{t,c} = Σ_{first-term l in c} S_l + n_{t,c}·s_{t,c}, S_l = Σ_t s_{t,c_t(l)}, and
-    // b_{t,c} = Σ_{term-t m in c} vals_t[m] − Σ_{first-term l in c} vals_1[l]; Jacobi-preconditioned
+    // Minimize ||vals + sum s_v v||^2 over the shifts s: normal equations A s = b with
+    // (A s)_{t,c} = sum_{first-term l in c} S_l + n_{t,c}*s_{t,c}, S_l = sum_t s_{t,c_t(l)}, and
+    // b_{t,c} = sum_{term-t m in c} vals_t[m] - sum_{first-term l in c} vals_1[l]; Jacobi-preconditioned
     // CG (A is diagonal, and one iteration exact, for two terms).
     let mut rhs = vec![0.0; nvar];
     let mut diag = vec![0.0; nvar];

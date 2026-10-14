@@ -1,9 +1,9 @@
-//! Dense explicit-dummy absorber: the oracle for every core test (plan §1.1b).
+//! Dense explicit-dummy absorber: the oracle for every core test (plan sec. 1.1b).
 //!
-//! D has one column per (term, slot, level): an intercept dummy and/or slope×dummy columns
-//! (a single column of ones under `noabsorb`). Residualization uses the thin SVD of √W·D with
-//! rank cutoff σ > 1e-11·σ_max·max(n, p), so collinear and disconnected designs are handled
-//! exactly (minimum-norm coefficients). Only for small problems (n·p ≤ 2·10⁷).
+//! D has one column per (term, slot, level): an intercept dummy and/or slope x dummy columns
+//! (a single column of ones under `noabsorb`). Residualization uses the thin SVD of sqrt W*D with
+//! rank cutoff sigma > 1e-11*sigma_max*max(n, p), so collinear and disconnected designs are handled
+//! exactly (minimum-norm coefficients). Only for small problems (n*p <= 2*10^7).
 
 use faer::Mat;
 
@@ -22,10 +22,10 @@ struct Slot {
 
 struct Basis {
     rank: usize,
-    /// n×rank, column j at `u[j*n..]`.
+    /// n x rank, column j at `u[j*n..]`.
     u: Vec<f64>,
     s: Vec<f64>,
-    /// p×rank, column j at `v[j*p..]`.
+    /// p x rank, column j at `v[j*p..]`.
     v: Vec<f64>,
 }
 
@@ -34,7 +34,7 @@ pub struct DenseAbsorber {
     order: Vec<u32>,
     w: Option<Vec<f64>>,
     p: usize,
-    /// n×p row-major design.
+    /// n x p row-major design.
     d: Vec<f64>,
     /// Slots of each session term (intercept first, then slopes).
     term_slots: Vec<Vec<Slot>>,
@@ -144,13 +144,13 @@ impl Absorber for DenseAbsorber {
         self.w.as_deref()
     }
 
-    fn set_weights(&mut self, w: Option<Vec<f64>>, _pool: &Pool, _ctx: &Ctx) -> Result<(), RfError> {
-        if let Some(v) = &w {
+    fn set_weights(&mut self, w: Option<&[f64]>, _pool: &Pool, _ctx: &Ctx) -> Result<(), RfError> {
+        if let Some(v) = w {
             if v.len() != self.n || v.iter().any(|x| !(x.is_finite() && *x > 0.0)) {
                 return Err(RfError::InvalidInput("weights must be positive and finite".into()));
             }
         }
-        self.w = w;
+        self.w = w.map(<[f64]>::to_vec);
         self.basis = None;
         Ok(())
     }
@@ -166,7 +166,7 @@ impl Absorber for DenseAbsorber {
     ) -> Result<SolveInfo, RfError> {
         let (n, p) = (self.n, self.p);
         if z.len() != n * r {
-            return Err(RfError::InvalidInput("residualize: block size differs from n·R".into()));
+            return Err(RfError::InvalidInput("residualize: block size differs from n*R".into()));
         }
         ctx.check()?;
         let sw: Vec<f64> = match &self.w {
@@ -177,7 +177,7 @@ impl Absorber for DenseAbsorber {
         let basis = self.basis.as_ref().expect("ensured above");
         let mut coefs = vec![0.0; p * r];
         for col in 0..r {
-            // α = V Σ⁻¹ U'(√w z)
+            // alpha = V sum^-1 U'(sqrt w z)
             let mut alpha = vec![0.0; p];
             for j in 0..basis.rank {
                 let uj = &basis.u[j * n..(j + 1) * n];

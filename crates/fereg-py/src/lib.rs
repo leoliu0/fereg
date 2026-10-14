@@ -71,11 +71,22 @@ fn factor_cols<'a>(arrs: &'a [FactorArr<'_>]) -> PyResult<Vec<FactorCol<'a>>> {
     arrs.iter().map(FactorArr::col).collect()
 }
 
-fn parse_vcov_kind(s: &str) -> PyResult<VcovKind> {
+/// A variance request: `kind` (`"iid"`, `"hetero"` = HC1, `"hc2"`, `"hc3"`, `"cluster"` = CRV1,
+/// `"crv3"`, `"nw"`, `"dk"`, `"conley"`) with its options: `lag` (Newey-West / Driscoll-Kraay;
+/// `None` = the flavor's default rule), `cutoff` (Conley, km; `None` = fixest's deduced cutoff),
+/// `pixel` (Conley, km; 0 = no pixel aggregation) and `spherical` (Conley great-circle distance;
+/// `false` = fixest's "triangular" distance). Options of other kinds are ignored.
+fn parse_vcov_kind(s: &str, lag: Option<usize>, cutoff: Option<f64>, pixel: f64, spherical: bool) -> PyResult<VcovKind> {
     match s {
         "iid" => Ok(VcovKind::Iid),
         "hetero" => Ok(VcovKind::Hetero),
+        "hc2" => Ok(VcovKind::Hc2),
+        "hc3" => Ok(VcovKind::Hc3),
         "cluster" => Ok(VcovKind::Cluster),
+        "crv3" => Ok(VcovKind::Crv3),
+        "nw" => Ok(VcovKind::NeweyWest { lag }),
+        "dk" => Ok(VcovKind::DriscollKraay { lag }),
+        "conley" => Ok(VcovKind::Conley { cutoff, pixel, spherical }),
         _ => Err(PyValueError::new_err(format!("unknown vcov kind '{s}'"))),
     }
 }
@@ -128,6 +139,12 @@ fn kind_name(k: VcovKind) -> &'static str {
         VcovKind::Iid => "iid",
         VcovKind::Hetero => "hetero",
         VcovKind::Cluster => "cluster",
+        VcovKind::Hc2 => "hc2",
+        VcovKind::Hc3 => "hc3",
+        VcovKind::Crv3 => "crv3",
+        VcovKind::NeweyWest { .. } => "nw",
+        VcovKind::DriscollKraay { .. } => "dk",
+        VcovKind::Conley { .. } => "conley",
     }
 }
 
@@ -154,14 +171,24 @@ fn test_dict<'py>(py: Python<'py>, t: &TestStat) -> PyResult<Bound<'py, PyDict>>
     Ok(d)
 }
 
+/// `{kind, vcov, df_k, df_t, n_clusters, n_periods, lag, cutoff, ssc_factor, psd_fixed}`: `lag`
+/// (Newey-West / Driscoll-Kraay) and `cutoff` (Conley, km) are the values used, defaults resolved.
 fn vcov_dict<'py>(py: Python<'py>, v: VcovOutput) -> PyResult<Bound<'py, PyDict>> {
     let k = (v.vcov.len() as f64).sqrt().round() as usize;
+    let (lag, cutoff) = match v.kind {
+        VcovKind::NeweyWest { lag } | VcovKind::DriscollKraay { lag } => (lag, None),
+        VcovKind::Conley { cutoff, .. } => (None, cutoff),
+        _ => (None, None),
+    };
     let d = PyDict::new(py);
     d.set_item("kind", kind_name(v.kind))?;
     d.set_item("vcov", v.vcov.into_pyarray(py).reshape([k, k])?)?;
     d.set_item("df_k", v.df_k)?;
     d.set_item("df_t", v.df_t)?;
     d.set_item("n_clusters", v.n_clusters)?;
+    d.set_item("n_periods", v.n_periods)?;
+    d.set_item("lag", lag)?;
+    d.set_item("cutoff", cutoff)?;
     d.set_item("ssc_factor", v.ssc_factor)?;
     d.set_item("psd_fixed", v.psd_fixed)?;
     Ok(d)
@@ -200,6 +227,9 @@ fn fixef_list(py: Python<'_>, values: Vec<cf::FixefValues>) -> PyResult<Bound<'_
 /// Builds the core context: `threads` workers (0 = all CPUs), Ctrl-C polling and, when
 /// `verbose > 0`, log lines written to `sys.stdout`. Must be called inside `py.detach`.
 fn with_ctx<T>(threads: usize, verbose: u8, f: impl FnOnce(&Ctx) -> T) -> T {
+    // faer calls made outside the core's scoped pools must not start rayon's global pool (all
+    // cores, threads outliving the call): every parallel faer call in the core passes its pool.
+    faer::set_global_parallelism(faer::Par::Seq);
     let interrupt = || Python::attach(|py| py.check_signals().is_err());
     let log = |line: &str| {
         Python::attach(|py| {
@@ -222,8 +252,17 @@ struct FitState {
 #[pymethods]
 impl FitState {
     /// Variance matrix of the same fit under another estimator / small-sample correction.
-    /// `factors` are `(kind, values, nlevels, base)` tuples over the original input rows.
-    #[pyo3(signature = (kind, ssc=None, factors=None, factor_names=None, cluster=None, threads=0))]
+    /// `kind`, `lag`, `cutoff`, `pixel`, `spherical`: see `fit`. `factors` are
+    /// `(kind, values, nlevels, base)` tuples over the original input rows, referenced by
+    /// `cluster` (dimensions; more than one factor = interaction), `time` and `panel` (factor
+    /// indices; time levels ascending = time order); `lat` / `lon` are degrees over the original
+    /// input rows. A missing value on an estimation row is an error. `"crv3"` is an error: it
+    /// re-estimates the model, so hosts fit again with `vcov="crv3"`.
+    #[pyo3(signature = (
+        kind, ssc=None, factors=None, factor_names=None, cluster=None, *, time=None, panel=None,
+        lat=None, lon=None, lag=None, cutoff=None, pixel=0.0, spherical=false, threads=0
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn vcov<'py>(
         &self,
         py: Python<'py>,
@@ -232,9 +271,17 @@ impl FitState {
         factors: Option<&Bound<'py, PyList>>,
         factor_names: Option<Vec<String>>,
         cluster: Option<Vec<Vec<usize>>>,
+        time: Option<usize>,
+        panel: Option<usize>,
+        lat: Option<PyReadonlyArray1<'py, f64>>,
+        lon: Option<PyReadonlyArray1<'py, f64>>,
+        lag: Option<usize>,
+        cutoff: Option<f64>,
+        pixel: f64,
+        spherical: bool,
         threads: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let kind = parse_vcov_kind(kind)?;
+        let kind = parse_vcov_kind(kind, lag, cutoff, pixel, spherical)?;
         let ssc = parse_ssc(ssc)?;
         let arrs = match factors {
             Some(f) => extract_factors(f)?,
@@ -243,9 +290,16 @@ impl FitState {
         let cols = factor_cols(&arrs)?;
         let names = factor_names.unwrap_or_default();
         let cluster = cluster.unwrap_or_default();
-        let out = py
-            .detach(|| with_ctx(threads, 0, |ctx| self.inner.vcov(kind, &ssc, &cols, &names, &cluster, ctx)))
-            .map_err(to_pyerr)?;
+        let data = cf::VcovData {
+            factors: &cols,
+            factor_names: &names,
+            cluster: &cluster,
+            time,
+            panel,
+            lat: lat.as_ref().map(|c| slice(c, "lat")).transpose()?,
+            lon: lon.as_ref().map(|c| slice(c, "lon")).transpose()?,
+        };
+        let out = py.detach(|| with_ctx(threads, 0, |ctx| self.inner.vcov(kind, &ssc, &data, ctx))).map_err(to_pyerr)?;
         vcov_dict(py, out)
     }
 
@@ -399,7 +453,7 @@ fn convert(py: Python<'_>, o: cf::FitOutput) -> PyResult<FitResult> {
 fn parse_spec(
     model: &str,
     flavor: &str,
-    vcov: &str,
+    vcov: VcovKind,
     weights_type: &str,
     fixef_rm: &str,
     fixef_norm: &str,
@@ -417,7 +471,7 @@ fn parse_spec(
             "pyfixest" => Flavor::Pyfixest,
             _ => return Err(bad("flavor", flavor)),
         },
-        vcov: parse_vcov_kind(vcov)?,
+        vcov,
         weights_type: match weights_type {
             "aweights" => WeightsType::Aweights,
             "fweights" => WeightsType::Fweights,
@@ -436,11 +490,25 @@ fn parse_spec(
 
 /// Estimates one model (`fereg_core::fit::fit`). Array arguments must be C-contiguous; they are
 /// borrowed, never copied.
+///
+/// `vcov` is the variance estimator: `"iid"`, `"hetero"` (HC1), `"hc2"`, `"hc3"`, `"cluster"`
+/// (CRV1 over `cluster`), `"crv3"` (leave-one-cluster-out jackknife over `cluster`), `"nw"`
+/// (Newey-West: panel when `panel` is given, time series otherwise), `"dk"` (Driscoll-Kraay) or
+/// `"conley"` (spatial HAC over `lat` / `lon`, degrees). `time` and `panel` are indices into
+/// `factors` (time levels ascending = time order). `lag` is the Newey-West / Driscoll-Kraay lag
+/// (`None` = the flavor's default; pyfixest: floor(T^0.25), and a time series needs it);
+/// `cutoff` the Conley cutoff in km (`None` = fixest's deduced cutoff), `pixel` its pixel size in
+/// km (0 = none) and `spherical` its great-circle distance (else fixest's "triangular").
+/// Extensions of the pyfixest flavor (pyfixest raises): HC2/HC3 with fixed effects (exact
+/// leverage of the fixed effects), CRV3 for IV and logit (logit refits are logit), Newey-West /
+/// Driscoll-Kraay for IV at estimation, Driscoll-Kraay without a panel variable, and Conley
+/// (fixest's estimator with the HC1 correction N / (N - df_k)). HC2/HC3 with IV is an error.
 #[pyfunction]
 #[pyo3(signature = (
     y, x, endog, inst, factors, factor_names, fe, slopes, weights=None, offset=None,
-    cluster=Vec::new(), drop=None, *, model="ols", flavor="pyfixest", intercept=true, vcov="iid",
-    ssc=None, weights_type="aweights", fixef_rm="singleton", relu=false, mu=false,
+    cluster=Vec::new(), drop=None, *, time=None, panel=None, lat=None, lon=None, model="ols",
+    flavor="pyfixest", intercept=true, vcov="iid", lag=None, cutoff=None, pixel=0.0,
+    spherical=false, ssc=None, weights_type="aweights", fixef_rm="singleton", relu=false, mu=false,
     collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, glm_tol=1e-8, glm_maxiter=25,
     keep_resid=true, keep_fixef=true, fixef_norm="minnorm", keep_state=true, threads=0, verbose=0
 ))]
@@ -459,10 +527,18 @@ fn fit<'py>(
     offset: Option<PyReadonlyArray1<'py, f64>>,
     cluster: Vec<Vec<usize>>,
     drop: Option<PyReadonlyArray1<'py, bool>>,
+    time: Option<usize>,
+    panel: Option<usize>,
+    lat: Option<PyReadonlyArray1<'py, f64>>,
+    lon: Option<PyReadonlyArray1<'py, f64>>,
     model: &str,
     flavor: &str,
     intercept: bool,
     vcov: &str,
+    lag: Option<usize>,
+    cutoff: Option<f64>,
+    pixel: f64,
+    spherical: bool,
     ssc: Option<&Bound<'py, PyDict>>,
     weights_type: &str,
     fixef_rm: &str,
@@ -492,7 +568,7 @@ fn fit<'py>(
         keep_resid,
         keep_fixef,
         keep_state,
-        ..parse_spec(model, flavor, vcov, weights_type, fixef_rm, fixef_norm)?
+        ..parse_spec(model, flavor, parse_vcov_kind(vcov, lag, cutoff, pixel, spherical)?, weights_type, fixef_rm, fixef_norm)?
     };
     let farrs = extract_factors(factors)?;
     let y = slice(&y, "y")?;
@@ -510,6 +586,10 @@ fn fit<'py>(
         offset: offset.as_ref().map(|o| slice(o, "offset")).transpose()?,
         cluster,
         drop: drop.as_ref().map(|d| slice(d, "drop")).transpose()?,
+        time,
+        panel,
+        lat: lat.as_ref().map(|c| slice(c, "lat")).transpose()?,
+        lon: lon.as_ref().map(|c| slice(c, "lon")).transpose()?,
     };
     let n = input.n;
     let lens = input.x.iter().chain(&input.endog).chain(&input.inst).chain(&input.slopes).map(|s| s.len());
@@ -517,7 +597,9 @@ fn fit<'py>(
         .chain(input.factors.iter().map(FactorCol::len))
         .chain(input.weights.map(<[f64]>::len))
         .chain(input.offset.map(<[f64]>::len))
-        .chain(input.drop.map(<[bool]>::len));
+        .chain(input.drop.map(<[bool]>::len))
+        .chain(input.lat.map(<[f64]>::len))
+        .chain(input.lon.map(<[f64]>::len));
     if lens.into_iter().any(|l| l != n) {
         return Err(PyValueError::new_err("every input column must have the length of y"));
     }
