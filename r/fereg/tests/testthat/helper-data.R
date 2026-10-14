@@ -1,6 +1,11 @@
 # Simulated panel shared by the tests: three crossed fixed effects (id, year, firm), weights,
 # cluster variables, instruments, count and binary outcomes.
 options(fereg.nthreads = 2L)
+# The fixest references run single-threaded, post-hoc variances included (summary() uses fixest's
+# global thread count, not the estimation's): fixest 0.14.2's time-series Newey-West variance
+# differs with exactly 2 threads from its value with 1, 3 or more, and 2 is its default on a
+# 4-core machine.
+if (requireNamespace("fixest", quietly = TRUE)) fixest::setFixest_nthreads(1)
 
 make_panel <- function(n = 1500, seed = 42) {
   set.seed(seed)
