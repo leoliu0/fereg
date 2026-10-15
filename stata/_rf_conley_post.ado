@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: e() of vce(conley ...) (fereg extension; fixest's Conley estimator)
+*! version 0.4.1  fereg: e() of vce(conley ...) (fereg extension; fixest's Conley estimator)
 * Usage (after -ereturn post-): _rf_conley_post, lat() lon() pixel() distance()
 *   e(conley_cutoff) (km actually used: the plugin's __rf_cutoff, also when deduced), e(conley_pixel),
 *   e(conley_lat), e(conley_lon), e(conley_distance)

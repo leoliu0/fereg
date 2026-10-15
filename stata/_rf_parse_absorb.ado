@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
+*! version 0.4.1  fereg: parse absorb() (reghdfe 6.13.1 grammar, see ms_parse_absvars of ftools 2.50)
 *
 * Syntax:  _rf_parse_absorb [absvars] [, SAVEfe Generate REPLACE]
 *

@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
+*! version 0.4.1  fereg: parse vce() (mirrors ms_parse_vce of ftools 2.50 / reghdfe 6.13.1)
 * Returns:
 *   s(vcetype)          unadjusted | robust | cluster | dkraay | hc2 | hc3 | crv3 | conley
 *   s(num_clusters)     number of cluster dimensions (cluster, crv3)

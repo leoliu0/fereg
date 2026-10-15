@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: time-series variance options (ivreghdfe 1.1.4 / ivreg2 HAC surface, reghdfe vce(dkraay))
+*! version 0.4.1  fereg: time-series variance options (ivreghdfe 1.1.4 / ivreg2 HAC surface, reghdfe vce(dkraay))
 * Usage (after _rf_parse_vce; its results are passed back in):
 *   _rf_parse_hac, vcetype() [clustervars() weighttype() userrobust(0|1) bw() kernel() kiefer
 *                  dkraay(#) psd0 psda]

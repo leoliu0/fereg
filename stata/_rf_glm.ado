@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
+*! version 0.4.1  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
 *! Syntax, messages and e() of feppml mirror ppmlhdfe 2.3.3 (Correia, Guimaraes, Zylkin).
 *
 * Usage (from feppml.ado / felogit.ado):  _rf_glm poisson|logit <command arguments>
