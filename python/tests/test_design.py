@@ -15,6 +15,7 @@ pf = pytest.importorskip("pyfixest")
 pl = pytest.importorskip("polars")
 from pyfixest.estimation.formula.model_matrix import create_model_matrix
 from pyfixest.estimation.formula.parse import Formula as PfFormula
+from formulaic.errors import FactorEvaluationError
 
 N = 400
 
@@ -423,7 +424,8 @@ def test_errors():
     df = DF.copy()
     with pytest.raises(TypeError, match="dependent variable must be numeric"):
         build_design(parse("s ~ x1")[0], df)
-    with pytest.raises(KeyError, match="nope"):
+    # as pyfixest: formulaic's error for a name missing from the data
+    with pytest.raises(FactorEvaluationError, match="`nope` is not present in the dataset"):
         build_design(parse("y ~ nope")[0], df)
     df["w0"] = df["w"]
     df.loc[3, "w0"] = 0.0
@@ -452,6 +454,8 @@ def test_unsupported_term_without_formulaic(monkeypatch):
         build_design(parse("y ~ poly(x1, 2)")[0], DF)
     with pytest.raises(FormulaSyntaxError, match="i\\(\\) cannot be combined"):
         build_design(parse("y ~ i(f1) + poly(x1, 2)")[0], DF)
+    with pytest.raises(KeyError, match="nope"):
+        build_design(parse("y ~ nope")[0], DF)
 
 
 def test_speed_10m_rows():

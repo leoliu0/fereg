@@ -196,13 +196,17 @@ pub enum FixefRm {
     /// Singletons plus, for GLMs, FE levels whose outcome is constant at a bound (Poisson: all 0;
     /// logit: all 0 or all 1), recursively. Same as `Singleton` for OLS. fixest `perfect_fit`.
     /// [`Flavor::Pyfixest`]: pyfixest's `fe` separation check instead, once after the
-    /// singletons, dropping levels whose outcome is all 0 (logit too). For logit the rest of
+    /// singletons, dropping levels whose outcome is all 0 (logit too; all <= 0 for
+    /// [`FitSpec::gaussian_glm`]; nothing without fixed effects). For logit the rest of
     /// fixest's rule applies to IRLS only: the rows of levels whose remaining outcomes are all 0
     /// or all 1 stay in the reported sample (pyfixest's nobs and degrees of freedom) at the limit
     /// pyfixest's IRLS approaches: mu at the bound (1 - 100*eps or 100*eps), IRLS weight w*mu(1 - mu), no
     /// contribution to the scores, and fixed effects +/-inf on levels with no other row.
     #[default]
     Perfect,
+    /// [`FixefRm::Perfect`] without the singleton removal (pyfixest `fixef_rm="none"` with its
+    /// `fe` separation check).
+    PerfectOnly,
 }
 
 /// Normalization of the recovered fixed effects.
@@ -268,7 +272,17 @@ pub struct FitSpec {
     pub weights_type: WeightsType,
     pub fixef_rm: FixefRm,
     /// Extra GLM separation checks (ppmlhdfe `relu` / `mu`); off in fixest and pyfixest.
+    /// [`Flavor::Pyfixest`]: `relu` is pyfixest's `ir` check instead (`separation_check=["ir"]`):
+    /// ppmlhdfe's ReLU method on the outcome as a Poisson outcome (logit and
+    /// [`FitSpec::gaussian_glm`] too), run once on the sample of the `fe` check, before IRLS,
+    /// without singleton re-checks, and only with fixed effects; `mu` is not available.
     pub separation: Separation,
+    /// [`Flavor::Pyfixest`] linear model ([`Model::Ols`]) estimated as pyfixest's
+    /// `feglm(family="gaussian")`, which runs the separation checks of its GLMs:
+    /// [`FixefRm::Perfect`] / [`FixefRm::PerfectOnly`] is pyfixest's `fe` check (levels whose
+    /// outcome is all <= 0), and
+    /// the degrees of freedom count the levels present before the checks.
+    pub gaussian_glm: bool,
     /// Collinearity tolerance (fixest/pyfixest `collin.tol`).
     pub collin_tol: f64,
     /// FE solver tolerance and iteration cap (fereg solver semantics).
@@ -299,6 +313,7 @@ impl Default for FitSpec {
             weights_type: WeightsType::Aweights,
             fixef_rm: FixefRm::Perfect,
             separation: Separation::default(),
+            gaussian_glm: false,
             collin_tol: 1e-9,
             fixef_tol: 1e-8,
             fixef_maxiter: 16_000,

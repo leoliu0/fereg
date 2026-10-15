@@ -13,14 +13,14 @@ use super::ols::{cor_part, sq_cor, y_stats};
 use super::state::{State, StateFe, term_refs};
 use super::vcov::{self, ClusterInfo, FeInfo, Jackknife, Model as VModel};
 use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, Model, TestStat, VcovData, VcovKind, WeightsType, dist};
-use crate::api::{Ctx, DofOptions, Family, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Spec};
+use crate::api::{AbsorbTerm, Ctx, DofOptions, Family, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Separation, Spec, Vce, WeightKind};
 use crate::error::RfError;
 use crate::factor::{self, Codes};
 use crate::glm::family::MU_MIN;
 use crate::gather::Col;
 use crate::par::{self, CHUNK, Pool};
 use crate::leverage::FeCols;
-use crate::session::{Session, Term};
+use crate::session::{AbsorberKind, Parts, Session, Term};
 use crate::stats;
 use crate::vcov::chol_collin;
 
@@ -35,6 +35,75 @@ fn check_outcome(y: &[f64], kept: &[u32], family: Family, pool: &Pool) -> Result
         (true, Family::Logit) => Err(RfError::InvalidInput("logit: the dependent variable must be 0 or 1".into())),
         (true, _) => Err(RfError::InvalidInput("Poisson: the dependent variable must be non-negative".into())),
     }
+}
+
+/// pyfixest's `ir` separation check (fepois_.py `_check_for_separation_ir`, run by its `fepois`
+/// and every `feglm` family): the ReLU method on `y` as a Poisson outcome (interior y > 0), over
+/// the `alive` rows with their regressors and fixed effects, without weights or offset, and
+/// without singleton re-checks. Returns the input rows found separated (ascending).
+pub(crate) fn pyfixest_relu(input: &FitInput, spec: &FitSpec, term_codes: &[Codes], alive: &[bool], ctx: &Ctx, pool: &Pool) -> Result<Vec<u32>, RfError> {
+    let y = input.y;
+    let on_alive = |f: fn(f64) -> bool| pool.install(|| (0..input.n).into_par_iter().any(|i| alive[i] && f(y[i])));
+    // pyfixest returns at once without a zero outcome (the ReLU target is y == 0).
+    if !on_alive(|v| v == 0.0) {
+        return Ok(Vec::new());
+    }
+    if on_alive(|v| v < 0.0) {
+        if spec.model == Model::Ols {
+            return Err(RfError::InvalidInput("the `ir` separation check needs a non-negative dependent variable".into()));
+        }
+        // Poisson: rejected by the outcome check of the fit.
+        return Ok(Vec::new());
+    }
+    let absorb: Vec<AbsorbTerm> =
+        input.fe.iter().map(|t| AbsorbTerm { factors: t.factors.clone(), intercept: t.intercept, slopes: t.slopes.clone(), save: false }).collect();
+    let parts = Parts {
+        n_input: input.n,
+        alive: alive.to_vec(),
+        dropped: true,
+        absorb: &absorb,
+        term_codes: term_codes.to_vec(),
+        cluster_codes: Vec::new(),
+        slope_vars: &input.slopes,
+        weights: None,
+        weight_kind: WeightKind::None,
+        vce: Vce::Unadjusted,
+        y_sep: None,
+        family: Family::Poisson,
+        drop_singletons: false,
+        sep_fe: false,
+        counts: Default::default(),
+    };
+    let mut session = Session::from_parts(parts, AbsorberKind::Fast, pool, ctx)?;
+    let ones = spec.intercept && !input.fe.iter().any(|t| t.intercept);
+    let mut cols = vec![Col::Values(y)];
+    if ones {
+        cols.push(Col::One);
+    }
+    cols.extend(input.x.iter().map(|v| Col::Values(v)));
+    let nsent = cols.len() - 1;
+    let rows = session.gather_input(&cols, pool)?;
+    let kept = session.kept_index().to_vec();
+    let s = Spec {
+        tol: spec.fixef_tol,
+        maxiter: spec.fixef_maxiter,
+        dof: DofOptions { firstpair: false, pairwise: false, clusters: false, continuous: false },
+        ..Spec::default()
+    };
+    let g = GlmOptions {
+        family: Family::Poisson,
+        tol: spec.glm_tol,
+        maxiter: spec.glm_maxiter,
+        itol: spec.fixef_tol,
+        separation: Separation { relu: true, mu: false },
+        guess: Guess::Simple,
+        log: false,
+        collinear: GlmCollinear::Pyfixest { tol: spec.collin_tol },
+    };
+    // The GLM core's drop messages are SMCL for the Stata plugin: the fit layer reports counts.
+    let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
+    let check = session.glm_separation(rows, &Layout::ols(nsent), None, &s, &g, &muted)?;
+    Ok(kept.iter().zip(&check.separated).filter(|(_, s)| **s).map(|(&i, _)| i).collect())
 }
 
 /// ln C(m, k) for integers 0 <= k <= m.
@@ -285,7 +354,8 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
         tol: spec.glm_tol,
         maxiter: spec.glm_maxiter,
         itol: spec.fixef_tol,
-        separation: spec.separation,
+        // pyfixest's `ir` check ran with the sample ([`pyfixest_relu`]).
+        separation: if spec.flavor == Flavor::Pyfixest { Separation { relu: false, ..spec.separation } } else { spec.separation },
         // Ignored under the fixest convention (fixest's starting values).
         guess: Guess::Simple,
         log: false,
@@ -303,7 +373,7 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
     let extra_perfect = (session.num_fe_separated() - perfect0) as usize;
     dropped.singletons += extra_singletons;
     dropped.perfect_fit += extra_perfect;
-    dropped.separated = kept0 - session.n() - extra_singletons - extra_perfect;
+    dropped.separated += kept0 - session.n() - extra_singletons - extra_perfect;
 
     // Coefficients: intercept first, then x (fixest order).
     let source = |j: usize| if ones && j == 0 { CoefSource::Intercept } else { CoefSource::X(j - usize::from(ones)) };

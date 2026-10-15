@@ -47,7 +47,7 @@ class FitContext:
     weights: str | None
     weights_type: str
     offset: str | None
-    fixef_rm: str  # core fixef_rm: "none" | "singleton" | "perfect"
+    fixef_rm: str  # core fixef_rm: "none" | "singleton" | "perfect" | "perfect_only"
     collin_tol: float
     fixef_tol: float
     fixef_maxiter: int
@@ -60,6 +60,8 @@ class FitContext:
     split_var: str | None = None
     split_value: Any = None
     extra: dict = field(default_factory=dict)
+    # pyfixest ``context``: names the formula may use beyond the data (captured mapping)
+    context: Any = field(default_factory=dict)
 
 
 def _coef_names(design: Any, sources: list[tuple[str, int]]) -> list[str]:
@@ -530,6 +532,7 @@ class Feols:
             offset=self._offset_name,
             drop_intercept=self._drop_intercept,
             like=self._design,
+            context=self._ctx.context,
         )
         xb = np.zeros(nd.n)
         for (kind, j), b in zip(self._out.coef_source, self._beta_hat):

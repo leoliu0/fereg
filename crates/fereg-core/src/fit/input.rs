@@ -322,8 +322,11 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         Model::Poisson => Family::Poisson,
         Model::Logit => Family::Logit,
     };
-    let singletons = spec.fixef_rm != FixefRm::None;
-    let sep_fe = spec.fixef_rm == FixefRm::Perfect && family != Family::Gaussian;
+    let singletons = matches!(spec.fixef_rm, FixefRm::Singleton | FixefRm::Perfect);
+    let pyfixest = spec.flavor == Flavor::Pyfixest;
+    // pyfixest's `feglm(family="gaussian")` runs the separation checks of its GLMs.
+    let gaussian_glm = pyfixest && spec.gaussian_glm && spec.model == Model::Ols;
+    let sep_fe = matches!(spec.fixef_rm, FixefRm::Perfect | FixefRm::PerfectOnly) && (family != Family::Gaussian || gaussian_glm);
     let tc: Vec<TermCodes> = input
         .fe
         .iter()
@@ -333,15 +336,21 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         .collect();
     // fixest removes perfect-fit levels inside the singleton loop; pyfixest runs its `fe` check
     // once afterwards.
-    let pyfixest_sep = sep_fe && spec.flavor == Flavor::Pyfixest;
+    let pyfixest_sep = sep_fe && pyfixest;
+    // pyfixest's `ir` check (models with fixed effects only, as all its separation checks).
+    let pyfixest_relu = pyfixest && spec.separation.relu && (family != Family::Gaussian || gaussian_glm) && !input.fe.is_empty();
     let sep = (sep_fe && !pyfixest_sep).then_some(SepRule { y: input.y, family });
     let mut counts = sample::drop_singletons(&tc, &mut alive, None, sep, singletons, pool);
-    let levels_before_separation = pyfixest_sep.then(|| {
-        let (separated, levels) = pyfixest_separation(&tc, &mut alive, input.y);
-        counts.fe_separated = separated as u64;
-        levels
-    });
-    let excluded = if pyfixest_sep && family == Family::Logit {
+    let levels_before_separation = (pyfixest_sep || pyfixest_relu).then(|| present_levels(&tc, &alive));
+    if pyfixest_sep {
+        counts.fe_separated = pyfixest_separation(&tc, &mut alive, input.y) as u64;
+    }
+    if pyfixest_relu {
+        let rows = super::glm::pyfixest_relu(input, spec, &term_codes, &alive, ctx, pool)?;
+        rows.iter().for_each(|&i| alive[i as usize] = false);
+        dropped.separated = rows.len();
+    }
+    let excluded = if (pyfixest_sep || pyfixest_relu) && family == Family::Logit {
         let reported_mask = alive.clone();
         sample::drop_singletons(&tc, &mut alive, None, Some(SepRule { y: input.y, family }), false, pool);
         let rows: Vec<u32> = pool.install(|| (0..input.n as u32).into_par_iter().filter(|&i| reported_mask[i as usize] && !alive[i as usize]).collect());
@@ -364,7 +373,7 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
     dropped.singletons = counts.singletons as usize;
     dropped.perfect_fit = counts.fe_separated as usize;
     let left_out = excluded.as_ref().map_or(0, |e| e.rows.len());
-    let kept = input.n - dropped.na - dropped.zero_weight - dropped.singletons - dropped.perfect_fit - left_out;
+    let kept = input.n - dropped.na - dropped.zero_weight - dropped.singletons - dropped.perfect_fit - dropped.separated - left_out;
     if kept < 2 {
         return Err(RfError::TooFewObs);
     }
@@ -374,6 +383,8 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
     let save = spec.model != Model::Ols && (spec.keep_fixef || spec.keep_state);
     let absorb: Vec<AbsorbTerm> =
         input.fe.iter().map(|t| AbsorbTerm { factors: t.factors.clone(), intercept: t.intercept, slopes: t.slopes.clone(), save }).collect();
+    // The session's own perfect-fit rule (re-run after GLM-internal drops) has no Gaussian form.
+    let session_sep = sep_fe && family != Family::Gaussian;
     let parts = Parts {
         n_input: input.n,
         alive,
@@ -385,31 +396,34 @@ pub(crate) fn build(input: &FitInput, spec: &FitSpec, ctx: &Ctx, pool: &Pool) ->
         weights: input.weights,
         weight_kind: if input.weights.is_some() { WeightKind::Aweight } else { WeightKind::None },
         vce: if input.cluster.is_empty() { Vce::Unadjusted } else { Vce::Cluster(input.cluster.clone()) },
-        y_sep: sep_fe.then_some(input.y),
+        y_sep: session_sep.then_some(input.y),
         family,
         drop_singletons: singletons,
-        sep_fe,
+        sep_fe: session_sep,
         counts,
     };
     let session = Session::from_parts(parts, AbsorberKind::Fast, pool, ctx)?;
     Ok(Sample { session, dropped, levels_before_separation, excluded })
 }
 
-/// pyfixest's `fe` separation check (fepois_.py `_check_for_separation_fe`): unless every
-/// outcome is positive, drop the rows of every level, of any intercept term, whose outcomes are
-/// all zero; one pass, no singleton re-check (logit too: all-one levels stay). Returns the rows
-/// dropped and the levels present per term before the check.
-fn pyfixest_separation(tc: &[TermCodes], alive: &mut [bool], y: &[f64]) -> (usize, Vec<usize>) {
-    let levels: Vec<usize> = tc
-        .iter()
+/// Levels present per term on the alive rows.
+fn present_levels(tc: &[TermCodes], alive: &[bool]) -> Vec<usize> {
+    tc.iter()
         .map(|t| {
             let mut seen = vec![false; t.g];
             t.codes.iter().zip(alive.iter()).filter(|(_, a)| **a).for_each(|(&c, _)| seen[c as usize] = true);
             seen.iter().filter(|s| **s).count()
         })
-        .collect();
+        .collect()
+}
+
+/// pyfixest's `fe` separation check (fepois_.py `_check_for_separation_fe`): unless every
+/// outcome is positive, drop the rows of every level, of any intercept term, whose outcomes are
+/// all <= 0 (Poisson, logit: all zero); one pass, no singleton re-check (logit too: all-one
+/// levels stay). Returns the number of rows dropped.
+fn pyfixest_separation(tc: &[TermCodes], alive: &mut [bool], y: &[f64]) -> usize {
     if alive.iter().zip(y).all(|(a, &v)| !*a || v > 0.0) {
-        return (0, levels);
+        return 0;
     }
     let mut drop = vec![false; alive.len()];
     for t in tc {
@@ -430,5 +444,5 @@ fn pyfixest_separation(tc: &[TermCodes], alive: &mut [bool], y: &[f64]) -> (usiz
             n += 1;
         }
     }
-    (n, levels)
+    n
 }

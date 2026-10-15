@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 import warnings
+from collections import ChainMap
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -39,6 +42,19 @@ class _AllSample:
 
 
 _ALL = _AllSample()
+
+
+def _capture_context(context: int | Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """pyfixest's ``context`` as its estimation functions capture it (``capture_context``):
+    None gives no extra names; an int is a frame offset from the caller of the estimation
+    function (0 = the caller's locals, then its globals); a mapping is used as given."""
+    if context is None:
+        return {}
+    if isinstance(context, int):
+        # frame 0: this function, 1: feols / fepois / feglm, 2: their caller
+        frame = sys._getframe(context + 2)
+        return ChainMap(frame.f_locals, frame.f_globals)
+    return context
 
 
 def ssc(
@@ -83,6 +99,7 @@ def fit_context(ctx: FitContext, *, vcov: VcovSpec | None = None, design: Any = 
         glm_tol=ctx.glm_tol,
         glm_maxiter=ctx.glm_maxiter,
         relu=ctx.relu,
+        gaussian_glm=ctx.method == "feglm-gaussian",
         keep_resid=not lean,
         # FE values are computed on demand from the state (fixef(), predict(newdata)).
         keep_fixef=False,
@@ -105,6 +122,11 @@ def estimate(ctx: FitContext) -> Feols:
     dropped = out.dropped
     if dropped["singletons"]:
         warnings.warn(f"{dropped['singletons']} singleton fixed effect(s) dropped from the model.")
+    # pyfixest `_check_for_separation` (fepois_.py), run by fepois and feglm: rows dropped by
+    # the "fe" check (core `perfect_fit`, pyfixest flavor) and the "ir" check (`separated`).
+    n_separated = dropped["perfect_fit"] + dropped["separated"]
+    if n_separated:
+        warnings.warn(f"{n_separated} observations removed because of separation.")
     if m._collin_vars:
         names = m._collin_vars
         shown = "\n    " + "\n    ".join(names[:5]) + "\n    ..." if len(names) > 5 else str(names)
@@ -168,6 +190,7 @@ def _run(
     fsplit: str | None,
     nthreads: int | None,
     use_compression: bool = False,
+    context: Mapping[str, Any] | None = None,
 ) -> Feols | FixestMulti:
     from .design import build_design
     from .formula import parse
@@ -177,7 +200,7 @@ def _run(
     # pandas and polars frames go to the design builder as they are (zero-copy columns);
     # sample splits need row filtering, done in pandas.
     data = _to_pandas(data) if (split is not None or fsplit is not None) else _check_frame(data)
-    _check_common(fixef_rm if model == "ols" else "singleton", collin_tol, weights_type, data, split, fsplit)
+    _check_common(fixef_rm if method == "feols" else "singleton", collin_tol, weights_type, data, split, fsplit)
     spec = parse_vcov(vcov, vcov_kwargs, columns=list(data.columns))
     formulas = parse(fml)
     if method != "feols" and any(f.endog for f in formulas):
@@ -212,6 +235,7 @@ def _run(
         threads=0 if nthreads is None else int(nthreads),
         drop_intercept=drop_intercept,
         split_var=split_var,
+        context={} if context is None else context,
     )
 
     models: dict[str, Feols] = {}
@@ -231,6 +255,7 @@ def _run(
                 cluster=list(spec.cluster),
                 vcov_columns=spec.columns(),
                 drop_intercept=drop_intercept,
+                context=base.context,
             )
             ctx = replace(base, formula=f, design=design, data=sub, split_value=value)
             m = estimate(ctx)
@@ -262,7 +287,7 @@ def feols(
     fixef_maxiter: int | None = DEFAULT_FIXEF_MAXITER,
     use_compression: bool = False,
     reps: int = 100,
-    context=None,
+    context: int | Mapping[str, Any] | None = None,
     seed: int | None = None,
     split: str | None = None,
     fsplit: str | None = None,
@@ -296,12 +321,20 @@ def feols(
     raises ``NotImplementedError``. Missing values in the cluster, time, panel or coordinate
     columns on estimation rows are an error.
 
-    ``copy_data``, ``store_data``, ``solver``, ``demeaner``, ``demeaner_backend``, ``reps``,
-    ``context`` and ``seed`` are accepted for compatibility and ignored: the data is never
-    copied and the fixed effects are always absorbed by fereg's exact solver
-    (``fixef_tol``/``fixef_maxiter`` are its tolerance and iteration cap). ``nthreads=None``
-    uses every CPU.
+    ``context`` (pyfixest semantics) makes more names available to the formula, e.g. user
+    functions and objects: an int captures the variables of the calling frame (``0`` = the
+    caller of ``feols``, ``1`` its caller, ...), a mapping gives them explicitly, and ``None``
+    (default) adds none. Names resolve in the data first, then in ``context``, then among the
+    built-in transforms (``log``, ``np``, ``I``, ``C``, ``poly``, ...), which ``context`` can
+    override; ``predict(newdata=...)`` uses the same context. Terms that need a context object
+    are materialized by formulaic.
+
+    ``copy_data``, ``store_data``, ``solver``, ``demeaner``, ``demeaner_backend``, ``reps`` and
+    ``seed`` are accepted for compatibility and ignored: the data is never copied and the fixed
+    effects are always absorbed by fereg's exact solver (``fixef_tol``/``fixef_maxiter`` are its
+    tolerance and iteration cap). ``nthreads=None`` uses every CPU.
     """
+    context = _capture_context(context)
     return _run(
         fml,
         data,
@@ -323,17 +356,28 @@ def feols(
         fsplit=fsplit,
         nthreads=nthreads,
         use_compression=use_compression,
+        context=context,
     )
 
 
 def _separation(separation_check: list[str] | None, fixef_rm: str) -> tuple[str, bool]:
-    checks = ["fe"] if separation_check is None else list(separation_check)
-    bad = [c for c in checks if c not in ("fe", "ir")]
-    if bad:
-        raise ValueError(f"separation_check must be a list of 'fe' and/or 'ir', got {bad}.")
+    """Core ``fixef_rm`` and ``relu`` of pyfixest's GLM ``separation_check`` (None = ``["fe"]``);
+    the core skips both checks without fixed effects, as pyfixest."""
+    # pyfixest `_estimation_input_checks`
+    if separation_check is not None:
+        if not isinstance(separation_check, list):
+            raise TypeError("The function argument `separation_check` must be of type list.")
+        if not all(x in ["fe", "ir"] for x in separation_check):
+            raise ValueError(
+                "The function argument `separation_check` must be a list of strings containing 'fe' and/or 'ir'."
+            )
+    checks = ["fe"] if separation_check is None else separation_check
     if fixef_rm not in ("singleton", "none"):
         raise ValueError("fixef_rm must be 'singleton' or 'none'.")
-    core_rm = "perfect" if "fe" in checks else fixef_rm
+    if "fe" not in checks:
+        core_rm = fixef_rm
+    else:
+        core_rm = "perfect" if fixef_rm == "singleton" else "perfect_only"
     return core_rm, "ir" in checks
 
 
@@ -360,7 +404,7 @@ def fepois(
     copy_data: bool = True,
     store_data: bool = True,
     lean: bool = False,
-    context=None,
+    context: int | Mapping[str, Any] | None = None,
     split: str | None = None,
     fsplit: str | None = None,
     nthreads: int | None = None,
@@ -368,10 +412,13 @@ def fepois(
     """Poisson regression with high-dimensional fixed effects (pyfixest ``fepois``).
 
     ``separation_check=None`` means ``["fe"]`` (drop fixed-effect groups whose outcome is all
-    zero); ``"ir"`` adds the ReLU separation check. ``vcov`` / ``vcov_kwargs`` take every
-    estimator of :func:`feols` (here computed from the IRLS-weighted working residuals); HC2/HC3
-    with fixed effects is a fereg extension.
+    zero); ``"ir"`` adds the ReLU separation check. As in pyfixest, both run only in models with
+    fixed effects, and dropped observations are reported by the warning "N observations removed
+    because of separation.". ``vcov`` / ``vcov_kwargs`` take every estimator of :func:`feols`
+    (here computed from the IRLS-weighted working residuals); HC2/HC3 with fixed effects is a
+    fereg extension. ``context`` as in :func:`feols`.
     """
+    context = _capture_context(context)
     core_rm, relu = _separation(separation_check, fixef_rm)
     return _run(
         fml,
@@ -396,6 +443,7 @@ def fepois(
         split=split,
         fsplit=fsplit,
         nthreads=nthreads,
+        context=context,
     )
 
 
@@ -420,7 +468,7 @@ def feglm(
     copy_data: bool = True,
     store_data: bool = True,
     lean: bool = False,
-    context=None,
+    context: int | Mapping[str, Any] | None = None,
     split: str | None = None,
     fsplit: str | None = None,
     accelerate: bool = True,
@@ -433,11 +481,19 @@ def feglm(
     """GLM with high-dimensional fixed effects (pyfixest ``feglm``).
 
     ``family`` is ``"logit"``, ``"poisson"`` (same as :func:`fepois`) or ``"gaussian"`` (OLS
-    estimates with normal-based inference). ``weights``, ``weights_type`` and ``offset`` are
+    estimates with normal-based inference). ``separation_check`` as in :func:`fepois`, for every
+    family as in pyfixest (``"fe"`` drops the fixed-effect groups whose outcome is all <= 0;
+    ``"ir"`` treats the outcome as a Poisson outcome; with ``"gaussian"`` it needs a
+    non-negative outcome when there are zeros). ``weights``, ``weights_type`` and ``offset`` are
     fereg extensions (pyfixest's ``feglm`` has neither). ``vcov`` / ``vcov_kwargs`` take every
     estimator of :func:`feols`; extensions as there, plus logit CRV3 (fereg's leave-one-cluster-out
-    refits are logit fits, where pyfixest refits a Poisson model).
+    refits are logit fits, where pyfixest refits a Poisson model). Deliberate differences from
+    pyfixest 0.60.0: gaussian iid variances are scaled by the residual variance (pyfixest's
+    ``Feglm._vcov_iid`` fixes the dispersion at 1), and the ``"ir"`` check also works after
+    rows were dropped before it (pyfixest's then misaligns its predictions and drops nothing).
+    ``context`` as in :func:`feols`.
     """
+    context = _capture_context(context)
     if family == "poisson":
         return fepois(
             fml,
@@ -460,18 +516,16 @@ def feglm(
             split=split,
             fsplit=fsplit,
             nthreads=nthreads,
+            context=context,
         )
     if family == "probit":
         raise NotImplementedError("probit is not supported by fereg.")
     if family not in ("logit", "gaussian"):
         raise ValueError(f"family must be 'logit', 'poisson' or 'gaussian', got '{family}'.")
-    if family == "gaussian":
-        if offset is not None:
-            raise NotImplementedError("offset is not supported with family='gaussian'.")
-        core_rm, relu, model = fixef_rm, False, "ols"
-        _separation(separation_check, fixef_rm)
-    else:
-        (core_rm, relu), model = _separation(separation_check, fixef_rm), "logit"
+    if family == "gaussian" and offset is not None:
+        raise NotImplementedError("offset is not supported with family='gaussian'.")
+    # pyfixest runs its GLM separation checks for every family (gaussian too).
+    (core_rm, relu), model = _separation(separation_check, fixef_rm), "ols" if family == "gaussian" else "logit"
     return _run(
         fml,
         data,
@@ -495,4 +549,5 @@ def feglm(
         split=split,
         fsplit=fsplit,
         nthreads=nthreads,
+        context=context,
     )

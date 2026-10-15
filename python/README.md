@@ -38,6 +38,16 @@ or `"60mi"`, default deduced as fixest; `pixel`, `distance="triangular"|"spheric
 Not implemented: probit; `nid` variances (raise `NotImplementedError`); wild bootstrap,
 `ccv`, `decompose`, `ritest`, plotting and DiD helpers.
 
+Formulas can use functions and objects from the caller through pyfixest's `context=`
+(`context=0`: the calling frame; an int `k`: `k` frames further up; a mapping: the names it
+gives; default `None`: none), e.g. `fereg.feols("y ~ f(x) | firm", df, context={"f": f})`.
+Separation checks as in pyfixest (`separation_check=["fe"]` by default, `"ir"`; every GLM
+family, models with fixed effects only), with its warning "N observations removed because of
+separation.". Deliberate differences from pyfixest 0.60.0: gaussian `feglm` iid variances are
+scaled by the residual variance (pyfixest's `Feglm._vcov_iid` fixes the dispersion at 1), and
+the `"ir"` check also works after rows were dropped before it (pyfixest's misaligns its
+predictions then and drops nothing).
+
 `nthreads` (default: all cores) sets the number of threads. Results do not depend on it.
 
 The same core powers the Stata commands `fereg`/`feppml`/`felogit` and the R package `fereg`:

@@ -15,7 +15,9 @@ import ast
 import itertools
 import re
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -360,6 +362,14 @@ class _NotNative(Exception):
     """The factor needs formulaic."""
 
 
+def _has_formulaic() -> bool:
+    try:
+        import formulaic  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _pf_log(array):
     """pyfixest's `log`: NaN (with a warning) for non-positive or non-finite input."""
     array = np.asarray(array, dtype=np.float64)
@@ -596,11 +606,17 @@ def _apply_bin(s: pd.Series, bins) -> pd.Series:
 
 
 class _Evaluator:
-    """Evaluates factors natively and caches them by expression."""
+    """Evaluates factors natively and caches them by expression. Names resolve as in
+    formulaic: data columns, then the user `context`, then the transforms; a factor that
+    uses a context object (other than a number or numpy itself) goes to formulaic."""
 
-    def __init__(self, frame: _Frame):
+    def __init__(self, frame: _Frame, context: Mapping[str, Any] | None = None):
         self.frame = frame
+        self.context = context or {}
         self.cache: dict[str, object] = {}
+
+    def _in_context(self, name: str) -> bool:
+        return name not in self.frame.columns and name in self.context
 
     def factor(self, f) -> object:
         """`f` is a formula.Factor."""
@@ -610,15 +626,25 @@ class _Evaluator:
 
     def _eval(self, f):
         if f.kind == "name":
+            # context objects, and missing names when formulaic can report them as
+            # pyfixest does (FactorEvaluationError), go to formulaic
+            if self._in_context(f.expr) or (
+                f.expr not in self.frame.columns and _has_formulaic()
+            ):
+                raise _NotNative(f.expr)
             return self.lookup(f.expr)
         if f.kind != "python":
             raise _NotNative(f.expr)
         tree = ast.parse(f.expr, mode="eval").body
-        if isinstance(tree, ast.Call) and isinstance(tree.func, ast.Name):
+        if (
+            isinstance(tree, ast.Call)
+            and isinstance(tree.func, ast.Name)
+            and tree.func.id in ("C", "i")
+            and not self._in_context(tree.func.id)
+        ):
             if tree.func.id == "C":
                 return self._c(tree, f.expr)
-            if tree.func.id == "i":
-                return self._i(tree)
+            return self._i(tree)
         if "`" in f.expr:
             raise _NotNative(f.expr)
         value = self._expr(tree)
@@ -638,6 +664,7 @@ class _Evaluator:
             len(call.args) != 1
             or call.keywords
             or not isinstance(call.args[0], ast.Name)
+            or self._in_context(call.args[0].id)
         ):
             raise _NotNative(expr)
         name = call.args[0].id
@@ -698,6 +725,10 @@ class _Evaluator:
                 if values is None:
                     raise _NotNative(node.id)
                 return values
+            value = self.context.get(node.id) if self._in_context(node.id) else None
+            # a number from the context (formulaic evaluates it the same way)
+            if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_)):
+                return value
             raise _NotNative(node.id)
         if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
             with np.errstate(all="ignore"):
@@ -732,6 +763,7 @@ class _Evaluator:
             isinstance(node.value, ast.Name)
             and node.value.id in _MODULES
             and node.value.id not in self.frame.columns
+            and self.context.get(node.value.id, np) is np
         ):
             obj = getattr(_MODULES[node.value.id], node.attr, None)
             if obj is not None:
@@ -743,6 +775,7 @@ class _Evaluator:
             isinstance(node, ast.Name)
             and node.id in _FUNCS
             and node.id not in self.frame.columns
+            and node.id not in self.context
         ):
             return _FUNCS[node.id]
         if isinstance(node, ast.Attribute):
@@ -843,35 +876,80 @@ def _materialize(intercept: bool, terms: tuple[Term, ...], values: dict):
 # ---------------------------------------------------------------------------
 
 
+def _formulaic(texts: list[str]):
+    try:
+        import formulaic
+    except ImportError as e:
+        terms = ", ".join(texts)
+        raise ImportError(
+            f"fereg: `{terms}` needs formulaic for terms the native parser does not support "
+            "(pip install formulaic)."
+        ) from e
+    return formulaic
+
+
+def _fallback_inputs(frame: _Frame, texts: list[str], context: Mapping[str, Any] | None):
+    """The data columns the formula texts use and the formulaic context: pyfixest's (its
+    `log`; `sqrt` is a fereg addition) under the user `context`, which overrides it."""
+    identifiers = set(re.findall(r"[A-Za-z_][\w\.]*|(?<=`)[^`]+(?=`)", " ".join(texts)))
+    full = frame.pandas_columns(sorted(identifiers & frame.columns))
+    return full, {"log": _pf_log, "sqrt": np.sqrt, **(context or {})}
+
+
+def _formulaic_column(frame: _Frame, expr: str, context: Mapping[str, Any] | None):
+    """`expr` materialized alone by formulaic on every row (NaN = missing): its columns."""
+    formulaic = _formulaic([expr])
+    full, ctx = _fallback_inputs(frame, [expr], context)
+    return formulaic.Formula(f"0 + {expr}").get_model_matrix(
+        full, na_action="ignore", output="pandas", context=ctx
+    )
+
+
+def _formulaic_lhs(frame: _Frame, expr: str, context: Mapping[str, Any] | None) -> np.ndarray:
+    """The dependent variable `expr` evaluated by formulaic (pyfixest's left-hand side)."""
+    m = _formulaic_column(frame, expr, context)
+    if m.shape[1] != 1:
+        raise TypeError("The dependent variable must be numeric.")
+    return m.iloc[:, 0].to_numpy(dtype=np.float64)
+
+
+def _formulaic_numeric(frame: _Frame, expr: str, context: Mapping[str, Any] | None, text: str):
+    """A numeric factor formulaic evaluates (a context function, say) as a native value, so
+    that it can sit next to `i()` (the formulaic fallback cannot): only stateless factors
+    giving one numeric column; otherwise the fallback's error."""
+    error = FormulaSyntaxError(f"i() cannot be combined with terms that need formulaic: `{text}`")
+    if not _has_formulaic():
+        raise error
+    m = _formulaic_column(frame, expr, context)
+    spec = m.model_spec
+    if m.shape[1] != 1 or spec.factor_contrasts or spec.transform_state:
+        raise error
+    return _Num(expr, m.iloc[:, 0].to_numpy(dtype=np.float64), derived=True)
+
+
 def _formulaic_part(
-    frame: _Frame, parts: dict[str, str], nulls: np.ndarray, like_specs: dict | None
+    frame: _Frame,
+    parts: dict[str, str],
+    nulls: np.ndarray,
+    like_specs: dict | None,
+    context: Mapping[str, Any] | None = None,
 ):
     """Materialize one-sided formula parts with formulaic. Factors are
     evaluated on all rows (stateful transforms such as `poly` see the full
     data, as in pyfixest); rows in `nulls` are dropped before encoding, so
     categorical levels come from the joint estimation sample. With
     `like_specs` (per-part model specs of a training design) the training
-    encodings are reused.
+    encodings are reused. Names resolve in the data, then `context` (the
+    user's), then formulaic's transforms.
     Returns ({part: ([(name, values on kept rows, term text)], kept row
     positions, model spec)}, joint null mask)."""
     for text in parts.values():
-        if re.search(r"\bi\(", text):
+        if re.search(r"\bi\(", text) and "i" not in (context or {}):
             raise FormulaSyntaxError(
                 f"i() cannot be combined with terms that need formulaic: `{text}`"
             )
-    try:
-        import formulaic
-    except ImportError as e:
-        terms = ", ".join(parts.values())
-        raise ImportError(
-            f"fereg: `{terms}` needs formulaic for terms the native parser does not support "
-            "(pip install formulaic)."
-        ) from e
-    identifiers = set(
-        re.findall(r"[A-Za-z_][\w\.]*|(?<=`)[^`]+(?=`)", " ".join(parts.values()))
-    )
-    full = frame.pandas_columns(sorted(identifiers & frame.columns))
-    context = {"log": _pf_log, "sqrt": np.sqrt}
+    formulaic = _formulaic(list(parts.values()))
+    full, context = _fallback_inputs(frame, list(parts.values()), context)
     # Each part is a plain formula (structured formulas ignore `drop_rows`).
     # Rows a part drops for its own missing values join the sample, and the
     # parts are re-encoded until every part sees the same joint sample.
@@ -949,6 +1027,7 @@ def build_design(
     vcov_columns: dict[str, str | None] | None = None,
     drop_intercept: bool = False,
     like: Design | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> Design:
     """Host columns of one model.
 
@@ -957,18 +1036,26 @@ def build_design(
     predict); `y` may then be absent, instruments are not built, and rows
     with a categorical value unseen in training are flagged in `drop`.
     `vcov_columns` names the time / panel / coordinate columns of the variance
-    matrix (`VcovSpec.columns()`; None = not used).
+    matrix (`VcovSpec.columns()`; None = not used). `context` is the captured
+    pyfixest `context` mapping: formula names that are not data columns resolve
+    there before formulaic's transforms (factors using it go to formulaic).
     """
     frame = _Frame(data)
     n = frame.n
-    ev = _Evaluator(frame)
+    ev = _Evaluator(frame, context)
 
     # --- dependent variable ---------------------------------------------------
     y_factor = _single_factor(f.depvar, "dependent variable")
     y_name = y_factor.expr
     y = None
+    y_fallback = None  # missing values of a formulaic-evaluated dependent variable
     if like is None or not _missing_columns(frame, y_factor):
-        y = _check_numeric(_eval_native(ev, y_factor), "dependent variable")
+        try:
+            y = _check_numeric(ev.factor(y_factor), "dependent variable")
+        except _NotNative:
+            # pyfixest evaluates the left-hand side with formulaic as well
+            y = _formulaic_lhs(frame, y_factor.expr, context)
+            y_fallback = np.isnan(y)
 
     # --- formula parts ----------------------------------------------------------
     endog_text = " + ".join(f.endog)
@@ -985,14 +1072,20 @@ def build_design(
 
     fallback: dict[str, str] = {}
     for key, (_, terms) in parts.items():
+        text = second_text if key == "second" else f"{f.inst_text} + {f.rhs_text}"
+        # parts with a native i() keep it: their other factors are evaluated one by one
+        native_i = re.search(r"\bi\(", text) is not None and not ev._in_context("i")
         try:
             for term in terms:
                 for fac in term.factors:
-                    ev.factor(fac)
+                    try:
+                        ev.factor(fac)
+                    except _NotNative:
+                        if not native_i:
+                            raise
+                        ev.cache[fac.expr] = _formulaic_numeric(frame, fac.expr, context, text)
         except _NotNative:
-            fallback[key] = (
-                second_text if key == "second" else f"{f.inst_text} + {f.rhs_text}"
-            )
+            fallback[key] = text
 
     # --- fixed effects, clusters, slopes, weights, offset ------------------------
     factors: list[FactorColumn] = []
@@ -1069,6 +1162,7 @@ def build_design(
             add_drop(v.missing())
     for c in cat_sources:
         add_drop(c.missing())
+    add_drop(y_fallback)
 
     levels_state: dict = {}
     fallback_cols: dict[str, list] = {}
@@ -1090,7 +1184,7 @@ def build_design(
                 nulls |= m
         if fallback:
             like_specs = like.levels.get("__formulaic__") if like is not None else None
-            parts_out, joint = _formulaic_part(frame, fallback, nulls, like_specs)
+            parts_out, joint = _formulaic_part(frame, fallback, nulls, like_specs, context)
             levels_state["__formulaic__"] = {
                 key: spec for key, (_, _, spec) in parts_out.items()
             }
@@ -1196,11 +1290,3 @@ def _missing_columns(frame: _Frame, factor) -> bool:
         return factor.expr not in frame.columns
     return not _expr_variables(factor.expr) <= frame.columns
 
-
-def _eval_native(ev: _Evaluator, factor):
-    try:
-        return ev.factor(factor)
-    except _NotNative as e:
-        raise FormulaSyntaxError(
-            f"Unsupported dependent variable expression `{factor.expr}`"
-        ) from e

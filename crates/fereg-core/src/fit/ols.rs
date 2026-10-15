@@ -190,7 +190,7 @@ struct Regressor {
 }
 
 pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
-    let Sample { mut session, dropped, .. } = sample;
+    let Sample { mut session, dropped, levels_before_separation, .. } = sample;
     let mut t = std::time::Instant::now();
     let n = session.n();
     let has_fe = !input.fe.is_empty();
@@ -360,11 +360,19 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     // Variance matrix (through the same state as post-hoc requests).
     let fweights = spec.flavor == Flavor::Pyfixest && spec.weights_type == WeightsType::Fweights && w_rows.is_some();
     let n_eff = if fweights { sumw } else { n as f64 };
-    let np = nparams(k, &session);
     let terms = session.terms();
+    // Levels per term in the degrees of freedom: pyfixest's `feglm(family="gaussian")` counts
+    // those present before its separation checks (as for logit).
+    let mut before = levels_before_separation.map(Vec::into_iter);
+    let df_sizes: Vec<usize> = terms.iter().map(|t| before.as_mut().filter(|_| t.intercept).and_then(Iterator::next).unwrap_or(t.g)).collect();
+    let np = nparams_with(k, terms, &df_sizes);
     let fe_names = |ft: &super::FeTerm| -> Vec<&str> { ft.factors.iter().map(|&f| input.factor_names[f].as_str()).collect() };
-    let fe_info: Vec<FeInfo> =
-        terms.iter().zip(&input.fe).map(|(t, ft)| FeInfo { codes: &t.codes, g: t.g, intercept: t.intercept, names: fe_names(ft) }).collect();
+    let fe_info: Vec<FeInfo> = terms
+        .iter()
+        .zip(&input.fe)
+        .zip(&df_sizes)
+        .map(|((t, ft), &g)| FeInfo { codes: &t.codes, g, intercept: t.intercept, names: fe_names(ft) })
+        .collect();
     let cl_info: Vec<ClusterInfo> = session
         .clusters()
         .iter()
@@ -589,7 +597,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     let fe_sizes: Vec<usize> = terms.iter().map(|t| t.g).collect();
     let row_order = if spec.keep_state { session.row_order().to_vec() } else { Vec::new() };
     let weights = session.weights.take();
-    let state_fe = state_terms(std::mem::take(&mut session.terms), input, &fe_sizes);
+    let state_fe = state_terms(std::mem::take(&mut session.terms), input, &df_sizes);
     drop(session);
     let fixef = match &fe_levels {
         Some(l) if spec.keep_fixef => fixef::fixef_values(&state_fe, &obs, l, spec.fixef_norm, pool)?,

@@ -481,6 +481,7 @@ fn parse_spec(
             "none" => FixefRm::None,
             "singleton" => FixefRm::Singleton,
             "perfect" => FixefRm::Perfect,
+            "perfect_only" => FixefRm::PerfectOnly,
             _ => return Err(bad("fixef_rm", fixef_rm)),
         },
         fixef_norm: parse_fixef_norm(fixef_norm)?,
@@ -503,12 +504,15 @@ fn parse_spec(
 /// leverage of the fixed effects), CRV3 for IV and logit (logit refits are logit), Newey-West /
 /// Driscoll-Kraay for IV at estimation, Driscoll-Kraay without a panel variable, and Conley
 /// (fixest's estimator with the HC1 correction N / (N - df_k)). HC2/HC3 with IV is an error.
+/// `gaussian_glm` marks a pyfixest-flavor `model="ols"` as pyfixest's `feglm(family="gaussian")`
+/// (its separation checks run: `fixef_rm="perfect"` and `relu`; `FitSpec::gaussian_glm`).
 #[pyfunction]
 #[pyo3(signature = (
     y, x, endog, inst, factors, factor_names, fe, slopes, weights=None, offset=None,
     cluster=Vec::new(), drop=None, *, time=None, panel=None, lat=None, lon=None, model="ols",
     flavor="pyfixest", intercept=true, vcov="iid", lag=None, cutoff=None, pixel=0.0,
     spherical=false, ssc=None, weights_type="aweights", fixef_rm="singleton", relu=false, mu=false,
+    gaussian_glm=false,
     collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, glm_tol=1e-8, glm_maxiter=25,
     keep_resid=true, keep_fixef=true, fixef_norm="minnorm", keep_state=true, threads=0, verbose=0
 ))]
@@ -544,6 +548,7 @@ fn fit<'py>(
     fixef_rm: &str,
     relu: bool,
     mu: bool,
+    gaussian_glm: bool,
     collin_tol: f64,
     fixef_tol: f64,
     fixef_maxiter: usize,
@@ -560,6 +565,7 @@ fn fit<'py>(
         intercept,
         ssc: parse_ssc(ssc)?,
         separation: Separation { relu, mu },
+        gaussian_glm,
         collin_tol,
         fixef_tol,
         fixef_maxiter,
