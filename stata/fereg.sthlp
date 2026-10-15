@@ -318,6 +318,10 @@ squares), {cmd:fereg} prints a note after the table that the standard errors are
 may be numbered differently.{p_end}
 {phang2}o Notes that the plugin prints (e.g. the multi-way clustering adjustment) may appear before the
 collinearity notes rather than after them.{p_end}
+{phang2}o After the Cameron-Gelbach-Miller adjustment of multi-way clustered standard errors, {cmd:reghdfe}
+sometimes posts a zero {cmd:e(V)} (standard errors shown as "."), with the warning "variance matrix is
+nonsymmetric or highly singular", because the two triangles of its adjusted matrix differ in the last digit;
+{cmd:fereg} posts the adjusted matrix.{p_end}
 {phang2}o Extensions of the variance options (see {help fereg##variance:Variance estimators}): the
 {cmd:ivreghdfe} kernel options, {cmd:vce(hc2)}, {cmd:vce(hc3)}, {cmd:vce(crv3)} and {cmd:vce(conley)}.
 {cmd:ivreghdfe}'s combination errors are raised before estimation (after the singleton message in

@@ -581,6 +581,9 @@ pub(crate) fn sym_eigen(a: &[f64], k: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Clips negative eigenvalues: returns U*diag(max(lambda, 0))*U^T, or `None` when min lambda >= 0.
+/// The result is exactly symmetric (the lower triangle is computed and mirrored, as Mata's
+/// `quadcross(U', lambda, U')` in reghdfe): Stata rejects a V whose triangles differ in the last
+/// bit as "nonsymmetric or highly singular" and posts zero standard errors.
 fn clip_psd(v: &[f64], k: usize) -> Option<Vec<f64>> {
     let (lambda, u) = sym_eigen(v, k);
     if !lambda.iter().any(|&l| l < 0.0) {
@@ -593,12 +596,22 @@ fn clip_psd(v: &[f64], k: usize) -> Option<Vec<f64>> {
         }
         for i in 0..k {
             let ui = u[i * k + e] * l;
-            for j in 0..k {
+            for j in 0..=i {
                 out[i * k + j] += ui * u[j * k + e];
             }
         }
     }
+    make_symmetric(&mut out, k);
     Some(out)
+}
+
+/// Mata `_makesymmetric`: copies the lower triangle of the k x k row-major matrix to the upper one.
+pub(crate) fn make_symmetric(v: &mut [f64], k: usize) {
+    for i in 0..k {
+        for j in 0..i {
+            v[j * k + i] = v[i * k + j];
+        }
+    }
 }
 
 /// reghdfe `reghdfe_fix_psd` (Cameron-Gelbach-Miller): if V (k x k, symmetric) has a negative
@@ -717,6 +730,32 @@ mod tests {
                 let r: f64 = (0..3).map(|e| u[i * 3 + e] * l[e] * u[j * 3 + e]).sum();
                 assert!((r - a[i * 3 + j]).abs() < 1e-12);
             }
+        }
+    }
+
+    #[test]
+    fn fix_psd_returns_an_exactly_symmetric_psd_matrix() {
+        // Indefinite two-way clustered V's, with and without a reported constant: Stata rejects a
+        // V whose two triangles differ in the last bit ("nonsymmetric or highly singular").
+        let mut rng = crate::rng::SplitMix64::new(20261015);
+        for trial in 0..400 {
+            let k = 2 + trial % 5;
+            let a: Vec<f64> = (0..k * k).map(|_| rng.next_f64() - 0.5).collect();
+            let d: Vec<f64> = (0..k).map(|e| if e == 0 { -0.3 * rng.next_f64() } else { rng.next_f64() }).collect();
+            let mut v: Vec<f64> = (0..k * k).map(|ij| (0..k).map(|e| a[(ij / k) * k + e] * d[e] * a[(ij % k) * k + e]).sum()).collect();
+            make_symmetric(&mut v, k);
+            let report_constant = trial % 2 == 1;
+            assert!(fix_psd(&mut v, k, report_constant), "trial {trial}: V is indefinite");
+            for i in 0..k {
+                for j in 0..i {
+                    assert_eq!(v[i * k + j].to_bits(), v[j * k + i].to_bits(), "trial {trial}: V[{i},{j}] != V[{j},{i}]");
+                }
+            }
+            let scale = v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            let kb = if report_constant { k - 1 } else { k };
+            let block: Vec<f64> = (0..kb * kb).map(|ij| v[(ij / kb) * k + ij % kb]).collect();
+            let (lambda, _) = sym_eigen(&block, kb);
+            assert!(lambda.iter().all(|&l| l >= -1e-12 * scale), "trial {trial}: regressor block not psd: {lambda:?}");
         }
     }
 

@@ -543,6 +543,9 @@ impl Session {
             }
             _ => {}
         }
+        // Stata posts V only when it is exactly symmetric; some of the products above round
+        // differently in the two triangles.
+        vcov::make_symmetric(&mut v_s, msize);
         ctx.check()?;
 
         // Wald F on the non-constant coefficients (standardized scale, as reghdfe).

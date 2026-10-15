@@ -18,7 +18,7 @@ program _rf_load
 		capture plugin call _rf_plugin, version
 		if (_rc == 199) {
 			di as err "fereg: could not load fereg.plugin; reinstall with"
-			di as err `"  net install fereg, from("https://raw.githubusercontent.com/leoliu0/fereg/gh-pages/stata") replace"'
+			di as err `"  net install fereg, from("https://leoliu0.github.io/fereg/stata") replace"'
 			exit 601
 		}
 		else if (_rc) {
@@ -47,3 +47,10 @@ program _rf_load
 end
 
 capture program _rf_plugin, plugin using("fereg.plugin")
+* ssc install copies the plugin of every platform under its own name
+if (_rc) {
+	if (c(os) == "Windows") local _rf_os win64
+	else if (c(os) == "MacOSX") local _rf_os macos-universal
+	else local _rf_os linux64
+	capture program _rf_plugin, plugin using("fereg.`_rf_os'.plugin")
+}

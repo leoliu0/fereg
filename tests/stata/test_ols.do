@@ -52,7 +52,22 @@ foreach w in "aw=mpg" "fw=fwv" "pw=mpg" {
 	check price weight length [`w'], absorb(rep78) vce(cluster rep78)
 }
 check price weight length, absorb(rep78 foreign)
-check price weight length, absorb(rep78 foreign) vce(cluster foreign rep78)
+* Two clusters in foreign: reghdfe 6.13.1 posts e(V) = 0 here ("variance matrix is nonsymmetric
+* or highly singular") because its V after the Cameron-Gelbach-Miller fix is not exactly
+* symmetric (its triangles differ in the last bit); fereg posts the fixed V. All the rest is
+* compared.
+quietly reghdfe price weight length, absorb(rep78 foreign) vce(cluster foreign rep78) tol(1e-12)
+mata: assert(allof(st_matrix("e(V)"), 0))
+estimates store R
+if ("$RF_MOCK" != "") rf_stage_mock, indepvars(weight length)
+fereg price weight length, absorb(rep78 foreign) vce(cluster foreign rep78)
+estimates store F
+rf_compare_e R F, xscalars(ic) nov `=cond("$RF_MOCK" != "", "nosample", "")'
+if ("$RF_MOCK" == "") {
+	mata: st_local("sym", strofreal(issymmetric(st_matrix("e(V)"))))
+	assert `sym' == 1
+	assert _se[weight] > 0 & _se[weight] < . & _se[length] > 0 & _se[length] < .
+}
 * no absorbed FEs
 check price weight length
 check price weight length, noabsorb vce(robust)
@@ -280,20 +295,6 @@ di as result "## of categorical variables passed"
 * ---------------------------------------------------------------------------
 * exact fit: a note after the table (display only), absent otherwise
 * ---------------------------------------------------------------------------
-capture program drop rf_log_has
-program rf_log_has, rclass
-	args file text
-	tempname fh
-	file open `fh' using `"`file'"', read text
-	local found 0
-	file read `fh' line
-	while (r(eof) == 0) {
-		if (strpos(`"`macval(line)'"', `"`text'"')) local found 1
-		file read `fh' line
-	}
-	file close `fh'
-	return scalar found = `found'
-end
 clear
 set seed 11
 set obs 5000
@@ -321,6 +322,39 @@ log close exactfit
 rf_log_has "`lg'" "note: exact fit"
 assert r(found) == 0
 di as result "exact-fit note passed"
+
+* ---------------------------------------------------------------------------
+* two-way clustering with the Cameron-Gelbach-Miller eigenvalue fix and a reported constant:
+* the fixed V must be exactly symmetric, or Stata posts zero standard errors ("variance matrix is
+* nonsymmetric or highly singular"), as fereg 0.4.0 did on these data
+* ---------------------------------------------------------------------------
+clear
+set seed 1
+set obs 3000
+gen id = ceil(runiform()*150)
+gen t = ceil(runiform()*12)
+bysort id t: keep if _n == 1
+gen z = rnormal()
+gen x1 = z + rnormal()
+gen y = x1 + rnormal()
+* (unused draws, kept so that these data need the fix)
+gen cnt = rpoisson(exp(0.2*x1))
+gen lat = 30 + 10*runiform()
+gen lon = -80 + 10*runiform()
+gen c1 = ceil(runiform()*30)
+foreach cl in "c1 t" "t c1" {
+	tempfile lg
+	log using "`lg'", text name(cgm) replace
+	check y x1, absorb(id t) vce(cluster `cl')
+	log close cgm
+	rf_log_has "`lg'" "VCV matrix was non-positive semi-definite"
+	assert r(found) == 1
+	mata: st_local("sym", strofreal(issymmetric(st_matrix("e(V)"))))
+	assert `sym' == 1
+	assert _se[x1] > 0 & _se[x1] < .
+	assert _se[_cons] > 0 & _se[_cons] < .
+}
+di as result "CGM fix passed"
 
 * ---------------------------------------------------------------------------
 * estat (e(estat_cmd) = fereg_estat): summarize, vce, ic as after reghdfe

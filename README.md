@@ -53,7 +53,7 @@ rerun with `cd bench && uv run python run.py --grid gate`.
 ## Stata
 
 ```stata
-net install fereg, from("https://raw.githubusercontent.com/leoliu0/fereg/gh-pages/stata") replace
+net install fereg, from("https://leoliu0.github.io/fereg/stata") replace
 
 fereg y x1 x2, absorb(firm year) cluster(firm)
 fereg y x1 (x2 = z), absorb(firm year) vce(robust)

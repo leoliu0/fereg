@@ -431,6 +431,33 @@ dcheck hours age ttl_exp, absorb(idcode year##c.tenure) tol(1e-10)
 di as result "slopes passed"
 
 * ---------------------------------------------------------------------------
+* two-way clustering with the Cameron-Gelbach-Miller eigenvalue fix: the fixed V must be exactly
+* symmetric, or Stata posts zero standard errors ("variance matrix is nonsymmetric or highly
+* singular")
+* ---------------------------------------------------------------------------
+clear
+set seed 1
+set obs 3000
+gen id = ceil(runiform()*150)
+gen t = ceil(runiform()*12)
+bysort id t: keep if _n == 1
+gen x1 = rnormal() + rnormal()
+gen cnt = rpoisson(exp(0.2*x1))
+gen c1 = ceil(runiform()*30)
+foreach cl in "c1 t" "t c1" {
+	tempfile lg
+	log using "`lg'", text name(cgm) replace
+	check cnt x1, absorb(id t) vce(cluster `cl') tol(1e-12) sep(fe relu)
+	log close cgm
+	rf_log_has "`lg'" "VCV matrix was non-positive semi-definite"
+	assert r(found) == 1
+	mata: st_local("sym", strofreal(issymmetric(st_matrix("e(V)"))))
+	assert `sym' == 1
+	assert _se[x1] > 0 & _se[x1] < .
+}
+di as result "CGM fix passed"
+
+* ---------------------------------------------------------------------------
 * errors
 * ---------------------------------------------------------------------------
 sysuse auto, clear

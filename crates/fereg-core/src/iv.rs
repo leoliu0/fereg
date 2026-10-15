@@ -502,6 +502,8 @@ impl Session {
             v = M { r: k, c: k, d: meat.iter().map(|x| q * x).collect() };
             rank_v = dense::ginv(&v).1;
         }
+        // Stata posts V only when it is exactly symmetric.
+        v.symmetrize();
         let wmat = zzinv.scale(big_n * big_n / rss);
 
         // Sargan (iid) / Hansen J from two-step efficient GMM residuals (s_gmm1s, s_iegmm).

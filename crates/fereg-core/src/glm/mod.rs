@@ -893,6 +893,8 @@ impl Session {
             df_r = df_r.min(g_min - 1.0);
             n_clust = Some((g_min, cluster_list()));
         }
+        // Stata posts V only when it is exactly symmetric.
+        vcov::make_symmetric(&mut v_s, msize);
 
         // Wald test on the non-constant coefficients.
         let kept_idx: Vec<usize> = (0..k).filter(|&j| !dropped[j]).collect();

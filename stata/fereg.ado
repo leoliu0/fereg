@@ -898,6 +898,10 @@ program Estimate, eclass
 	* (reghdfe's EreturnPost also clears first)
 	ereturn clear
 	if (`K_full' > 0) {
+		* Stata posts a V that is not positive semidefinite (as after the Cameron-Gelbach-Miller
+		* fix with a constant) only when the matrix was stored by Mata, as reghdfe stores it;
+		* -matrix- or a plugin give "variance matrix is nonsymmetric or highly singular"
+		mata: st_matrix(st_local("V"), st_matrix(st_local("V")))
 		matrix colnames `b' = `colnames'
 		matrix colnames `V' = `colnames'
 		matrix rownames `V' = `colnames'
