@@ -137,6 +137,110 @@ test_that("summary of fixef() prints as fixest's", {
   expect_false(out$visible)
 })
 
+# Text of the messages of an expression, and its value.
+with_messages <- function(expr) {
+  msgs <- character(0)
+  value <- withCallingHandlers(expr, message = function(e) {
+    msgs <<- c(msgs, conditionMessage(e))
+    invokeRestart("muffleMessage")
+  })
+  list(value = value, messages = msgs)
+}
+
+test_that("fixef() notes irregular fixed effects as fixest; attributes, print and summary match", {
+  set.seed(1)
+  n <- 60
+  d <- data.frame(a = sample(8, n, TRUE), b = sample(8, n, TRUE), c = sample(6, n, TRUE), x = rnorm(n), z = rnorm(n))
+  # a2 and b2: two connected components.
+  d$a2 <- c(sample(4, 30, TRUE), sample(5:8, 30, TRUE))
+  d$b2 <- c(sample(4, 30, TRUE), sample(5:8, 30, TRUE))
+  d$y <- d$x + rnorm(n)
+  d$cnt <- rpois(n, exp(0.2 * d$x))
+  # Regular: one fixed effect, two or three connected ones. Not regular: a2 and b2 with others.
+  # Varying slopes: fixest orders the terms by number of coefficients (y ~ x1 | year + firm +
+  # id[x2]: id, id[[x2]], firm, year), counts the references in that order and tests them in
+  # its own way (a2[z] + b2 has 2 references, no note).
+  plain_fe <- list(y ~ x | a, y ~ x | a + b, y ~ x | a2 + b2, y ~ x | a + b + c, y ~ x | a2 + b2 + c, y ~ x | a2^c + b2)
+  slopes <- list(y ~ x | a[z] + b, y ~ x | a2 + b2[z], y ~ x | a2[z] + b2, y ~ x | a2[[z]] + b2 + c)
+  cases <- c(
+    lapply(c(plain_fe, slopes), function(f) list(fml = f, data = d, pois = FALSE)),
+    lapply(list(y ~ x1 | year + firm + id[x2], y ~ x1 | year[x2] + firm + id), function(f) list(fml = f, data = panel, pois = FALSE)),
+    list(list(fml = cnt ~ x | a2 + b2, data = d, pois = TRUE))
+  )
+  note <- "NOTE: The fixed-effects are not regular, they cannot be straightforwardly interpreted.\n"
+  n_notes <- 0
+  for (cs in cases) {
+    lab <- deparse(cs$fml)
+    if (cs$pois) {
+      ours <- with_messages(fixef(fe_fepois(cs$fml, cs$data)))
+      theirs <- with_messages(fixest::fixef(fx_fepois(cs$fml, cs$data)))
+    } else {
+      ours <- with_messages(fixef(fe_feols(cs$fml, cs$data)))
+      theirs <- with_messages(fixest::fixef(fx_feols(cs$fml, cs$data)))
+    }
+    expect_identical(ours$messages, theirs$messages, label = lab)
+    n_notes <- n_notes + identical(theirs$messages, note)
+    fo <- ours$value
+    ft <- theirs$value
+    expect_identical(names(fo), names(ft), label = lab)
+    expect_identical(attr(fo, "references"), attr(ft, "references"), label = lab)
+    expect_identical(attr(fo, "exponential"), attr(ft, "exponential"), label = lab)
+    expect_identical(setdiff(names(attributes(fo)), "class"), setdiff(names(attributes(ft)), "class"), label = lab)
+    # fixest recovers the fixed effects of models with varying slopes iteratively, in its own
+    # normalization; the other values agree, printed as fixest's (no print method: only the class
+    # differs).
+    if (!any(grepl("[", names(ft), fixed = TRUE))) {
+      for (k in names(ft)) expect_equal(fo[[k]], ft[[k]], tolerance = 1e-8)
+      printed <- fo
+      class(printed) <- class(ft)
+      expect_identical(capture.output(print(printed)), capture.output(print(ft)), label = lab)
+      expect_identical(capture.output(s <- summary(fo)), capture.output(s <- summary(ft)))
+    }
+  }
+  expect_identical(n_notes, 4)
+
+  # The note is a message, printed at every call; notes = FALSE or option fereg.notes = FALSE
+  # (fixest: notes = FALSE or setFixest_notes(FALSE)) switch it off. fixest's fixef() (nlme's
+  # generic) also dispatches to fereg's method.
+  m <- fe_feols(y ~ x | a2 + b2, d)
+  expect_message(fixef(m), note, fixed = TRUE)
+  expect_message(fixef(m), note, fixed = TRUE)
+  expect_message(fixest::fixef(m), note, fixed = TRUE)
+  expect_silent(fixef(m, notes = FALSE))
+  old <- options(fereg.notes = FALSE)
+  expect_silent(fixef(m))
+  options(old)
+  expect_silent(predict(m, d))
+  expect_identical(fixest::fixef(m, notes = FALSE), fixef(m, notes = FALSE))
+})
+
+test_that("fixef() with only approximate references: fixest's note, values reproducing the fit", {
+  set.seed(1)
+  d <- data.frame(a = sample(10, 40, TRUE), b = sample(10, 40, TRUE), c = sample(10, 40, TRUE), x = rnorm(40))
+  d$y <- d$x + rnorm(40)
+  d$h <- rep(1:2, 20)
+  # Fixed-effect sum of every observation from the values of fixef() (a^h: labels "a_h").
+  fe_sum <- function(f) {
+    unname(Reduce(`+`, lapply(names(f), function(k) {
+      f[[k]][do.call(paste, c(unname(d[strsplit(k, "^", fixed = TRUE)[[1]]]), sep = "_"))]
+    })))
+  }
+  for (fml in list(y ~ x | a + b + c, y ~ x | a^h + b + c, y ~ x | b + c + a^h)) {
+    ours <- fe_feols(fml, d, fixef.rm = "none")
+    theirs <- fx_feols(fml, d, fixef.rm = "none")
+    fo <- with_messages(fixef(ours))
+    ft <- with_messages(fixest::fixef(theirs))
+    expect_identical(fo$messages, ft$messages)
+    expect_match(fo$messages, "The number of references is only approximate.", fixed = TRUE)
+    expect_identical(attr(fo$value, "references"), attr(ft$value, "references"))
+    # fixest solves the values again (by demeaning); both reproduce the fixed-effect sum.
+    s <- unname(fitted(theirs) - coef(theirs)[["x"]] * d$x)
+    expect_equal(fe_sum(fo$value), s, tolerance = 1e-8)
+    expect_equal(fe_sum(ft$value), s, tolerance = 1e-4)
+    expect_equal(predict(ours, d), unname(fitted(theirs)), tolerance = 1e-8)
+  }
+})
+
 test_that("predictions on new data match fixest, unseen levels are NA", {
   ours <- fe_feols(y ~ x1 + x2 + i(h) | id + year, panel)
   theirs <- fx_feols(y ~ x1 + x2 + i(h) | id + year, panel)

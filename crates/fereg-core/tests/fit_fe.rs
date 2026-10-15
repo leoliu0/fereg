@@ -237,3 +237,37 @@ fn lazy_fixef_matches_eager() {
         }
     }
 }
+
+/// `FitState::fixef_references`: in term order, the references of the fixest normalization; in
+/// reverse order, none on the first intercept term, and the same total for two intercept terms
+/// (one per connected component); an order that is not a permutation is an error.
+#[test]
+fn fixef_references_in_order() {
+    let cases: Vec<_> = read_json("fit_fixest_fe.json").list().into_iter().filter(|c| c.get("error").is_none() && !c.at("fe").list().is_empty()).collect();
+    let mut reordered = 0;
+    for j in &cases {
+        let name = j.at("name").str();
+        let case = Case::new(j, FactorKind::F64);
+        let out = fit::fit(&case.input(), &case.spec(Flavor::Fixest), &Ctx::quiet(2)).unwrap();
+        let state = out.state.as_ref().unwrap();
+        let fixef = state.fixef(FixefNorm::Fixest, &Ctx::quiet(2)).unwrap();
+        let q = fixef.iter().map(|f| f.term + 1).max().unwrap();
+        let icpt: Vec<usize> = fixef.iter().filter(|f| f.slope.is_none()).map(|f| f.term).collect();
+        let mut want = vec![0; q];
+        fixef.iter().filter(|f| f.slope.is_none()).for_each(|f| want[f.term] = f.references);
+        let order: Vec<usize> = (0..q).collect();
+        assert_eq!(state.fixef_references(&order, &Ctx::quiet(1)).unwrap(), want, "{name}");
+        let rev: Vec<usize> = (0..q).rev().collect();
+        let r = state.fixef_references(&rev, &Ctx::quiet(3)).unwrap();
+        if let Some(&last) = icpt.last() {
+            assert_eq!(r[last], 0, "{name}");
+        }
+        if icpt.len() == 2 {
+            assert_eq!(r.iter().sum::<usize>(), want.iter().sum::<usize>(), "{name}");
+            reordered += 1;
+        }
+        assert!(state.fixef_references(&order[1..], &Ctx::quiet(1)).is_err(), "{name}");
+        assert!(state.fixef_references(&vec![0; q], &Ctx::quiet(1)).is_err() || q == 1, "{name}");
+    }
+    assert!(reordered >= 3, "{reordered}");
+}

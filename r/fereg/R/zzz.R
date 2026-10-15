@@ -1,6 +1,7 @@
 # Registers methods on generics of suggested packages when (and if) they are loaded:
 # generics::tidy / glance (broom, modelsummary) and the fixest accessors, so that fereg results
-# also work with those functions when fixest is attached after fereg.
+# also work with those functions when fixest is attached after fereg. fixest's fixef() is
+# nlme's generic (re-exported).
 s3_register <- function(pkg, generic, class, fun) {
   register <- function(...) {
     ns <- asNamespace(pkg)
@@ -17,6 +18,6 @@ s3_register <- function(pkg, generic, class, fun) {
   s3_register("fixest", "tstat", "fereg", tstat.fereg)
   s3_register("fixest", "pvalue", "fereg", pvalue.fereg)
   s3_register("fixest", "coeftable", "fereg", coeftable.fereg)
-  s3_register("fixest", "fixef", "fereg", fixef.fereg)
+  s3_register("nlme", "fixef", "fereg", fixef.fereg)
   invisible(NULL)
 }

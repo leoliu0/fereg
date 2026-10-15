@@ -280,14 +280,14 @@ predict.fereg <- function(object, newdata, type = c("response", "link"), ...) {
 # Sum of the fixed effects (and varying slopes) at the rows of `newdata`.
 fixef_predict <- function(object, newdata, env, n) {
   if (length(object$fixef_terms) == 0) return(0)
-  fe <- fixef.fereg(object)
+  fe <- fixef.fereg(object, notes = FALSE)
   raw <- fixef_raw(object)
   out <- rep(0, n)
-  for (k in seq_along(raw)) {
-    f <- raw[[k]]
+  for (f in raw) {
     t <- object$fixef_terms[[f$term]]
     labels <- fe_labels(lapply(t$vars, function(e) eval_var(e, newdata, env)))
-    v <- unname(fe[[k]][match(labels, names(fe[[k]]))])
+    vals <- fe[[fixef_name(object, f)]]
+    v <- unname(vals[match(labels, names(vals))])
     if (!is.na(f$slope)) v <- v * as_num(eval_var(str2lang(object$slope_names[f$slope]), newdata, env), object$slope_names[f$slope])
     out <- out + v
   }
@@ -298,24 +298,33 @@ fixef_predict <- function(object, newdata, env, n) {
 # first use and cached on the object.
 fixef_raw <- function(object) {
   cache <- object$fixef_cache
-  if (is.null(cache$raw)) {
-    if (is.null(object$state)) {
-      stop("fereg: fixed-effect values need the estimation state, which was not kept (lean = TRUE)", call. = FALSE)
-    }
-    cache$raw <- fereg_fixef(object$state, getOption("fereg.nthreads", default_threads()))
-  }
+  if (is.null(cache$raw)) cache$raw <- fixef_state(object, min_norm = FALSE)
   cache$raw
+}
+
+fixef_state <- function(object, min_norm) {
+  if (is.null(object$state)) {
+    stop("fereg: fixed-effect values need the estimation state, which was not kept (lean = TRUE)", call. = FALSE)
+  }
+  fereg_fixef(object$state, getOption("fereg.nthreads", default_threads()), min_norm)
 }
 
 #' Fixed effects of an estimation
 #'
 #' Fixed-effect coefficients with fixest's normalization: the first fixed effect is free, and in
 #' every connected component one level of each other fixed effect is set to 0 (counted in the
-#' `references` attribute). Varying slopes are listed as `fe[[x]]`.
+#' `references` attribute when there are several fixed effects / slopes). Varying slopes are
+#' listed as `fe[[x]]`; with varying slopes, the terms are in fixest's order (by number of
+#' coefficients, decreasing). As fixest, a note says when the fixed effects are not regular (more
+#' references than one per fixed effect after the first), and when, with three fixed effects or
+#' more, these references do not reproduce the estimated fixed effects: the values are then those
+#' of another normalization and the number of references is only approximate.
 #'
 #' @param object A `fereg` object.
+#' @param notes Print the note on irregular fixed effects (option `fereg.notes`, default `TRUE`).
 #' @param ... Not used.
-#' @return A list (class `fereg.fixef`) of named vectors, one per fixed effect / slope.
+#' @return A list (class `fereg.fixef`) of named vectors, one per fixed effect / slope, with
+#'   fixest's attributes `references` and `exponential` (`TRUE` for Poisson models).
 #' @examples
 #' data(trade_toy, package = "fereg")
 #' m <- feols(y ~ x1 + x2 | id + year, trade_toy, nthreads = 2)
@@ -325,34 +334,103 @@ fixef_raw <- function(object) {
 #' @export
 fixef <- function(object, ...) UseMethod("fixef")
 
+#' @rdname fixef
 #' @export
-fixef.fereg <- function(object, ...) {
+fixef.fereg <- function(object, notes = getOption("fereg.notes", TRUE), ...) {
   if (length(object$fixef_terms) == 0) stop("fereg: the estimation has no fixed effects", call. = FALSE)
   if (isTRUE(object$iv_stage == 1)) {
     stop("fereg: fixed-effect values are not available for first-stage models; use fixef() on the second stage", call. = FALSE)
   }
   cache <- object$fixef_cache
-  if (!is.null(cache$fixef)) return(cache$fixef)
-  raw <- fixef_raw(object)
-  out <- list()
-  refs <- integer(0)
-  for (f in raw) {
-    t <- object$fixef_terms[[f$term]]
-    vals <- lapply(object$fe_columns[[f$term]], function(v) v[f$first_obs])
-    v <- stats::setNames(f$values, fe_labels(vals))[fe_order(vals)]
-    name <- if (is.na(f$slope)) t$label else paste0(t$label, "[[", object$slope_names[f$slope], "]]")
-    out[[name]] <- v
-    refs[name] <- as.integer(f$references)
-  }
-  cache$fixef <- structure(out, class = c("fereg.fixef", "list"), references = refs)
+  if (is.null(cache$fixef)) fixef_build(object, cache)
+  if (isTRUE(notes) && !is.null(cache$fixef_note)) message(cache$fixef_note)
   cache$fixef
 }
 
-#' @export
-print.fereg.fixef <- function(x, ...) {
-  print(lapply(unclass(x), identity))
-  cat("References:", paste0(names(attr(x, "references")), ": ", attr(x, "references"), collapse = ", "), "\n")
-  invisible(x)
+# fixest's fixef.fixest: the values, the `references` attribute (more than one vector) and the
+# note on irregular fixed effects, cached in `cache` (`fixef`, `fixef_note`).
+fixef_build <- function(object, cache) {
+  raw <- fixef_raw(object)
+  terms <- vapply(raw, function(f) as.integer(f$term), 0L)
+  slope <- vapply(raw, function(f) !is.na(f$slope), TRUE)
+  refs <- vapply(raw, function(f) as.integer(f$references), 0L)
+  q <- length(unique(terms))
+  if (any(slope)) {
+    # With varying slopes, fixest orders the terms by number of coefficients (levels x vectors),
+    # decreasing (not in multiple-outcome GLMs), and counts the references in that order.
+    ncoef <- object$fixef_sizes[unique(terms)] * tabulate(terms, max(terms))[unique(terms)]
+    multi_glm <- is_glm(object) && "lhs" %in% names(object$refit$m$id)
+    if (!multi_glm && any(ncoef != sort(ncoef, decreasing = TRUE))) {
+      new <- unique(terms)[order(ncoef, decreasing = TRUE)]
+      idx <- unlist(lapply(new, function(k) which(terms == k)))
+      raw <- raw[idx]
+      terms <- terms[idx]
+      slope <- slope[idx]
+      refs <- refs[idx]
+      by_term <- fereg_fixef_references(object$state, new, getOption("fereg.nthreads", default_threads()))
+      refs[!slope] <- by_term[terms[!slope]]
+    }
+  }
+  approx <- FALSE
+  if (!any(slope) && q >= 3 && any(refs > 1)) {
+    # With three fixed effects or more, fixest's references may not reproduce the fixed-effect
+    # sum S of every observation; fixest then solves the values again and keeps the number of
+    # references, as only approximate. Here S comes from the minimum-norm solution.
+    exact <- fixef_state(object, min_norm = TRUE)
+    sum_fe <- s <- 0
+    for (k in seq_along(raw)) {
+      code <- fe_level_codes(object$fe_columns[[terms[k]]], object$obs_selection, raw[[k]]$first_obs)
+      sum_fe <- sum_fe + raw[[k]]$values[code]
+      s <- s + exact[[k]]$values[code]
+    }
+    if (max(abs(sum_fe - s)) > 0.1) {
+      approx <- TRUE
+      raw <- exact
+    }
+  }
+  out <- list()
+  for (f in raw) {
+    vals <- lapply(object$fe_columns[[f$term]], function(v) v[f$first_obs])
+    out[[fixef_name(object, f)]] <- stats::setNames(f$values, fe_labels(vals))[fe_order(vals)]
+  }
+  class(out) <- c("fereg.fixef", "list")
+  if (length(out) > 1) {
+    names(refs) <- names(out)
+    attr(out, "references") <- refs
+    # fixest's test: more than q - 1 references (q: fixed-effect variables), counted over the
+    # vectors selected by its per-variable "no slope" flags, recycled over all the vectors.
+    no_slope <- vapply(split(slope, factor(terms, unique(terms))), function(s) !any(s), TRUE)
+    if (sum(refs[rep_len(no_slope, length(refs))]) > q - 1) {
+      cache$fixef_note <- paste0(
+        "NOTE: The fixed-effects are not regular, they cannot be straightforwardly interpreted.",
+        if (approx) " The number of references is only approximate."
+      )
+    }
+  }
+  attr(out, "exponential") <- identical(object$family$family, "poisson")
+  cache$fixef <- out
+}
+
+fixef_name <- function(object, f) {
+  label <- object$fixef_terms[[f$term]]$label
+  if (is.na(f$slope)) label else paste0(label, "[[", object$slope_names[f$slope], "]]")
+}
+
+# Level (index into the values of `first_obs`) of every estimation row, for the FE variables
+# `cols` (all rows) of one term: interactions are matched on a mixed-radix key of the codes of
+# their variables (exact in doubles below 2^53 combinations, else on the labels).
+fe_level_codes <- function(cols, rows, first_obs) {
+  if (length(cols) == 1) return(match(obs_subset(cols[[1]], rows), cols[[1]][first_obs]))
+  uniq <- lapply(cols, function(v) unique(v[first_obs]))
+  if (prod(lengths(uniq)) >= 2^53) {
+    return(match(fe_labels(lapply(cols, obs_subset, rows)), fe_labels(lapply(cols, function(v) v[first_obs]))))
+  }
+  key_rows <- key_first <- 0
+  for (j in seq_along(cols)) {
+    key_rows <- key_rows * length(uniq[[j]]) + match(obs_subset(cols[[j]], rows), uniq[[j]]) - 1
+    key_first <- key_first * length(uniq[[j]]) + match(cols[[j]][first_obs], uniq[[j]]) - 1
+  }
+  match(key_rows, key_first)
 }
 
 # Layout of fixest's summary.fixest.fixef: a table of counts (integers), means and standard

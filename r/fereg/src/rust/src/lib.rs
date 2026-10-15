@@ -590,12 +590,24 @@ fn fereg_vcov(state: Robj, kind: List, ssc: List, factors: List, factor_names: S
     Ok(vcov_out(&v))
 }
 
-/// Fixed-effect values (fixest normalization) of a fitted model, computed from its state.
+/// Fixed-effect values of a fitted model, computed from its state: fixest's normalization, or
+/// (`min_norm`) the minimum-norm one, which always reproduces the fixed-effect sum of every
+/// observation (fixef() falls back on it where fixest's references are only approximate).
 #[extendr]
-fn fereg_fixef(state: Robj, nthreads: i32) -> Result<Robj> {
+fn fereg_fixef(state: Robj, nthreads: i32, min_norm: bool) -> Result<Robj> {
     let st = state_of(&state)?;
-    let values = st.fixef(FixefNorm::Fixest, &ctx(nthreads)).map_err(core_err)?;
+    let norm = if min_norm { FixefNorm::MinNorm } else { FixefNorm::Fixest };
+    let values = st.fixef(norm, &ctx(nthreads)).map_err(core_err)?;
     Ok(fixef_list(&values))
+}
+
+/// fixest's references per term (term order) with the terms taken in `order` (1-based term
+/// indices).
+#[extendr]
+fn fereg_fixef_references(state: Robj, order: Robj, nthreads: i32) -> Result<Robj> {
+    let st = state_of(&state)?;
+    let refs = st.fixef_references(&indices(&order, "order")?, &ctx(nthreads)).map_err(core_err)?;
+    Ok(Integers::from_values(refs.iter().map(|&r| r as i32)).into())
 }
 
 /// The estimation state behind an external pointer (NULL after `lean = TRUE`; a null pointer
@@ -619,5 +631,6 @@ extendr_module! {
     fn fereg_fit;
     fn fereg_vcov;
     fn fereg_fixef;
+    fn fereg_fixef_references;
     fn fereg_core_version;
 }

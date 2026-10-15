@@ -550,6 +550,14 @@ impl FitState {
         self.inner.fixef(norm, ctx)
     }
 
+    /// fixest's references (`attr(fixef(), "references")`) with the terms taken in `order` (a
+    /// permutation of the term indices; fixest orders the terms of models with varying slopes by
+    /// number of coefficients): per term, in term order, the number of its levels set to 0 by
+    /// [`FixefNorm::Fixest`] over the intercept terms in that order, 0 for slope-only terms.
+    pub fn fixef_references(&self, order: &[usize], ctx: &Ctx) -> Result<Vec<usize>, RfError> {
+        self.inner.fixef_references(order, ctx)
+    }
+
     /// Estimation rows.
     pub fn nobs(&self) -> usize {
         self.inner.obs.len()

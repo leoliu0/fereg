@@ -15,7 +15,7 @@ largest fixed effect exactly and solves the rest by preconditioned conjugate gra
 \details{
 Options: \code{fereg.nthreads} (threads, \code{0} = all cores; default all cores, capped at
 \code{OMP_THREAD_LIMIT}, and 2 under R CMD check) and \code{fereg.notes} (print notes on removed
-observations).
+observations, and \code{\link[=fixef]{fixef()}}'s note on irregular fixed effects).
 }
 \seealso{
 Useful links:

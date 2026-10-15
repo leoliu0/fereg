@@ -8,7 +8,7 @@
 #'
 #' Options: `fereg.nthreads` (threads, `0` = all cores; default all cores, capped at
 #' `OMP_THREAD_LIMIT`, and 2 under R CMD check) and `fereg.notes` (print notes on removed
-#' observations).
+#' observations, and [fixef()]'s note on irregular fixed effects).
 #'
 #' @keywords internal
 #' @useDynLib fereg, .registration = TRUE

@@ -186,4 +186,19 @@ impl State {
         let Some(fe) = &self.fixef else { return Ok(Vec::new()) };
         par::with_pool(par::threads_for(ctx.threads, self.obs.len()), |pool| fixef::fixef_values(&self.fe, &self.obs, fe, norm, pool))?
     }
+
+    pub(crate) fn fixef_references(&self, order: &[usize], ctx: &Ctx) -> Result<Vec<usize>, RfError> {
+        let q = self.fe.len();
+        let mut seen = vec![false; q];
+        if order.len() != q || order.iter().any(|&t| t >= q || std::mem::replace(&mut seen[t], true)) {
+            return Err(RfError::InvalidInput("the term order must be a permutation of the fixed-effect terms".into()));
+        }
+        let icpt: Vec<usize> = order.iter().copied().filter(|&t| self.fe[t].intercept).collect();
+        let codes: Vec<&[u32]> = icpt.iter().map(|&t| self.fe[t].codes.as_slice()).collect();
+        let sizes: Vec<usize> = icpt.iter().map(|&t| self.fe[t].levels).collect();
+        let refs = par::with_pool(par::threads_for(ctx.threads, self.obs.len()), |pool| fixef::references(&codes, &sizes, pool))?;
+        let mut out = vec![0; q];
+        icpt.iter().zip(refs).for_each(|(&t, r)| out[t] = r);
+        Ok(out)
+    }
 }

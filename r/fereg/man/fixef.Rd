@@ -2,22 +2,33 @@
 % Please edit documentation in R/methods.R
 \name{fixef}
 \alias{fixef}
+\alias{fixef.fereg}
 \title{Fixed effects of an estimation}
 \usage{
 fixef(object, ...)
+
+\method{fixef}{fereg}(object, notes = getOption("fereg.notes", TRUE), ...)
 }
 \arguments{
 \item{object}{A \code{fereg} object.}
 
 \item{...}{Not used.}
+
+\item{notes}{Print the note on irregular fixed effects (option \code{fereg.notes}, default \code{TRUE}).}
 }
 \value{
-A list (class \code{fereg.fixef}) of named vectors, one per fixed effect / slope.
+A list (class \code{fereg.fixef}) of named vectors, one per fixed effect / slope, with
+fixest's attributes \code{references} and \code{exponential} (\code{TRUE} for Poisson models).
 }
 \description{
 Fixed-effect coefficients with fixest's normalization: the first fixed effect is free, and in
 every connected component one level of each other fixed effect is set to 0 (counted in the
-\code{references} attribute). Varying slopes are listed as \code{fe[[x]]}.
+\code{references} attribute when there are several fixed effects / slopes). Varying slopes are
+listed as \code{fe[[x]]}; with varying slopes, the terms are in fixest's order (by number of
+coefficients, decreasing). As fixest, a note says when the fixed effects are not regular (more
+references than one per fixed effect after the first), and when, with three fixed effects or
+more, these references do not reproduce the estimated fixed effects: the values are then those
+of another normalization and the number of references is only approximate.
 }
 \examples{
 data(trade_toy, package = "fereg")
