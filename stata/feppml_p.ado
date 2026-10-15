@@ -1,4 +1,4 @@
-*! version 0.4.0  feppml: predict (port of ppmlhdfe_p.ado of ppmlhdfe 2.3.3, MIT, (c) Sergio Correia, Paulo Guimaraes, Thomas Zylkin)
+*! version 0.4.1  feppml: predict (port of ppmlhdfe_p.ado of ppmlhdfe 2.3.3, MIT, (c) Sergio Correia, Paulo Guimaraes, Thomas Zylkin)
 program define feppml_p
 	version 16
 	_assert "`e(cmd)'" == "feppml"

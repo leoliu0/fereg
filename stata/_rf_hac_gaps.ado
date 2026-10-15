@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: ivreghdfe's report of gaps in the time variable of a kernel variance
+*! version 0.4.1  fereg: ivreghdfe's report of gaps in the time variable of a kernel variance
 * Usage: _rf_hac_gaps touse tvar   (data tsset/xtset; touse = the prepared sample)
 program _rf_hac_gaps
 	version 16

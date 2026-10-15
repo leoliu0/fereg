@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
+*! version 0.4.1  fereg: fast linear regression with high-dimensional fixed effects (Rust plugin)
 *! Syntax, defaults, messages, display and e() mirror reghdfe 6.13.1 (Sergio Correia).
 program define fereg, eclass
 	version 16
@@ -82,7 +82,7 @@ end
 
 
 program Estimate, eclass
-	local rf_version 0.4.0
+	local rf_version 0.4.1
 	local cmdline `"fereg `0'"'
 
 // --------------------------------------------------------------------------
@@ -898,6 +898,10 @@ program Estimate, eclass
 	* (reghdfe's EreturnPost also clears first)
 	ereturn clear
 	if (`K_full' > 0) {
+		* Stata posts a V that is not positive semidefinite (as after the Cameron-Gelbach-Miller
+		* fix with a constant) only when the matrix was stored by Mata, as reghdfe stores it;
+		* -matrix- or a plugin give "variance matrix is nonsymmetric or highly singular"
+		mata: st_matrix(st_local("V"), st_matrix(st_local("V")))
 		matrix colnames `b' = `colnames'
 		matrix colnames `V' = `colnames'
 		matrix rownames `V' = `colnames'

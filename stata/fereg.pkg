@@ -8,7 +8,7 @@ d ivreghdfe and ppmlhdfe. The estimation core is a compiled Rust plugin (Linux, 
 d
 d Author: Leo Liu, auleo.liu@gmail.com
 d License: MIT
-d Distribution-Date: 20261014
+d Distribution-Date: 20261015
 f fereg.ado
 f fereg_p.ado
 f fereg_estat.ado

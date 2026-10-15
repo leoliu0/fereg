@@ -1,4 +1,4 @@
-*! version 0.4.0  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
+*! version 0.4.1  fereg: estimation engine shared by feppml (Poisson) and felogit (logit)
 *! Syntax, messages and e() of feppml mirror ppmlhdfe 2.3.3 (Correia, Guimaraes, Zylkin).
 *
 * Usage (from feppml.ado / felogit.ado):  _rf_glm poisson|logit <command arguments>
@@ -573,6 +573,10 @@ program _rf_glm, eclass
 		local b `bf'
 		local V `Vf'
 	}
+	* Stata posts a V that is not positive semidefinite only when the matrix was stored by Mata, as
+	* ppmlhdfe stores it; -matrix- or a plugin give "variance matrix is nonsymmetric or highly
+	* singular"
+	mata: st_matrix(st_local("V"), st_matrix(st_local("V")))
 	matrix colnames `b' = `colnames'
 	matrix colnames `V' = `colnames'
 	matrix rownames `V' = `colnames'
