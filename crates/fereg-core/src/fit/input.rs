@@ -190,7 +190,7 @@ fn vcov_vars<'a>(input: &FitInput<'a>, spec: &FitSpec) -> VcovVars<'a> {
 }
 
 /// Missing-value and zero-weight scan: returns the keep mask over the input rows and the counts.
-fn scan(input: &FitInput, spec: &FitSpec, pool: &Pool) -> Result<(Vec<bool>, Dropped), RfError> {
+pub(crate) fn scan(input: &FitInput, spec: &FitSpec, pool: &Pool) -> Result<(Vec<bool>, Dropped), RfError> {
     let flavor = spec.flavor;
     let vv = vcov_vars(input, spec);
     let n = input.n;
