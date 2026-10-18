@@ -210,6 +210,14 @@ fn errors() {
     one.fe.truncate(1);
     let e = err(fit::bias_corr(&one, &sp, &BiasOptions { structure: Structure::Network, ..d.clone() }, &ctx));
     assert!(e.contains("two- or three-way"), "{e}");
+    // Network: only both biases (bias_corr and corrected APEs).
+    for which in [WhichBias::Individual, WhichBias::Time] {
+        let o = BiasOptions { structure: Structure::Network, which, ..d.clone() };
+        let e = err(fit::bias_corr(&input, &sp, &o, &ctx));
+        assert_eq!(e, "network structure: only the correction of both biases is available");
+        let e = fit::apes(&input, &sp, ApeAt::Corrected { options: &o, coef: &[0.0, 0.0, 0.0], ape_jackknife: None }, &ApeOptions::default(), &ctx).err().unwrap();
+        assert_eq!(e.to_string(), "network structure: only the correction of both biases is available");
+    }
     // Jackknife on a network structure.
     let e = err(fit::bias_corr(&input, &sp, &BiasOptions { structure: Structure::Network, method: jk(Variant::Ss2), ..d.clone() }, &ctx));
     assert!(e.contains("not available for the network"), "{e}");

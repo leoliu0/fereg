@@ -279,7 +279,10 @@ fn resolve_which(input: &FitInput, opts: &BiasOptions) -> Result<WhichBias, RfEr
         }
     };
     if opts.structure == Structure::Network {
-        return Ok(WhichBias::Both);
+        return match opts.which {
+            WhichBias::Both => Ok(WhichBias::Both),
+            _ => invalid("network structure: only the correction of both biases is available"),
+        };
     }
     match opts.which {
         WhichBias::Both if ind && time => Ok(WhichBias::Both),
