@@ -15,6 +15,14 @@ weights, and iid, heteroskedasticity-robust (HC1; HC2/HC3 except for IV), multiw
 (CRV1, CRV3), Newey–West, Driscoll–Kraay and Conley standard errors, plus residuals, `predict`
 and fixed-effect values.
 
+For fixed-effects logit, all three also correct the incidental-parameter bias (Fernández-Val and
+Weidner 2016; for trade networks, Hinz, Stammann and Wanner 2020), analytically or with
+split-panel and delete-one jackknives, and estimate average partial effects (APEs) with their
+standard errors. R and Python follow `alpaca` 0.3.5 (`biasCorr()`, `getAPEs()`), Stata follows
+`logitfe` 3.0.3 (`felogit, analytical`, `jackknife`, `ape`). Where these packages depart from the
+published formulas (for example `logitfe` with `lags()` above 1 or its single-bias jackknives), fereg
+uses the formulas, and the help lists every difference.
+
 The solver eliminates the largest fixed effect exactly and solves the remaining system with a
 preconditioned conjugate-gradient method on cell-compressed sufficient statistics.
 
@@ -59,6 +67,10 @@ fereg y x1 x2, absorb(firm year) cluster(firm)
 fereg y x1 (x2 = z), absorb(firm year) vce(robust)
 feppml trade dist, absorb(exporter#year importer#year) cluster(pair)
 felogit default x1, absorb(firm year)
+
+xtset firm year
+felogit default x1, absorb(firm year) analytical lags(1)
+felogit default x1, absorb(firm year) jackknife ss2
 ```
 
 Binaries are provided for Linux (x86-64), macOS (Apple Silicon and Intel) and Windows (x86-64).
@@ -68,6 +80,9 @@ Variances follow reghdfe and ivreghdfe: `vce(unadjusted)`, `vce(robust)`, `vce(c
 `xtset` data). fereg extensions: `vce(hc2)`/`vce(hc3)` (Stata `regress` formulas, exact leverage
 with absorbed fixed effects), `vce(crv3 clustvars)` and `vce(conley latvar lonvar, cutoff(#))`.
 See `help fereg`, `help feppml` and `help felogit`.
+`felogit` adds logitfe's bias corrections and APEs: `analytical`, `jackknife` (`ss1`, `ss2`, `js`,
+`sj`, `jj`, `double`, `multiple()`), `ape`, `lags()`, `ibias()`, `tbias()`, `population()` and
+`network`.
 
 ## Python
 
@@ -88,6 +103,10 @@ p = fereg.fepois("count ~ x1 | firm + year", data=df, vcov="hetero")
 m.summary()
 fereg.etable([m, iv, p], type="md")
 m.fixef()
+
+lg = fereg.feglm("default ~ x1 | firm + year", data=df, family="logit")
+bc = lg.bias_corr(L=1)          # or method="jackknife", jackknife="ss2"
+bc.get_apes().summary()
 ```
 
 Data can be pandas or polars. The result classes (`Feols`, `Feiv`, `Fepois`, `Felogit`,
@@ -100,7 +119,8 @@ fereg extensions: HC2/HC3 with fixed effects, CRV3 for IV and logit, Newey–Wes
 Driscoll–Kraay for IV, and fixest's Conley estimator (`vcov="conley"`,
 `vcov_kwargs={"lat": ..., "lon": ..., "cutoff": "100km"}`). Not implemented: probit; `nid`
 variances (`NotImplementedError`); pyfixest's wild bootstrap, `ccv`, `decompose`, `ritest`,
-plotting and DiD helpers.
+plotting and DiD helpers. `Felogit.bias_corr()` and `Felogit.get_apes()` follow alpaca's
+`biasCorr()` and `getAPEs()` (pyfixest has no bias correction).
 
 ## R
 
@@ -124,6 +144,10 @@ p  <- fepois(count ~ x1 | firm + year, df, vcov = "hetero")
 summary(m)
 etable(m, iv, p)
 fixef(m)
+
+lg <- feglm(default ~ x1 | firm + year, df, family = "logit")
+bc <- biasCorr(lg, L = 1)        # or method = "jackknife", jackknife = "ss2"
+summary(getAPEs(bc))
 ```
 
 The formula grammar is fixest's (`fe1^fe2`, `fe[x]`, `fe[[x]]`, `i()`, `factor()`, `c(y1, y2)`,
@@ -140,6 +164,9 @@ Not implemented: `fixef.rm = "infinite_coef"`, panel operators `l()`/`f()`/`d()`
 `.[]`/`..ctrl` formula macros, and variances given as functions or matrices. `fixef.tol` and
 `fixef.iter` are the settings of fereg's solver (defaults 1e-8 and 16000), which stops on a
 different criterion than fixest's (defaults 1e-6 and 10000).
+`biasCorr()` and `getAPEs()` take alpaca's arguments and give its numbers; the jackknife options
+(`method = "jackknife"`, `jackknife`, `bias`, `multiple`, `split`) are fereg extensions defined as
+in Stata's logitfe.
 
 ## Build from source
 
