@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import functools
 import io
+import re
 import warnings
 from contextlib import redirect_stdout
 
 import numpy as np
 import pytest
-from _bias import RTOL, RTOL_POINT, ape_id, assert_close, fit_case, model_case, models
+from _bias import RTOL, RTOL_POINT, ape_id, assert_close, data, fit_case, model_case, models
 
 import fereg
 
@@ -68,7 +69,8 @@ def test_corrected_apes(c, r, e):
     res = corrected(c["id"], r["L"], r["bias"])
     a = _apes(res, n_pop=e["n_pop"], sampling_fe=e["sampling_fe"])
     assert a.weak_exo == e["weak_exo"] == (r["L"] > 0)
-    assert a.bandwidth == r["L"]
+    # the L that entered (a two-way network model has no pair effect: none)
+    assert a.bandwidth == (0 if c["structure"] == "network" and len(c["fe"]) == 2 else r["L"])
     assert a.panel_structure == c["structure"]
     assert_close(a.coef(), e["delta"], RTOL_POINT, "corrected delta")
     assert_close(a.bias_term, e["bias_term"], RTOL_POINT, "APE bias term")
@@ -90,6 +92,29 @@ def test_sampling_term_over_all_rows():
     a = fit_case("drops").get_apes(n_pop=e["n_pop"])
     assert_close(a.vcov.to_numpy(), e["vcov"], RTOL, "all-rows sampling term")
 
+
+@pytest.mark.parametrize("corrected_point", [False, True])
+def test_weak_exo_covariance_over_all_rows(corrected_point):
+    # drops: kept individuals lost their (all-one) period-8 row; those dropped rows enter C with
+    # D = -delta/N* before the later retained rows of the individual (fereg-core API 2.2), which
+    # alpaca's C (retained rows only) leaves out. "unrestricted" isolates the C term.
+    c = model_case("drops")
+    if corrected_point:
+        r = next(r for r in c["corrections"] if r["L"] == 1 and r["bias"] == "both")
+        e = next(e for e in r["apes"] if e["n_pop"] is not None and e["sampling_fe"] == "unrestricted")
+        alpaca = r["alpaca"]["apes"][r["apes"].index(e)]["vcov"]
+        a = corrected("drops", 1, "both").get_apes(n_pop=e["n_pop"], sampling_fe="unrestricted")
+        rtol = RTOL_POINT
+    else:
+        e = next(
+            e for e in c["apes"] if e["n_pop"] is not None and e["sampling_fe"] == "unrestricted" and e["weak_exo"]
+        )
+        alpaca = e["alpaca"]["vcov"]
+        a = fit_case("drops").get_apes(n_pop=e["n_pop"], sampling_fe="unrestricted", weak_exo=True)
+        rtol = RTOL
+    assert a.weak_exo
+    assert not np.allclose(e["vcov"], alpaca, rtol=1e-6, atol=0)
+    assert_close(a.vcov.to_numpy(), e["vcov"], rtol, "all-rows weak-exogeneity covariance")
 
 def test_small_population_warns():
     c = model_case("classic")
@@ -137,10 +162,12 @@ def test_rejected_arguments(kw, exc, match):
 
 
 def test_rejected_structures():
-    with pytest.raises(ValueError, match="expects a two- or three-way fixed effects model"):
+    with pytest.raises(ValueError, match=re.escape('panel structure "network" expects a two- or three-way')):
         fit_case("oneway").get_apes(panel_structure="network")
-    with pytest.raises(ValueError, match="expects a one- or two-way fixed effects model"):
+    with pytest.raises(ValueError, match=re.escape('panel structure "classic" expects a one- or two-way')):
         fit_case("network3").get_apes()
+    with pytest.raises(ValueError, match="^bias correction and APEs need fixed effects$"):
+        fereg.feglm("y ~ x1 + x2 + d", data("classic"), family="logit").get_apes()
     res = corrected("classic", 1, "both")
     with pytest.raises(ValueError, match="panel_structure is set by the bias correction"):
         res.get_apes(panel_structure="network")

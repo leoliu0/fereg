@@ -641,6 +641,207 @@ model_fn! {
     }
 }
 
+/// Value of a required key of an options dict.
+fn item<'py>(d: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    d.get_item(key)?.ok_or_else(|| PyValueError::new_err(format!("missing option '{key}'")))
+}
+
+fn parse_structure(s: &str) -> PyResult<cf::Structure> {
+    match s {
+        "classic" => Ok(cf::Structure::Classic),
+        "network" => Ok(cf::Structure::Network),
+        _ => Err(PyValueError::new_err(format!("unknown panel structure '{s}'"))),
+    }
+}
+
+fn structure_name(s: cf::Structure) -> &'static str {
+    match s {
+        cf::Structure::Classic => "classic",
+        cf::Structure::Network => "network",
+    }
+}
+
+fn which_name(w: cf::WhichBias) -> &'static str {
+    match w {
+        cf::WhichBias::Both => "both",
+        cf::WhichBias::Individual => "individual",
+        cf::WhichBias::Time => "time",
+    }
+}
+
+const VARIANTS: [(&str, cf::Variant); 6] = [
+    ("ss1", cf::Variant::Ss1),
+    ("ss2", cf::Variant::Ss2),
+    ("js", cf::Variant::Js),
+    ("sj", cf::Variant::Sj),
+    ("jj", cf::Variant::Jj),
+    ("double", cf::Variant::Double),
+];
+
+fn permutation(p: Option<Vec<i64>>) -> PyResult<Option<Vec<u32>>> {
+    p.map(|v| {
+        v.into_iter()
+            .map(|i| u32::try_from(i).map_err(|_| PyValueError::new_err(format!("permutation entry {i} out of range"))))
+            .collect()
+    })
+    .transpose()
+}
+
+/// Bias options dict (see `fereg._binding.bias_corr_design`): `{method, structure, which,
+/// bandwidth, time, variant, partitions}`.
+fn parse_bias(d: &Bound<'_, PyDict>) -> PyResult<cf::BiasOptions> {
+    let which = match item(d, "which")?.extract::<String>()?.as_str() {
+        "both" => cf::WhichBias::Both,
+        "individual" => cf::WhichBias::Individual,
+        "time" => cf::WhichBias::Time,
+        s => return Err(PyValueError::new_err(format!("unknown bias '{s}'"))),
+    };
+    let method = match item(d, "method")?.extract::<String>()?.as_str() {
+        "analytical" => cf::BiasMethod::Analytical,
+        "jackknife" => {
+            let name: String = item(d, "variant")?.extract()?;
+            let variant = VARIANTS
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| *v)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown jackknife variant '{name}'")))?;
+            let parts: Vec<(Option<Vec<i64>>, Option<Vec<i64>>)> = item(d, "partitions")?.extract()?;
+            let partitions = parts
+                .into_iter()
+                .map(|(i, t)| Ok(cf::Permutation { individual: permutation(i)?, period: permutation(t)? }))
+                .collect::<PyResult<_>>()?;
+            cf::BiasMethod::Jackknife(cf::JackknifeOptions { variant, partitions })
+        }
+        s => return Err(PyValueError::new_err(format!("unknown bias correction method '{s}'"))),
+    };
+    Ok(cf::BiasOptions {
+        method,
+        normalization: cf::Normalization::Alpaca,
+        structure: parse_structure(&item(d, "structure")?.extract::<String>()?)?,
+        which,
+        bandwidth: item(d, "bandwidth")?.extract()?,
+        panel: None,
+        time: item(d, "time")?.extract()?,
+    })
+}
+
+model_fn! {
+    /// `fereg_core::fit::bias_dims` of the model given as to `fit` (a logit model) under the bias
+    /// options `bias` (as `bias_corr`): `{n_individuals, n_periods, n_full}`, the jackknife index
+    /// spaces N_pre / T_pre (for drawing `multiple` permutations) and N*.
+    fn bias_dims(bias: &Bound<'py, PyDict>) -> Py<PyDict>;
+    |py, input, spec, threads, verbose| {
+        let opts = parse_bias(bias)?;
+        let dims = py.detach(|| with_ctx(threads, verbose, |ctx| cf::bias_dims(input, spec, &opts, ctx))).map_err(to_pyerr)?;
+        let d = PyDict::new(py);
+        d.set_item("n_individuals", dims.n_individuals)?;
+        d.set_item("n_periods", dims.n_periods)?;
+        d.set_item("n_full", dims.n_full)?;
+        Ok(d.unbind())
+    }
+}
+
+model_fn! {
+    /// Incidental-parameter bias correction of a logit model (`fereg_core::fit::bias_corr`; alpaca
+    /// `biasCorr` and logitfe's jackknife). The model arguments are those of `fit` (the core
+    /// re-estimates the uncorrected model); `bias` = `{method: "analytical" | "jackknife",
+    /// structure: "classic" | "network", which: "both" | "individual" | "time", bandwidth: L,
+    /// time: factor index | None, variant: "ss1" | "ss2" | "js" | "sj" | "jj" | "double",
+    /// partitions: [(individual permutation | None, period permutation | None), ...]}`
+    /// (0-based new indices; `variant` / `partitions` are read for the jackknife only).
+    ///
+    /// Returns `(FitResult at the corrected point, report)` with report `{coef_uncorr, bias_term,
+    /// structure, which, bandwidth, method, variant, n_partitions, ape_jackknife, ape_uncorr,
+    /// n_full, n_fits, deviance_uncorr, resolve_iterations, notes}` (`bias_term` = uncorrected
+    /// minus corrected coefficients; the notes are also in the fit's notes).
+    fn bias_corr(bias: &Bound<'py, PyDict>) -> (FitResult, Py<PyDict>);
+    |py, input, spec, threads, verbose| {
+        let opts = parse_bias(bias)?;
+        let bf = py.detach(|| with_ctx(threads, verbose, |ctx| cf::bias_corr(input, spec, &opts, ctx))).map_err(to_pyerr)?;
+        let r = bf.report;
+        let d = PyDict::new(py);
+        d.set_item("coef_uncorr", r.coef_uncorr.into_pyarray(py))?;
+        d.set_item("bias_term", r.bias_term.into_pyarray(py))?;
+        d.set_item("structure", structure_name(r.structure))?;
+        d.set_item("which", which_name(r.which))?;
+        d.set_item("bandwidth", r.bandwidth)?;
+        let (method, variant, n_partitions) = match &r.method {
+            cf::BiasMethod::Analytical => ("analytical", None, 0),
+            cf::BiasMethod::Jackknife(j) => {
+                let name = VARIANTS.iter().find(|(_, v)| *v == j.variant).map(|(n, _)| *n);
+                ("jackknife", name, j.partitions.len())
+            }
+        };
+        d.set_item("method", method)?;
+        d.set_item("variant", variant)?;
+        d.set_item("n_partitions", n_partitions)?;
+        d.set_item("ape_jackknife", opt_array(py, r.ape_jackknife))?;
+        d.set_item("ape_uncorr", opt_array(py, r.ape_uncorr))?;
+        d.set_item("n_full", r.n_full)?;
+        d.set_item("n_fits", r.n_fits)?;
+        d.set_item("deviance_uncorr", r.deviance_uncorr)?;
+        d.set_item("resolve_iterations", r.resolve_iterations)?;
+        d.set_item("notes", r.notes)?;
+        Ok((convert(py, bf.fit)?, d.unbind()))
+    }
+}
+
+model_fn! {
+    /// Average partial effects of a logit model (`fereg_core::fit::apes`; alpaca `getAPEs`). The
+    /// model arguments are those of `fit`; `ape` = `{n_pop: float | None, structure: "classic" |
+    /// "network", sampling: "independence" | "unrestricted", weak_exo: bool, at: None | {bias:
+    /// <bias options of bias_corr>, coef: corrected coefficients, ape_jackknife: array | None}}`
+    /// (`at=None`: the uncorrected fit).
+    ///
+    /// Returns `{coef_source, delta, vcov (p x p), bias_term, binary, adj, weak_exo_used,
+    /// structure, bandwidth, n_full, notes}`.
+    fn apes(ape: &Bound<'py, PyDict>) -> Py<PyDict>;
+    |py, input, spec, threads, verbose| {
+        let sampling = match item(ape, "sampling")?.extract::<String>()?.as_str() {
+            "independence" => cf::Sampling::Independence,
+            "unrestricted" => cf::Sampling::Unrestricted,
+            s => return Err(PyValueError::new_err(format!("unknown sampling_fe '{s}'"))),
+        };
+        let opts = cf::ApeOptions {
+            n_pop: item(ape, "n_pop")?.extract()?,
+            structure: parse_structure(&item(ape, "structure")?.extract::<String>()?)?,
+            sampling,
+            weak_exo: item(ape, "weak_exo")?.extract()?,
+        };
+        let at_obj = item(ape, "at")?;
+        let corrected: Option<(cf::BiasOptions, PyReadonlyArray1<'py, f64>, Option<PyReadonlyArray1<'py, f64>>)> =
+            if at_obj.is_none() {
+                None
+            } else {
+                let at = at_obj.cast::<PyDict>()?;
+                Some((parse_bias(&item(at, "bias")?.cast_into::<PyDict>()?)?, item(at, "coef")?.extract()?, item(at, "ape_jackknife")?.extract()?))
+            };
+        let at = match &corrected {
+            None => cf::ApeAt::Uncorrected,
+            Some((options, coef, jk)) => cf::ApeAt::Corrected {
+                options,
+                coef: slice(coef, "coef")?,
+                ape_jackknife: jk.as_ref().map(|a| slice(a, "ape_jackknife")).transpose()?,
+            },
+        };
+        let a = py.detach(|| with_ctx(threads, verbose, |ctx| cf::apes(input, spec, at, &opts, ctx))).map_err(to_pyerr)?;
+        let p = a.delta.len();
+        let d = PyDict::new(py);
+        d.set_item("coef_source", sources(py, &a.coef_source)?)?;
+        d.set_item("delta", a.delta.into_pyarray(py))?;
+        d.set_item("vcov", a.vcov.into_pyarray(py).reshape([p, p])?)?;
+        d.set_item("bias_term", opt_array(py, a.bias_term))?;
+        d.set_item("binary", a.binary)?;
+        d.set_item("adj", a.adj)?;
+        d.set_item("weak_exo_used", a.weak_exo_used)?;
+        d.set_item("structure", structure_name(a.structure))?;
+        d.set_item("bandwidth", a.bandwidth)?;
+        d.set_item("n_full", a.n_full)?;
+        d.set_item("notes", a.notes)?;
+        Ok(d.unbind())
+    }
+}
+
 macro_rules! dist_fn {
     ($name:ident, $f:path, ($($p:ident),*), $doc:literal) => {
         #[doc = $doc]
@@ -669,5 +870,5 @@ mod _core {
     const __version__: &str = fereg_core::VERSION;
 
     #[pymodule_export]
-    use super::{FitResult, FitState, fit, pchisq_upper, pf_upper, pnorm, pt, qnorm, qt};
+    use super::{FitResult, FitState, apes, bias_corr, bias_dims, fit, pchisq_upper, pf_upper, pnorm, pt, qnorm, qt};
 }

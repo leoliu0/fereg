@@ -139,8 +139,8 @@ def bias_dims_design(design: Any, *, bias: dict, **options: Any) -> dict:
 def bias_corr_design(design: Any, *, bias: dict, **options: Any) -> tuple[Any, dict]:
     """``fereg_core::fit::bias_corr``: the fit at the corrected coefficients (a ``FitResult``)
     and the correction report (``{coef_uncorr, bias_term, structure, which, bandwidth, method,
-    variant, n_partitions, ape_jackknife, n_full, n_fits, deviance_uncorr, loglik_uncorr,
-    notes}``).
+    variant, n_partitions, ape_jackknife, ape_uncorr, n_full, n_fits, deviance_uncorr,
+    resolve_iterations, notes}``).
 
     ``bias`` = ``{method: "analytical" | "jackknife", structure: "classic" | "network", which:
     "both" | "individual" | "time", bandwidth: int, time: factor index | None, variant: "ss1" |

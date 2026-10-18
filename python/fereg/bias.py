@@ -35,8 +35,12 @@ Differences from alpaca 0.3.5 (and logitfe 3.0.3 for the jackknife):
 - With a finite population (``n_pop``) and groups dropped for perfect classification, the
   sampling-of-effects term of the APE variance sums over all observations, with zero partial effects
   for the dropped ones, consistently with the point estimate; alpaca and logitfe sum over the
-  retained observations only, which overstates the variance. The numbers are identical when no group
-  is dropped.
+  retained observations only, which overstates the variance. The same holds for the covariance
+  term of weakly exogenous regressors (dropped observations of a retained individual, or pair,
+  enter in time order). The numbers are identical when no group is dropped.
+- Options without effect are errors (``L`` with the jackknife or with ``bias="time"``, ``multiple``
+  partitions that permute no dimension the subpanels split); a two-way network model with ``L > 0``
+  only warns "L ignored", as alpaca computes it.
 - alpaca can apply ``biasCorr()`` to a corrected model again; fereg raises. alpaca's ``getAPEs()``
   silently ignores ``panel.structure`` and ``weak.exo`` for corrected models (they come from the
   correction); fereg raises when they are given and differ.
@@ -72,7 +76,7 @@ _VARIANTS = ("ss2", "ss1", "js", "sj", "jj", "double")
 _BIASES = ("both", "individual", "time")
 _SPLITS = ("both", "individuals", "time")
 _SAMPLING = ("independence", "unrestricted")
-_NO_CRV3 = "CRV3 is not available after bias correction."
+_NO_CRV3 = "CRV3 is not available after bias correction"  # the core's text
 # The APE variance (alpaca's) and the jackknife index spaces do not depend on the model's vcov.
 _IID = parse_vcov("iid")
 
@@ -93,41 +97,21 @@ def _count(name: str, value) -> int:
     return int(value)
 
 
-def _fe_terms(model: Felogit, panel_structure: str) -> int:
-    """Number of fixed-effect terms, checked against ``panel_structure`` (alpaca's wording)."""
-    d = model._design
-    if any(not intercept or slopes for _, intercept, slopes in d.fe):
-        raise ValueError("Bias corrections and APEs need fixed effects without varying slopes.")
-    k = len(d.fe)
-    if panel_structure == "classic" and k not in (1, 2):
-        raise ValueError("panel_structure == 'classic' expects a one- or two-way fixed effects model.")
-    if panel_structure == "network" and k not in (2, 3):
-        raise ValueError("panel_structure == 'network' expects a two- or three-way fixed effects model.")
-    return k
-
-
-def _check_vcov(model: Felogit) -> None:
-    if model._ctx.vcov.kind == "crv3":
-        raise ValueError(f"{_NO_CRV3} Estimate the model with another vcov.")
-
-
 def _double_design(design: Any) -> Any:
-    """``design`` with the two fixed-effect variables in one id space (the double jackknife drops
-    the rows whose first or second fixed effect equals each id present in both)."""
+    """``design`` with the two fixed-effect variables coded on one common level set (the sorted
+    union of their labels) when both are coded (string / categorical) columns: the double jackknife
+    drops the rows whose first or second fixed effect equals each id present in both. Numeric
+    columns are compared by value in the core; other layouts are left to the core's checks."""
     from .design import FactorColumn
 
+    if len(design.fe) != 2:
+        return design
     (f1, _, _), (f2, _, _) = design.fe
     if len(f1) != 1 or len(f2) != 1:
-        raise ValueError("jackknife='double' needs single variables (no interactions) as fixed effects.")
-    a, b = design.factors[f1[0]], design.factors[f2[0]]
-    numeric = ("f64", "i64", "i32")
-    if a.kind in numeric and b.kind in numeric:
         return design
-    if (a.kind in numeric) != (b.kind in numeric):
-        raise ValueError(
-            f"jackknife='double' needs the fixed-effect variables in one id space: '{a.name}' and "
-            f"'{b.name}' must both be numeric or both be non-numeric."
-        )
+    a, b = design.factors[f1[0]], design.factors[f2[0]]
+    if a.kind != "codes" or b.kind != "codes":
+        return design
     la, lb = list(a.labels), list(b.labels)
     if la == lb and a.base == b.base:
         return design
@@ -209,10 +193,9 @@ def bias_corr(
         _choice("split", split, _SPLITS)
     if seed is not None:
         seed = _count("seed", seed)
-    if not model._has_fixef:
-        raise ValueError("Bias corrections need a model with fixed effects.")
-    k = _fe_terms(model, panel_structure)
-    _check_vcov(model)
+    # Arguments the core has no counterpart for; the model and option checks (structure, number
+    # and kind of fixed effects, CRV3, bias choice, bandwidth, variant, time variable) are the
+    # core's, with the texts R and Stata show too.
     jk = method == "jackknife"
     if not jk:
         for name, value in (("jackknife", jackknife), ("split", split), ("seed", seed), ("time_id", time_id)):
@@ -220,40 +203,22 @@ def bias_corr(
                 raise ValueError(f"{name} is only used with method='jackknife'.")
         if multiple:
             raise ValueError("multiple is only used with method='jackknife'.")
-    else:
-        if L:
-            raise ValueError("L is only used with method='analytical'.")
-        if panel_structure == "network":
-            raise ValueError("The jackknife corrections support panel_structure='classic' only.")
-    variant = jackknife or "ss2"
-    if multiple and variant not in ("ss1", "ss2"):
-        raise ValueError("multiple is only available with jackknife='ss1' or 'ss2'.")
     if not multiple:
         for name, value in (("split", split), ("seed", seed)):
             if value is not None:
                 raise ValueError(f"{name} is only used with multiple > 0.")
-    if panel_structure == "network" and bias != "both":
-        raise ValueError("bias must be 'both' with panel_structure='network'.")
-    if k == 1 and bias == "time":
-        raise ValueError("bias='time' needs a two-way model: a one-way model has individual effects only.")
-    if L and bias == "time":
-        raise ValueError("L is only used by the individual-effect bias: bias='time' takes L = 0.")
+    variant = jackknife or "ss2"
 
     design, time = model._design, None
     if time_id is not None:
-        if k != 1:
+        if len(design.fe) >= 2:
             raise ValueError(
                 "time_id is only used by the jackknife of a one-way model (two-way models take the "
                 "time order from the second fixed effect)."
             )
         design, time = _time_design(model, time_id)
-    elif jk and k == 1:
-        raise ValueError("The jackknife of a one-way model needs the time variable: pass time_id.")
     if jk and variant == "double":
-        if k != 2:
-            raise ValueError("jackknife='double' needs a two-way model.")
         design = _double_design(design)
-
     options = {
         "method": method,
         "structure": panel_structure,
@@ -289,7 +254,7 @@ def bias_corr(
         seed=seed,
         time_id=time_id,
     )
-    _warn_notes(list(out.notes) + [n for n in report["notes"] if n not in out.notes])
+    _warn_notes(report["notes"])
     return res
 
 
@@ -314,8 +279,7 @@ def get_apes(
     _choice("sampling_fe", sampling_fe, _SAMPLING)
     if weak_exo is not None and not isinstance(weak_exo, (bool, np.bool_)):
         raise TypeError("weak_exo must be a bool or None.")
-    if not model._has_fixef:
-        raise ValueError("APEs need a model with fixed effects.")
+    # model checks (logit, fixed effects, structure): the core's, with the texts of R and Stata
 
     corrected = isinstance(model, FelogitBiasCorr)
     design, at = model._design, None
@@ -327,7 +291,7 @@ def get_apes(
             )
         panel_structure = model.panel_structure
         if model.method == "analytical":
-            forced = model.bandwidth > 0
+            forced = model._bias_options["bandwidth"] > 0  # alpaca: weak.exo = L > 0
             if weak_exo is not None and bool(weak_exo) != forced:
                 raise ValueError(
                     "weak_exo is set by the analytical bias correction (weak_exo = L > 0, here "
@@ -341,7 +305,6 @@ def get_apes(
             "ape_jackknife": model._ape_jackknife,
         }
     panel_structure = panel_structure or "classic"
-    _fe_terms(model, panel_structure)
     weak_exo = bool(weak_exo) if weak_exo is not None else False
     options = {
         "n_pop": n_pop,
@@ -378,9 +341,11 @@ class FelogitBiasCorr(Felogit):
 
     Attributes (alpaca's ``biasCorr`` fields): ``coef_uncorr`` (uncorrected coefficients),
     ``bias_term`` (uncorrected minus corrected coefficients, alpaca's ``bias.term``),
-    ``panel_structure``, ``bandwidth`` (``L``), ``method`` ("analytical" | "jackknife"),
-    ``jackknife`` (variant, None for the analytical correction), ``bias`` ("both" | "individual" |
-    "time"), plus ``multiple``, ``split``, ``seed``, ``time_id``, ``deviance_uncorr``, ``n_fits``
+    ``panel_structure``, ``bandwidth`` (the ``L`` that entered: 0 for the jackknife and for a
+    two-way network model), ``method`` ("analytical" | "jackknife"), ``jackknife`` (variant, None
+    for the analytical correction), ``bias`` (the bias corrected: "both" | "individual" | "time";
+    a one-way model has the individual bias only), plus ``multiple``, ``split``, ``seed``,
+    ``time_id``, ``deviance_uncorr``, ``n_fits``
     (jackknife subpanel fits) and ``N_full`` (observations before the fixed-effect based drops).
     """
 
@@ -412,7 +377,6 @@ class FelogitBiasCorr(Felogit):
         self.seed = seed
         self.time_id = time_id
         self.deviance_uncorr = report["deviance_uncorr"]
-        self._loglik_uncorr = report["loglik_uncorr"]
         self.N_full = int(report["n_full"])
         self.n_fits = int(report["n_fits"])
         ape_jk = report["ape_jackknife"]

@@ -112,15 +112,19 @@ network <- redraw(network, c("exp_time", "imp_time", "pair"))
 network <- finish(network, c("exp", "imp", "year", "exp_time", "imp_time", "pair", "y", "x", "rta"), "network")
 
 # drops: two-way panel with an all-one period and all-zero / all-one individuals: alpaca and fixest
-# drop them iteratively (individuals 1-2, then period 8, then the individuals constant on periods
-# 1-7); pyfixest drops the all-zero individuals once and keeps the other constant groups' rows at
-# the bound of the mean
+# drop them iteratively (individuals 1-2, then period 1, then the individuals constant on periods
+# 2-8); pyfixest drops the all-zero individuals once and keeps the other constant groups' rows at
+# the bound of the mean. The all-one period is the first one and only the odd individuals have it,
+# so some kept individuals' dropped rows precede their retained rows in time order and enter the
+# all-rows weak-exogeneity covariance C (if every kept individual lost its first row, their
+# contributions would cancel: the scores sum to zero at the MLE).
 drops <- mk_panel(60, 8, 1.3)
-drops[t == 8, y := 1]
+drops[t == 1, y := 1]
+drops <- drops[!(t == 1 & i %% 2 == 0)]
 drops[i %in% 1:2, y := 0]
 drops <- finish(drops, c("i", "t", "y", "x1", "x2", "d"), "drops")
 local({
-  m <- drops[t < 8 & i > 2, mean(y), by = i]$V1
+  m <- drops[t > 1 & i > 2, mean(y), by = i]$V1
   stopifnot(sum(m == 1) >= 2, sum(m == 0) >= 2)
 })
 

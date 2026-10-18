@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import io
+import re
 import warnings
 from contextlib import redirect_stdout
 
@@ -15,9 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from _bias import (
+    FIT_KW,
     RTOL,
     RTOL_POINT,
     RTOL_UNCORR_VCOV,
+    SSC,
     assert_close,
     case_id,
     correction_id,
@@ -89,12 +92,14 @@ def test_analytical_matches_alpaca(c, r):
     assert res.deviance_uncorr == pytest.approx(m.deviance, rel=1e-12)
     if "alpaca" in r:
         assert_close(res._vcov, r["alpaca"]["vcov"]["iid"], RTOL_POINT, "alpaca vcov hessian")
-    # attributes
+    # attributes (resolved against the model: a one-way model has the individual bias only; a
+    # two-way network model has no pair effect, so no L enters)
     assert res.panel_structure == c["structure"]
-    assert res.bandwidth == r["L"]
+    no_lags = c["structure"] == "network" and len(c["fe"]) == 2
+    assert res.bandwidth == (0 if no_lags else r["L"])
     assert res.method == "analytical"
     assert res.jackknife is None
-    assert res.bias == r["bias"]
+    assert res.bias == ("individual" if len(c["fe"]) == 1 else r["bias"])
     assert res.N_full == c["n_full"]
     # same reported sample as the uncorrected fit (pyfixest keeps rows at the bound)
     assert res._N == m._N
@@ -214,8 +219,16 @@ def test_double_jackknife_string_ids():
     s = fit("y ~ x1 + x2 | exps + imps", "dyad").bias_corr(method="jackknife", jackknife="double")
     assert_close(s.coef(), num.coef(), 1e-12, "double with string ids")
     assert_close(s.coef(), j["coef"], RTOL_POINT, "double")
-    with pytest.raises(ValueError, match="one id space"):
+    with pytest.raises(ValueError, match=exact(CORE["double_kind"])):
         fit("y ~ x1 + x2 | exp + imps", "dyad").bias_corr(method="jackknife", jackknife="double")
+
+
+def test_subpanel_failure_names_the_subpanel():
+    # x3 is zero in the first time half: the ss1 time-half subpanel loses its coefficient
+    d = data("classic").assign(x3=lambda df: df["d"] * (df["t"] > 4))
+    m = fereg.feglm("y ~ x1 + x2 + x3 | i + t", d, family="logit", ssc=SSC, **FIT_KW)
+    with pytest.raises(ValueError, match=exact(CORE["subpanel_lost"])):
+        m.bias_corr(method="jackknife", jackknife="ss1", bias="individual")
 
 
 def test_multiple_reproducible_under_seed():
@@ -236,11 +249,11 @@ def test_multiple_reproducible_under_seed():
 
 
 def test_multiple_without_permuted_dimension_is_an_error():
-    # ss1 with one bias splits one dimension only: permuting the other one is pointless
+    # ss1 with one bias splits one dimension only: permuting the other one has no effect
     m = fit_case("classic")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=exact(CORE["multiple_time"])):
         m.bias_corr(method="jackknife", jackknife="ss1", bias="individual", multiple=3, split="individuals", seed=1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=exact(CORE["multiple_individual"])):
         m.bias_corr(method="jackknife", jackknife="ss1", bias="time", multiple=3, split="time", seed=1)
 
 
@@ -270,7 +283,37 @@ def test_bit_identical_across_threads():
 # Rejected combinations
 # ------------------------------------------------------------------------------------------------
 
+# The core's messages (fereg-core API section 5): identical in R, Python and Stata.
+CORE = {
+    "no_fe": "bias correction and APEs need fixed effects",
+    "slopes": "bias correction and APEs need intercept-only fixed effects (no varying slopes)",
+    "classic_k": 'panel structure "classic" expects a one- or two-way fixed effects model',
+    "network_k": 'panel structure "network" expects a two- or three-way fixed effects model',
+    "network_which": "network structure: only the correction of both biases is available",
+    "time_bias": "the time-effect bias needs a time fixed effect (a two-way model)",
+    "crv3": "CRV3 is not available after bias correction",
+    "jk_network": "the jackknife is not available for the network structure",
+    "jk_time": "jackknife: this variant needs a time variable",
+    "jk_multiple": "jackknife: multiple partitions are only available with the ss1 and ss2 variants",
+    "double_kind": "the double jackknife needs both fixed-effect variables of the same kind (numeric or coded "
+    "on common levels)",
+    "L_jackknife": "bandwidth L = 1 has no effect: it only applies to the analytical correction",
+    "L_time": "bandwidth L = 1 has no effect: it only applies to the individual-effect bias",
+    "L_large": "bandwidth L = 9 is too large: the longest group has 8 observations",
+    "multiple_time": "multiple partitions have no effect: the subpanels of this bias split only the time "
+    "dimension, which no partition permutes",
+    "multiple_individual": "multiple partitions have no effect: the subpanels of this bias split only the "
+    "individual dimension, which no partition permutes",
+    "subpanel_lost": "jackknife, subpanel time half 1: the coefficient of regressor 3 (x[2]) is not estimable",
+}
+
+
+def exact(text: str) -> str:
+    return f"^{re.escape(text)}$"
+
+
 ERRORS = [
+    # Python arguments
     ("classic", dict(L=-1), ValueError, "L must be a non-negative integer"),
     ("classic", dict(L=1.5), TypeError, "L must be a non-negative integer"),
     ("classic", dict(L=True), TypeError, "L must be a non-negative integer"),
@@ -284,24 +327,26 @@ ERRORS = [
     ("classic", dict(seed=1), ValueError, "seed is only used with method='jackknife'"),
     ("classic", dict(split="time"), ValueError, "split is only used with method='jackknife'"),
     ("classic", dict(time_id="t"), ValueError, "time_id is only used with method='jackknife'"),
-    ("classic", dict(method="jackknife", L=1), ValueError, "L is only used with method='analytical'"),
-    ("classic", dict(method="jackknife", jackknife="js", multiple=2), ValueError, "multiple is only available"),
     ("classic", dict(method="jackknife", split="time"), ValueError, "split is only used with multiple > 0"),
     ("classic", dict(method="jackknife", seed=3), ValueError, "seed is only used with multiple > 0"),
     ("classic", dict(method="jackknife", multiple=-1), ValueError, "multiple must be a non-negative integer"),
     ("classic", dict(method="jackknife", multiple=2, seed=-1), ValueError, "seed must be a non-negative integer"),
     ("classic", dict(method="jackknife", multiple=2, seed="a"), TypeError, "seed must be a non-negative integer"),
     ("classic", dict(method="jackknife", time_id="t"), ValueError, "time_id is only used by the jackknife of a one-way"),
-    ("classic", dict(panel_structure="network", bias="time"), ValueError, "bias must be 'both' with panel_structure='network'"),
-    ("network3", dict(panel_structure="network", method="jackknife"), ValueError, "panel_structure='classic' only"),
-    ("network3", dict(), ValueError, "expects a one- or two-way fixed effects model"),
-    ("oneway", dict(panel_structure="network"), ValueError, "expects a two- or three-way fixed effects model"),
-    ("oneway", dict(bias="time"), ValueError, "bias='time' needs a two-way model"),
-    ("oneway", dict(method="jackknife"), ValueError, "needs the time variable: pass time_id"),
-    ("oneway", dict(method="jackknife", jackknife="double", time_id="t"), ValueError, "needs a two-way model"),
     ("oneway", dict(method="jackknife", time_id=3), TypeError, "time_id must be the name of a column"),
-    ("classic", dict(L=1, bias="time"), ValueError, "bias='time' takes L = 0"),
     ("oneway", dict(method="jackknife", time_id="y_missing"), KeyError, "y_missing"),
+    # core requests (exact texts)
+    ("classic", dict(method="jackknife", L=1), ValueError, exact(CORE["L_jackknife"])),
+    ("classic", dict(L=1, bias="time"), ValueError, exact(CORE["L_time"])),
+    ("classic", dict(L=9), ValueError, exact(CORE["L_large"])),
+    ("classic", dict(method="jackknife", jackknife="js", multiple=2), ValueError, exact(CORE["jk_multiple"])),
+    ("classic", dict(panel_structure="network", bias="time"), ValueError, exact(CORE["network_which"])),
+    ("network3", dict(panel_structure="network", bias="individual"), ValueError, exact(CORE["network_which"])),
+    ("network3", dict(panel_structure="network", method="jackknife"), ValueError, exact(CORE["jk_network"])),
+    ("network3", dict(), ValueError, exact(CORE["classic_k"])),
+    ("oneway", dict(panel_structure="network"), ValueError, exact(CORE["network_k"])),
+    ("oneway", dict(bias="time"), ValueError, exact(CORE["time_bias"])),
+    ("oneway", dict(method="jackknife"), ValueError, exact(CORE["jk_time"])),
 ]
 
 
@@ -312,11 +357,20 @@ def test_rejected_combinations(cid, kw, exc, match):
 
 
 def test_rejected_models():
-    with pytest.raises(ValueError, match="need a model with fixed effects"):
+    with pytest.raises(ValueError, match=exact(CORE["no_fe"])):
         fit("y ~ x1 + x2 + d", "classic").bias_corr()
-    with pytest.raises(ValueError, match="without varying slopes"):
+    with pytest.raises(ValueError, match=exact(CORE["slopes"])):
         fit("y ~ x1 + d | i[x2] + t", "classic").bias_corr()
-    with pytest.raises(ValueError, match="CRV3 is not available after bias correction"):
+    with pytest.raises(ValueError, match=exact(CORE["crv3"])):
         fit("y ~ x1 + x2 + d | i + t", "classic", vcov={"CRV3": "i"}).bias_corr()
     with pytest.raises(ValueError, match="cannot be applied to a bias-corrected model"):
         corrected("classic", 0, "both").bias_corr()
+
+
+def test_one_way_double_is_delete_one_period():
+    # one fixed effect: the double jackknife corrects the individual bias by deleting periods (jj)
+    j = next(j for j in jackknife_cases() if j["id"] == "oneway_jj")
+    m = fit_jk(j["fml"], j["data"])
+    a = m.bias_corr(method="jackknife", jackknife="double", time_id="t")
+    b = m.bias_corr(method="jackknife", jackknife="jj", time_id="t")
+    np.testing.assert_array_equal(a.coef().to_numpy(), b.coef().to_numpy())
