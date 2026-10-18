@@ -120,51 +120,89 @@ alpaca_bias_term <- function(a, which = "both", L = 0L) {
   stats::setNames(solve(a$Hessian / n, -b), names(stats::coef(a)))
 }
 
-# Partial effects of every retained row of an alpaca estimation (getAPEs.R:168-228) and their
-# average over the N* rows.
-alpaca_ape_rows <- function(a) {
+# alpaca's APE ingredients at its estimation point (getAPEs.R:168-288, weights included): partial
+# effects `Delta` of the retained rows (alpaca's sorted order), their average `delta` over the N*
+# rows, and the delta-method rows `Gamma`.
+alpaca_ape_parts <- function(a) {
   fam <- a$family
   beta <- stats::coef(a)
+  Nf <- a$nobs[["nobs.full"]]
   X <- stats::model.matrix(a$formula, a$data, rhs = 1L)[, -1L, drop = FALSE]
+  attr(X, "dimnames") <- NULL
+  y <- a$data[[1L]]
+  wt <- a$weights
+  if (is.null(wt)) wt <- 1
   eta <- a$eta
-  Delta <- matrix(NA_real_, nrow(X), ncol(X))
-  for (j in seq_len(ncol(X))) {
+  mu.eta <- fam$mu.eta(eta)
+  v <- wt * (y - fam$linkinv(eta))
+  w <- wt * mu.eta
+  MX <- a$MX
+  PX <- X - MX
+  p <- ncol(X)
+  Delta <- Delta1 <- matrix(NA_real_, nrow(X), p)
+  J <- matrix(NA_real_, p, p)
+  for (j in seq_len(p)) {
     if (all(X[, j] %in% c(0, 1))) {
       eta0 <- eta - X[, j] * beta[[j]]
+      f1 <- fam$mu.eta(eta0 + beta[[j]])
       Delta[, j] <- fam$linkinv(eta0 + beta[[j]]) - fam$linkinv(eta0)
+      Delta1[, j] <- f1 - fam$mu.eta(eta0)
+      J[, j] <- -colSums(PX * Delta1[, j]) / Nf
+      J[j, j] <- sum(f1) / Nf + J[j, j]
+      J[-j, j] <- colSums(X[, -j, drop = FALSE] * Delta1[, j]) / Nf + J[-j, j]
     } else {
-      Delta[, j] <- beta[[j]] * fam$mu.eta(eta)
+      Delta[, j] <- beta[[j]] * mu.eta
+      Delta1[, j] <- beta[[j]] * alpaca:::partialMuEta(eta, fam, 2L)
+      J[, j] <- colSums(MX * Delta1[, j]) / Nf
+      J[j, j] <- sum(mu.eta) / Nf + J[j, j]
     }
   }
-  list(Delta = Delta, delta = colSums(Delta) / a$nobs[["nobs.full"]])
+  kl <- alpaca:::getIndexList(names(a$lvls.k), a$data)
+  Psi <- -Delta1 / w
+  PPsi <- Psi - alpaca:::centerVariables(Psi, w, kl, a$control$center.tol)
+  Gamma <- (MX %*% solve(a$Hessian / Nf, J) - PPsi) * v / Nf
+  list(Delta = Delta, delta = colSums(Delta) / Nf, Gamma = Gamma, Nf = Nf)
 }
 
-# alpaca's APE variance with `n.pop`, whose sampling-of-effects term is summed over all N* rows
-# (rows removed for a constant outcome: zero partial effect, D = -delta / N*), as fereg does
-# (design 6.3): the include-all lines of RefAlpaca/mc_ape/mc_ape.R, generalized to one to three
-# fixed effects. `full`: the N* rows (data before the removal), `fe`: the fixed-effect variables
-# (in formula order). The weak-exogeneity covariance is alpaca's.
-ape_vcov_all_rows <- function(a, full, fe, n.pop, panel.structure = "classic", sampling.fe = "independence", weak.exo = FALSE) {
-  get <- function(np) {
-    alpaca::getAPEs(a, n.pop = np, panel.structure = panel.structure, sampling.fe = sampling.fe, weak.exo = weak.exo)
+# The APE variance of fereg (design 6, core API 2.2) from alpaca's ingredients: delta-method part
+# Gamma'Gamma, plus with `n.pop` the sampling-of-effects term and the weak-exogeneity covariance
+# summed over all N* rows (rows removed for a constant outcome: Delta = 0, Gamma = 0,
+# D = -delta / N*; grouped by their own fixed effects; C in time order within the individual
+# (classic) / pair (network, three fixed effects), removed rows included): the include-all lines
+# of RefAlpaca/mc_ape/mc_ape.R, generalized to one to three fixed effects and to C. `full`: the
+# N* rows in input order, `kept`: the rows of `full` in fereg's estimation sample, `fe`: the
+# fixed-effect variables in formula order (numbers or C-locale-sorted strings: alpaca's order).
+ape_vcov_all_rows <- function(a, full, kept, fe, n.pop, panel.structure = "classic", sampling.fe = "independence",
+                              weak.exo = FALSE) {
+  P <- alpaca_ape_parts(a)
+  V <- crossprod(P$Gamma)
+  adj <- if (is.null(n.pop)) 0 else max((n.pop - P$Nf) / (n.pop - 1), 0)
+  if (adj == 0) return(V)
+  # alpaca's rows: the estimation rows sorted (stably) by the fixed-effect variables.
+  retained <- full[kept, , drop = FALSE]
+  pos <- kept[do.call(order, c(lapply(fe, function(v) retained[[v]]), method = "radix"))]
+  stopifnot(nrow(full) == P$Nf, length(pos) == nrow(P$Delta))
+  D <- matrix(rep(-P$delta / P$Nf, each = nrow(full)), ncol = length(P$delta))
+  D[pos, ] <- sweep(P$Delta, 2, P$delta) / P$Nf
+  G <- matrix(0, nrow(full), ncol(D))
+  G[pos, ] <- P$Gamma
+  if (sampling.fe == "independence") {
+    S <- function(g) crossprod(rowsum(D, as.character(full[[g]])))
+    V <- V + adj * S(fe[1])
+    if (length(fe) > 1) V <- V + adj * (S(fe[2]) - crossprod(D))
+    if (panel.structure == "network" && length(fe) > 2) V <- V + adj * (S(fe[3]) - crossprod(D))
   }
-  V <- unclass(get(n.pop)$vcov)
-  Nf <- a$nobs[["nobs.full"]]
-  adj <- (n.pop - Nf) / (n.pop - 1)
-  if (adj <= 0 || sampling.fe != "independence") return(V)
-  P <- alpaca_ape_rows(a)
-  Da <- sweep(P$Delta, 2, P$delta) / Nf
-  key <- function(d) do.call(paste, lapply(fe, function(v) as.character(d[[v]])))
-  Dall <- matrix(rep(-P$delta / Nf, each = nrow(full)), ncol = ncol(Da))
-  Dall[match(key(a$data), key(full)), ] <- Da
-  S <- function(D, g) crossprod(rowsum(D, as.character(g)))
-  term <- function(D, d) {
-    out <- S(D, d[[fe[1]]])
-    if (length(fe) > 1) out <- out + S(D, d[[fe[2]]]) - crossprod(D)
-    if (panel.structure == "network" && length(fe) > 2) out <- out + S(D, d[[fe[3]]]) - crossprod(D)
-    out
+  if (weak.exo && (panel.structure == "classic" || length(fe) > 2)) {
+    grp <- if (panel.structure == "classic") fe[1] else fe[3]
+    keys <- if (panel.structure == "classic") fe[-1] else fe[1:2]
+    o <- do.call(order, c(lapply(c(grp, keys), function(v) full[[v]]), list(seq_len(nrow(full))), method = "radix"))
+    g <- as.character(full[[grp]])[o]
+    Ds <- D[o, , drop = FALSE]
+    before <- apply(Ds, 2, function(col) ave(col, g, FUN = cumsum)) - Ds
+    C <- crossprod(matrix(before, nrow(Ds)), G[o, , drop = FALSE])
+    V <- V + adj * (C + t(C))
   }
-  V - adj * term(Da, a$data) + adj * term(Dall, full)
+  V
 }
 
 # ---- jackknife reference (design 7): fixest refits on the subpanels ------------------------------

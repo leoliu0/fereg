@@ -38,6 +38,15 @@ test_that("jackknife variants x biases match fixest refits of the subpanels (two
   }
   expect_output(print(biasCorr(m, method = "jackknife", jackknife = "sj")), "Bias correction: jackknife (sj), individual and time effects", fixed = TRUE)
   expect_output(print(biasCorr(m, method = "jackknife", bias = "time")), "Bias correction: jackknife (ss2), time effects", fixed = TRUE)
+  # After a jackknife, weak.exo applies as for an uncorrected estimation (it adds a term with n.pop).
+  jk <- biasCorr(m, method = "jackknife")
+  a0 <- getAPEs(jk, n.pop = 5000)
+  a1 <- getAPEs(jk, n.pop = 5000, weak.exo = TRUE)
+  expect_false(a0$weak.exo)
+  expect_true(a1$weak.exo)
+  expect_identical(a1$delta, a0$delta)
+  expect_false(isTRUE(all.equal(a1$vcov, a0$vcov)))
+  expect_equal(getAPEs(jk, weak.exo = TRUE)$vcov, getAPEs(jk)$vcov)
 })
 
 test_that("jackknife variants match fixest refits (one-way: time variable from panel.id)", {

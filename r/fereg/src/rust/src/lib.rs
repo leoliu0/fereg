@@ -9,9 +9,9 @@ use std::os::raw::c_int;
 
 use extendr_api::prelude::*;
 use fereg_core::fit::{
-    self, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FixefValues, FitSpec, FitState, FixefNorm,
-    FixefRm, Flavor, GDf, KFixef, Model, Ssc, TDf, TestStat, VcovKind, VcovOutput,
-    WeightsType,
+    self, ApeAt, ApeOptions, BiasMethod, BiasOptions, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FixefValues,
+    FitSpec, FitState, FixefNorm, FixefRm, Flavor, GDf, JackknifeOptions, KFixef, Model, Normalization, Permutation,
+    Sampling, Ssc, Structure, TDf, TestStat, Variant, VcovKind, VcovOutput, WeightsType, WhichBias,
 };
 use fereg_core::{Ctx, RfError, par};
 use rayon::prelude::*;
@@ -497,69 +497,249 @@ fn output(out: FitOutput, n_input: usize, threads: usize) -> Result<Robj> {
 
 // ---- entry points ---------------------------------------------------------------------------
 
-/// Estimates one model. `input` and `spec` are built by `fereg:::fit_core()`.
-#[extendr]
-fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
-    let n = get_usize(&input, "n")?;
-    let y_r = field(&input, "y");
-    let x_r = list_items(&input, "x")?;
-    let endog_r = list_items(&input, "endog")?;
-    let inst_r = list_items(&input, "inst")?;
-    let fac_r = list_items(&input, "factors")?;
-    let factor_names = strings(&field(&input, "factor_names"));
-    let slope_r = list_items(&input, "slopes")?;
-    let w_r = field(&input, "weights");
-    let off_r = field(&input, "offset");
-    let drop_r = field(&input, "drop");
-    let fe_r = list_items(&input, "fe")?;
-    let cl_r = list_items(&input, "cluster")?;
-    let (time_r, panel_r, lat_r, lon_r) = (field(&input, "time"), field(&input, "panel"), field(&input, "lat"), field(&input, "lon"));
-    let vv = vcov_vars(&time_r, &panel_r, &lat_r, &lon_r)?;
+/// The R vectors of the input list built by `fereg:::fit_setup()`, kept alive while a `FitInput`
+/// borrows them (zero-copy for double and integer vectors).
+struct InputR {
+    n: usize,
+    y: Robj,
+    x: Vec<Robj>,
+    endog: Vec<Robj>,
+    inst: Vec<Robj>,
+    factors: Vec<Robj>,
+    factor_names: Vec<String>,
+    slopes: Vec<Robj>,
+    weights: Robj,
+    offset: Robj,
+    cluster: Vec<Robj>,
+    time: Robj,
+    panel: Robj,
+    lat: Robj,
+    lon: Robj,
+    fe: Vec<FeTerm>,
+    drop: Option<Vec<bool>>,
+}
 
-    let drop: Option<Vec<bool>> = if drop_r.is_null() {
-        None
-    } else {
-        let v = drop_r.as_logical_slice().ok_or_else(|| invalid("fereg: `drop` must be logical"))?;
-        Some(v.iter().map(|b| b.is_true()).collect())
-    };
-    let fe = fe_r
-        .iter()
-        .map(|t| {
-            let t: List = t.try_into().map_err(|_| invalid("fereg: invalid FE term"))?;
-            Ok(FeTerm {
-                factors: indices(&field(&t, "factors"), "fe")?,
-                intercept: get_bool(&t, "intercept")?,
-                slopes: indices(&field(&t, "slopes"), "fe")?,
+impl InputR {
+    fn read(input: &List) -> Result<InputR> {
+        let drop_r = field(input, "drop");
+        let drop = if drop_r.is_null() {
+            None
+        } else {
+            let v = drop_r.as_logical_slice().ok_or_else(|| invalid("fereg: `drop` must be logical"))?;
+            Some(v.iter().map(|b| b.is_true()).collect())
+        };
+        let fe = list_items(input, "fe")?
+            .iter()
+            .map(|t| {
+                let t: List = t.try_into().map_err(|_| invalid("fereg: invalid FE term"))?;
+                Ok(FeTerm {
+                    factors: indices(&field(&t, "factors"), "fe")?,
+                    intercept: get_bool(&t, "intercept")?,
+                    slopes: indices(&field(&t, "slopes"), "fe")?,
+                })
             })
+            .collect::<Result<Vec<_>>>()?;
+        let factors = list_items(input, "factors")?;
+        let factor_names = strings(&field(input, "factor_names"));
+        if factor_names.len() != factors.len() {
+            return Err(invalid("fereg: one name per factor is required"));
+        }
+        Ok(InputR {
+            n: get_usize(input, "n")?,
+            y: field(input, "y"),
+            x: list_items(input, "x")?,
+            endog: list_items(input, "endog")?,
+            inst: list_items(input, "inst")?,
+            factors,
+            factor_names,
+            slopes: list_items(input, "slopes")?,
+            weights: field(input, "weights"),
+            offset: field(input, "offset"),
+            cluster: list_items(input, "cluster")?,
+            time: field(input, "time"),
+            panel: field(input, "panel"),
+            lat: field(input, "lat"),
+            lon: field(input, "lon"),
+            fe,
+            drop,
         })
-        .collect::<Result<Vec<_>>>()?;
-    if factor_names.len() != fac_r.len() {
-        return Err(invalid("fereg: one name per factor is required"));
     }
 
-    let fit_input = FitInput {
-        n,
-        y: real_slice(&y_r, "y")?,
-        x: real_slices(&x_r, "x")?,
-        endog: real_slices(&endog_r, "endog")?,
-        inst: real_slices(&inst_r, "inst")?,
-        factors: factor_cols(&fac_r, &factor_names)?,
-        factor_names,
-        fe,
-        slopes: real_slices(&slope_r, "slopes")?,
-        weights: opt_real(&w_r, "weights")?,
-        offset: opt_real(&off_r, "offset")?,
-        cluster: clusters(&cl_r)?,
-        time: vv.time,
-        panel: vv.panel,
-        lat: vv.lat,
-        lon: vv.lon,
-        drop: drop.as_deref(),
-    };
+    fn fit_input(&self) -> Result<FitInput<'_>> {
+        let vv = vcov_vars(&self.time, &self.panel, &self.lat, &self.lon)?;
+        Ok(FitInput {
+            n: self.n,
+            y: real_slice(&self.y, "y")?,
+            x: real_slices(&self.x, "x")?,
+            endog: real_slices(&self.endog, "endog")?,
+            inst: real_slices(&self.inst, "inst")?,
+            factors: factor_cols(&self.factors, &self.factor_names)?,
+            factor_names: self.factor_names.clone(),
+            fe: self.fe.clone(),
+            slopes: real_slices(&self.slopes, "slopes")?,
+            weights: opt_real(&self.weights, "weights")?,
+            offset: opt_real(&self.offset, "offset")?,
+            cluster: clusters(&self.cluster)?,
+            time: vv.time,
+            panel: vv.panel,
+            lat: vv.lat,
+            lon: vv.lon,
+            drop: self.drop.as_deref(),
+        })
+    }
+}
+
+/// Estimates one model. `input` and `spec` are built by `fereg:::fit_setup()`.
+#[extendr]
+fn fereg_fit(input: List, spec: List, nthreads: i32) -> Result<Robj> {
+    let inp = InputR::read(&input)?;
     let spec = spec_of(&spec)?;
-    let ctx = ctx(nthreads);
-    let out = fit::fit(&fit_input, &spec, &ctx).map_err(core_err)?;
-    output(out, n, nthreads.max(0) as usize)
+    let out = fit::fit(&inp.fit_input()?, &spec, &ctx(nthreads)).map_err(core_err)?;
+    output(out, inp.n, nthreads.max(0) as usize)
+}
+
+fn structure(s: &str) -> Result<Structure> {
+    match s {
+        "classic" => Ok(Structure::Classic),
+        "network" => Ok(Structure::Network),
+        _ => Err(invalid(format!("fereg: unknown panel structure `{s}`"))),
+    }
+}
+
+/// One dimension of a `multiple` partition: the 1-based new index of every unit (`sample.int()`)
+/// as 0-based indices, or `None` (not permuted).
+fn permutation(r: &Robj, what: &str) -> Result<Option<Vec<u32>>> {
+    if r.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(indices(r, what)?.into_iter().map(|i| i as u32).collect()))
+}
+
+/// The options built by `fereg::biasCorr()`: list(method, structure, which, bandwidth, time (1-based
+/// factor index or NULL), variant, partitions = list(list(individual, period), ...)).
+fn bias_options(l: &List) -> Result<BiasOptions> {
+    let method = match get_str(l, "method")? {
+        "analytical" => BiasMethod::Analytical,
+        "jackknife" => {
+            let variant = match get_str(l, "variant")? {
+                "ss1" => Variant::Ss1,
+                "ss2" => Variant::Ss2,
+                "js" => Variant::Js,
+                "sj" => Variant::Sj,
+                "jj" => Variant::Jj,
+                "double" => Variant::Double,
+                v => return Err(invalid(format!("fereg: unknown jackknife variant `{v}`"))),
+            };
+            let partitions = list_items(l, "partitions")?
+                .iter()
+                .map(|p| {
+                    let p: List = p.try_into().map_err(|_| invalid("fereg: invalid partition"))?;
+                    Ok(Permutation {
+                        individual: permutation(&field(&p, "individual"), "individual")?,
+                        period: permutation(&field(&p, "period"), "period")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            BiasMethod::Jackknife(JackknifeOptions { variant, partitions })
+        }
+        m => return Err(invalid(format!("fereg: unknown bias-correction method `{m}`"))),
+    };
+    let which = match get_str(l, "which")? {
+        "both" => WhichBias::Both,
+        "individual" => WhichBias::Individual,
+        "time" => WhichBias::Time,
+        w => return Err(invalid(format!("fereg: unknown bias `{w}`"))),
+    };
+    Ok(BiasOptions {
+        method,
+        normalization: Normalization::Alpaca,
+        structure: structure(get_str(l, "structure")?)?,
+        which,
+        bandwidth: get_usize(l, "bandwidth")?,
+        panel: None,
+        time: opt_index(&field(l, "time"), "time")?,
+    })
+}
+
+fn opt_reals(v: Option<&[f64]>) -> Robj {
+    v.map_or_else(|| ().into(), reals)
+}
+
+fn notes(v: &[String]) -> Robj {
+    Strings::from_values(v.iter().map(String::as_str)).into()
+}
+
+/// N_pre, T_pre and N* of a bias correction (`biasCorr()` draws the partitions of `multiple`).
+#[extendr]
+fn fereg_bias_dims(input: List, spec: List, bias: List, nthreads: i32) -> Result<Robj> {
+    let inp = InputR::read(&input)?;
+    let d = fit::bias_dims(&inp.fit_input()?, &spec_of(&spec)?, &bias_options(&bias)?, &ctx(nthreads)).map_err(core_err)?;
+    Ok(named(vec![("n_individuals", int(d.n_individuals)), ("n_periods", int(d.n_periods)), ("n_full", int(d.n_full))]))
+}
+
+/// Bias-corrected logit estimation: list(fit = `fereg_fit()`'s output at the corrected point,
+/// report).
+#[extendr]
+fn fereg_bias_corr(input: List, spec: List, bias: List, nthreads: i32) -> Result<Robj> {
+    let inp = InputR::read(&input)?;
+    let mut out = fit::bias_corr(&inp.fit_input()?, &spec_of(&spec)?, &bias_options(&bias)?, &ctx(nthreads)).map_err(core_err)?;
+    let r = &out.report;
+    let report = named(vec![
+        ("coef_uncorr", reals(&r.coef_uncorr)),
+        ("bias_term", reals(&r.bias_term)),
+        ("bandwidth", int(r.bandwidth)),
+        ("ape_jackknife", opt_reals(r.ape_jackknife.as_deref())),
+        ("n_full", int(r.n_full)),
+        ("n_fits", int(r.n_fits)),
+        ("deviance_uncorr", real(r.deviance_uncorr)),
+        ("notes", notes(&r.notes)),
+    ]);
+    // The report's notes are also in the fit's: R raises them once, from the report.
+    out.fit.notes.retain(|n| !out.report.notes.contains(n));
+    let fit = output(out.fit, inp.n, nthreads.max(0) as usize)?;
+    Ok(named(vec![("fit", fit), ("report", report)]))
+}
+
+/// Average partial effects. `at`: NULL (uncorrected) or list(bias = `biasCorr()`'s options, coef =
+/// corrected coefficients (core order), ape_jackknife = NULL or the jackknife APEs); `ape`:
+/// list(n_pop = NULL or a number, structure, sampling, weak_exo).
+#[extendr]
+fn fereg_apes(input: List, spec: List, at: Robj, ape: List, nthreads: i32) -> Result<Robj> {
+    let inp = InputR::read(&input)?;
+    let sampling = match get_str(&ape, "sampling")? {
+        "independence" => Sampling::Independence,
+        "unrestricted" => Sampling::Unrestricted,
+        s => return Err(invalid(format!("fereg: unknown sampling.fe `{s}`"))),
+    };
+    let opts = ApeOptions {
+        n_pop: if field(&ape, "n_pop").is_null() { None } else { Some(get_f64(&ape, "n_pop")?) },
+        structure: structure(get_str(&ape, "structure")?)?,
+        sampling,
+        weak_exo: get_bool(&ape, "weak_exo")?,
+    };
+    let (bias, coef_r, jk_r);
+    let point = if at.is_null() {
+        ApeAt::Uncorrected
+    } else {
+        let at: List = at.try_into().map_err(|_| invalid("fereg: invalid `at`"))?;
+        let b: List = field(&at, "bias").try_into().map_err(|_| invalid("fereg: invalid `at$bias`"))?;
+        bias = bias_options(&b)?;
+        coef_r = field(&at, "coef");
+        jk_r = field(&at, "ape_jackknife");
+        ApeAt::Corrected { options: &bias, coef: real_slice(&coef_r, "coef")?, ape_jackknife: opt_real(&jk_r, "ape_jackknife")? }
+    };
+    let o = fit::apes(&inp.fit_input()?, &spec_of(&spec)?, point, &opts, &ctx(nthreads)).map_err(core_err)?;
+    Ok(named(vec![
+        ("coef_source", sources(&o.coef_source)),
+        ("delta", reals(&o.delta)),
+        ("vcov", matrix(&o.vcov)),
+        ("bias_term", opt_reals(o.bias_term.as_deref())),
+        ("binary", Logicals::from_values(o.binary.iter().map(|&b| Rbool::from(b))).into()),
+        ("adj", real(o.adj)),
+        ("weak_exo_used", o.weak_exo_used.into()),
+        ("n_full", int(o.n_full)),
+        ("notes", notes(&o.notes)),
+    ]))
 }
 
 /// Variance matrix of a fitted model under another estimator / small-sample correction. `vars` is
@@ -632,5 +812,8 @@ extendr_module! {
     fn fereg_vcov;
     fn fereg_fixef;
     fn fereg_fixef_references;
+    fn fereg_bias_dims;
+    fn fereg_bias_corr;
+    fn fereg_apes;
     fn fereg_core_version;
 }

@@ -100,7 +100,7 @@ check_coord_na <- function(object, values, expr, label) {
 # CRV3 after estimation: the jackknife refits need the data, so the model is estimated again on
 # the same rows with vcov = CRV3 (only its variance is used).
 refit_vcov <- function(object, v, ssc) {
-  if (inherits(object, "fereg_biascorr")) stop("fereg: CRV3 is not available after bias correction", call. = FALSE)
+  if (inherits(object, "fereg_biascorr")) stop("CRV3 is not available after bias correction", call. = FALSE)
   s <- refit_setup(object, list(vcov = v, ssc = ssc, lean = TRUE, notes = FALSE))
   new <- build_result(fereg_fit(s$input, s$spec, s$info$args$nthreads), s$info)
   if (!identical(names(new$coefficients), names(object$coefficients))) {

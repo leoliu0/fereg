@@ -14,9 +14,10 @@ check_bc <- function(bc, abc, d, fe, group) {
   cl <- stats::as.formula(paste("~", fe[1]))
   expect_close(vcov(bc, vcov = cl, ssc = ssc(K.adj = FALSE, G.adj = FALSE)), vcov(abc, type = "clustered", cluster = cl),
     1e-6, paste(group, "vcov clustered"))
-  key <- function(x) do.call(paste, lapply(fe, function(v) as.character(x[[v]])))
-  rows <- if (is.null(bc$obs_selection)) seq_len(nrow(d)) else bc$obs_selection
-  expect_close(bc$linear.predictors, abc$eta[match(key(d[rows, ]), key(abc$data))], 1e-6, paste(group, "eta"))
+  # alpaca's rows: the estimation rows sorted (stably) by the fixed-effect variables.
+  e <- d[bc$obs_selection %||% seq_len(nrow(d)), , drop = FALSE]
+  ord <- do.call(order, c(lapply(fe, function(v) e[[v]]), method = "radix"))
+  expect_close(bc$linear.predictors[ord], abc$eta, 1e-6, paste(group, "eta"))
 }
 
 test_that("analytical correction matches alpaca: classic two-way, balanced and unbalanced, L = 0, 1, 2", {
@@ -125,8 +126,8 @@ test_that("the corrected estimation works with fereg's methods at the corrected 
   expect_output(print(summary(bc, vcov = ~i)), "Bias correction: analytical (L = 0)", fixed = TRUE)
   expect_output(print(summary(bc, vcov = ~i)), "Clustered (i)", fixed = TRUE)
   s <- summary(bc, vcov = "hetero")
-  expect_equal(unname(se(s)), unname(sqrt(diag(vcov(bc, vcov = "hetero")))), tolerance = 1e-14)
-  expect_equal(unname(se(bc)), unname(sqrt(diag(vcov(bc)))), tolerance = 1e-14)
+  expect_equal(as.vector(se(s)), unname(sqrt(diag(vcov(bc, vcov = "hetero")))), tolerance = 1e-14)
+  expect_equal(as.vector(se(bc)), unname(sqrt(diag(vcov(bc)))), tolerance = 1e-14)
   expect_equal(coef(s), coef(bc))
   expect_false(isTRUE(all.equal(unname(coef(bc)), unname(coef(m)))))
   # Fixed effects, predictions and fitted values at the corrected point (estimation rows `e`).
@@ -144,7 +145,7 @@ test_that("the corrected estimation works with fereg's methods at the corrected 
   expect_s3_class(et, "fereg_etable")
   expect_true(any(grepl(fmt_coef(coef(bc)[["x1"]], 4), et[[3]], fixed = TRUE)))
   expect_false(any(grepl(fmt_coef(coef(bc)[["x1"]], 4), et[[2]], fixed = TRUE)))
-  expect_equal(confint(bc)[[1]], unname(coef(bc) - stats::qnorm(0.975) * se(bc)), tolerance = 1e-12)
+  expect_equal(confint(bc)[[1]], as.vector(coef(bc) - stats::qnorm(0.975) * se(bc)), tolerance = 1e-12)
   expect_error(vcov(bc, vcov = "crv3"), "CRV3 is not available after bias correction", fixed = TRUE)
   expect_error(summary(bc, vcov = crv3 ~ i), "CRV3 is not available after bias correction", fixed = TRUE)
   expect_error(biasCorr(bc), "already bias-corrected", fixed = TRUE)
@@ -154,7 +155,7 @@ test_that("the corrected estimation works with fereg's methods at the corrected 
   expect_equal(vcov(biasCorr(mc)), vcov(bc, vcov = ~i), tolerance = 1e-12)
 })
 
-test_that("biasCorr() rejects unsupported objects and combinations before estimating", {
+test_that("biasCorr() rejects unsupported objects and combinations (R checks, then the core's texts)", {
   d <- sim_classic(30, 6, 8)
   d$k <- rep(1:3, length.out = nrow(d))
   m2 <- fe_logit(y ~ x1 + d | i + t, d)
@@ -168,8 +169,9 @@ test_that("biasCorr() rejects unsupported objects and combinations before estima
   expect_error(biasCorr(fe_logit(c(y, d) ~ x1 | i, d)), "takes a single estimation", fixed = TRUE)
   expect_error(biasCorr(fe_logit(y ~ x1 + d | i + t, d, lean = TRUE)), "estimation state was not kept (lean = TRUE)", fixed = TRUE)
   expect_error(biasCorr(fe_logit(y ~ 1 | i + t, d)), "biasCorr() needs at least one regressor", fixed = TRUE)
-  expect_error(biasCorr(fe_logit(y ~ d | t[x1], d)), "needs fixed effects without varying slopes", fixed = TRUE)
-  expect_error(biasCorr(fe_logit(y ~ d | i + t[x1], d)), "needs fixed effects without varying slopes", fixed = TRUE)
+  slopes <- "bias correction and APEs need intercept-only fixed effects (no varying slopes)"
+  expect_error(biasCorr(fe_logit(y ~ d | t[x1], d)), slopes, fixed = TRUE)
+  expect_error(biasCorr(fe_logit(y ~ d | i + t[x1], d)), slopes, fixed = TRUE)
   classic <- "panel.structure == 'classic' expects a one- or two-way fixed effects model."
   network <- "panel.structure == 'network' expects a two- or three-way fixed effects model."
   expect_error(biasCorr(m3), classic, fixed = TRUE)
@@ -190,24 +192,27 @@ test_that("biasCorr() rejects unsupported objects and combinations before estima
   expect_error(biasCorr(m2, multiple = 2), "`multiple` needs method = \"jackknife\"", fixed = TRUE)
   expect_error(biasCorr(m2, split = "time"), "`split` is only used with `multiple`", fixed = TRUE)
   # Jackknife: classic panels, no bandwidth, multiple only for ss1 / ss2.
-  expect_error(biasCorr(m3, method = "jackknife", panel.structure = "network"), "need panel.structure = \"classic\"", fixed = TRUE)
-  expect_error(biasCorr(m2, method = "jackknife", L = 1), "bandwidth `L` is only used by the analytical correction", fixed = TRUE)
+  expect_error(biasCorr(m3, method = "jackknife", panel.structure = "network"), "the jackknife is not available for the network structure", fixed = TRUE)
+  expect_error(biasCorr(m2, method = "jackknife", L = 1), "bandwidth L = 1 has no effect: it only applies to the analytical correction", fixed = TRUE)
   for (v in c("js", "sj", "jj", "double")) {
-    expect_error(biasCorr(m2, method = "jackknife", jackknife = v, multiple = 2), "`multiple` needs jackknife = \"ss1\" or \"ss2\"", fixed = TRUE)
+    expect_error(biasCorr(m2, method = "jackknife", jackknife = v, multiple = 2),
+      "jackknife: multiple partitions are only available with the ss1 and ss2 variants", fixed = TRUE)
   }
   expect_error(biasCorr(m2, method = "jackknife", split = "time"), "`split` is only used with `multiple`", fixed = TRUE)
   # Which bias.
-  expect_error(biasCorr(m3, panel.structure = "network", bias = "individual"), "use bias = \"both\"", fixed = TRUE)
-  expect_error(biasCorr(m2, panel.structure = "network", bias = "time"), "use bias = \"both\"", fixed = TRUE)
-  expect_error(biasCorr(m1, bias = "time"), "bias = \"time\" needs a two-way model", fixed = TRUE)
-  expect_error(biasCorr(m1, method = "jackknife", bias = "time", panel.id = ~ i + t), "bias = \"time\" needs a two-way model", fixed = TRUE)
+  both <- "network structure: only the correction of both biases is available"
+  expect_error(biasCorr(m3, panel.structure = "network", bias = "individual"), both, fixed = TRUE)
+  expect_error(biasCorr(m2, panel.structure = "network", bias = "time"), both, fixed = TRUE)
+  time_fe <- "the time-effect bias needs a time fixed effect (a two-way model)"
+  expect_error(biasCorr(m1, bias = "time"), time_fe, fixed = TRUE)
+  expect_error(biasCorr(m1, method = "jackknife", bias = "time", panel.id = ~ i + t), time_fe, fixed = TRUE)
+  expect_error(biasCorr(m2, L = 2, bias = "time"), "bandwidth L = 2 has no effect: it only applies to the individual-effect bias", fixed = TRUE)
   # Random partitions that would not change the split dimension.
-  expect_error(biasCorr(m2, method = "jackknife", bias = "individual", multiple = 2, split = "individuals"),
-    "split = \"individuals\" has no effect", fixed = TRUE)
-  expect_error(biasCorr(m1, method = "jackknife", multiple = 2, split = "individuals", panel.id = ~ i + t),
-    "split = \"individuals\" has no effect", fixed = TRUE)
+  no_time <- "multiple partitions have no effect: the subpanels of this bias split only the time dimension, which no partition permutes"
+  expect_error(biasCorr(m2, method = "jackknife", bias = "individual", multiple = 2, split = "individuals"), no_time, fixed = TRUE)
+  expect_error(biasCorr(m1, method = "jackknife", multiple = 2, split = "individuals", panel.id = ~ i + t), no_time, fixed = TRUE)
   expect_error(biasCorr(m2, method = "jackknife", jackknife = "ss1", bias = "time", multiple = 2, split = "time"),
-    "split = \"time\" has no effect", fixed = TRUE)
+    "multiple partitions have no effect: the subpanels of this bias split only the individual dimension, which no partition permutes", fixed = TRUE)
   # panel.id: only for the one-way jackknife, whose fixed effect must be its panel variable.
   expect_error(biasCorr(m1, panel.id = ~ i + t), "`panel.id` is only used by the jackknife of a model with one fixed effect", fixed = TRUE)
   expect_error(biasCorr(m2, method = "jackknife", panel.id = ~ i + t), "`panel.id` is only used by the jackknife", fixed = TRUE)
@@ -219,7 +224,7 @@ test_that("biasCorr() rejects unsupported objects and combinations before estima
   expect_error(biasCorr(mp, method = "jackknife"), "the fixed effect (`t`) must be the panel variable of `panel.id` (`i`)", fixed = TRUE)
   # Double jackknife: two single-variable fixed effects.
   mi <- fe_logit(y ~ x1 + d | i^k + t, d)
-  expect_error(biasCorr(mi, method = "jackknife", jackknife = "double"), "two fixed effects that are single variables", fixed = TRUE)
+  expect_error(biasCorr(mi, method = "jackknife", jackknife = "double"), "the double jackknife needs two single-variable fixed effects", fixed = TRUE)
   # The data must still be there.
   local({
     dd <- d

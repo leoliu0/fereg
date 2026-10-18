@@ -160,31 +160,17 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
   L <- bc_count(L, "L")
   multiple <- bc_count(multiple, "multiple")
   k <- bc_check_fe(object, panel.structure, "biasCorr")
-  if (identical(object$vcov_info$type, "crv3")) {
-    stop("fereg: CRV3 is not available after bias correction; estimate the model with another `vcov`", call. = FALSE)
-  }
+  # Arguments of this interface without effect (the core checks the combinations it receives:
+  # bandwidth, bias, variant, partitions, structure, CRV3, with the same texts in R, Python and
+  # Stata).
   if (method == "analytical") {
     if (jackknife_given) stop("fereg: `jackknife` needs method = \"jackknife\"", call. = FALSE)
     if (multiple > 0) stop("fereg: `multiple` needs method = \"jackknife\"", call. = FALSE)
-  } else {
-    if (panel.structure == "network") stop("fereg: the jackknife corrections need panel.structure = \"classic\"", call. = FALSE)
-    if (L > 0) stop("fereg: the bandwidth `L` is only used by the analytical correction (method = \"analytical\")", call. = FALSE)
-    if (multiple > 0 && !jackknife %in% c("ss1", "ss2")) stop("fereg: `multiple` needs jackknife = \"ss1\" or \"ss2\"", call. = FALSE)
   }
   if (split_given && multiple == 0) stop("fereg: `split` is only used with `multiple`", call. = FALSE)
+  # The core's text; its fit layer resolves any `bias` of a network to "both".
   if (panel.structure == "network" && bias != "both") {
-    stop("fereg: panel.structure = \"network\" corrects the bias of all fixed effects; use bias = \"both\"", call. = FALSE)
-  }
-  if (bias == "time" && k == 1) stop("fereg: bias = \"time\" needs a two-way model (individual and time fixed effects)", call. = FALSE)
-  if (multiple > 0) {
-    if ((bias == "individual" || k == 1) && split == "individuals") {
-      stop("fereg: split = \"individuals\" has no effect when only the individual-effect bias is corrected ",
-        "(the panel is split in time); use split = \"time\" or \"both\"", call. = FALSE)
-    }
-    if (bias == "time" && split == "time") {
-      stop("fereg: split = \"time\" has no effect when only the time-effect bias is corrected ",
-        "(the panel is split across individuals); use split = \"individuals\" or \"both\"", call. = FALSE)
-    }
+    stop("network structure: only the correction of both biases is available", call. = FALSE)
   }
   needs_time <- method == "jackknife" && k == 1
   if (!is.null(panel.id) && !needs_time) {
@@ -249,7 +235,8 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 #' removed (Fernández-Val and Weidner, 2016); `panel.structure` and the bandwidth are those of the
 #' correction and `weak.exo` is `L > 0` (alpaca). For a jackknife correction, the APEs are the
 #' jackknife combination of the APEs of the full sample and of the subpanels (each averaged over
-#' the subpanel's own observations), with the variance at the corrected point.
+#' the subpanel's own observations), with the variance at the corrected point; `weak.exo` applies
+#' as for an uncorrected estimation.
 #'
 #' The variance is the delta-method variance (Fernández-Val and Weidner, 2016, as alpaca) plus,
 #' when `n.pop` is given, a finite-population term for the sampling of the effects multiplied by
@@ -260,11 +247,14 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 #' **Difference from alpaca.** With `n.pop` and fixed-effect groups removed because of a constant
 #' outcome, the sampling-of-effects term sums over all observations, with zero partial effects for
 #' the removed ones, consistently with the point estimate; alpaca (and Stata's logitfe) sum over
-#' the retained observations only, which overstates the variance. The numbers are identical when
-#' no group is removed. After a correction, the APEs and their variance differ from alpaca's by
-#' about 1e-6 because alpaca's fixed effects at the corrected coefficients are imprecise (see
-#' [biasCorr()]). Giving `panel.structure` or `weak.exo` values that contradict the correction of
-#' a [biasCorr()] object is an error (alpaca ignores them).
+#' the retained observations only, which overstates the variance. The covariance term of weakly
+#' exogenous regressors also runs over all observations of each individual (pair in a network) in
+#' time order, the removed ones included; it differs from alpaca's when some observations of a
+#' retained individual were removed (e.g. a period with a constant outcome). The numbers are
+#' identical when no observation is removed. After a correction, the APEs and their variance
+#' differ from alpaca's by about 1e-6 because alpaca's fixed effects at the corrected coefficients
+#' are imprecise (see [biasCorr()]). Giving `panel.structure` or `weak.exo` values that contradict
+#' an analytical correction is an error (alpaca ignores them).
 #'
 #' @param object A logit estimation of [feglm()] (see [biasCorr()] for the requirements) or a
 #'   [biasCorr()] result.
@@ -275,7 +265,7 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 #' @param sampling.fe `"independence"` (default: the fixed effects are independent sequences) or
 #'   `"unrestricted"` (no sampling term).
 #' @param weak.exo `TRUE` if some regressors are weakly exogenous (adds their covariance with the
-#'   sampling term). Set to `L > 0` for a [biasCorr()] object.
+#'   sampling term). Set to `L > 0` after an analytical [biasCorr()] correction.
 #' @return An object of class `"APEs"`: a list with `delta` (the APEs), `vcov` (their variance),
 #'   `panel.structure`, `sampling.fe`, `weak.exo`, and for a [biasCorr()] object `bandwidth` and,
 #'   after an analytical correction, `bias.term` (the APE bias removed from the APEs at the
@@ -308,12 +298,15 @@ getAPEs <- function(object = NULL, n.pop = NULL, panel.structure = c("classic", 
         "\", which getAPEs() takes from it; drop `panel.structure`", call. = FALSE)
     }
     panel.structure <- object$panel.structure
-    exo <- object$bandwidth > 0
-    if (!missing(weak.exo) && weak.exo != exo) {
-      stop("fereg: after a bias correction, weak.exo is ", exo, " (L = ", object$bandwidth,
-        "); drop `weak.exo`", call. = FALSE)
+    if (object$method == "analytical") {
+      # alpaca: weak exogeneity follows the bandwidth of the analytical correction.
+      exo <- object$bandwidth > 0
+      if (!missing(weak.exo) && weak.exo != exo) {
+        stop("fereg: after an analytical bias correction, weak.exo is ", exo, " (L = ", object$bandwidth,
+          "); drop `weak.exo`", call. = FALSE)
+      }
+      weak.exo <- exo
     }
-    weak.exo <- exo
   } else {
     panel.structure <- match.arg(panel.structure)
   }
@@ -348,7 +341,7 @@ getAPEs <- function(object = NULL, n.pop = NULL, panel.structure = c("classic", 
   dimnames(V) <- list(nm, nm)
   res <- list(
     delta = stats::setNames(out$delta[perm], nm), vcov = V, panel.structure = panel.structure,
-    sampling.fe = sampling.fe, weak.exo = weak.exo
+    sampling.fe = sampling.fe, weak.exo = isTRUE(out$weak_exo_used)
   )
   if (corrected) {
     if (!is.null(out$bias_term)) res$bias.term <- stats::setNames(out$bias_term[perm], nm)
@@ -441,7 +434,7 @@ bc_check_object <- function(object, fun) {
 bc_check_fe <- function(object, panel.structure, fun) {
   terms <- object$fixef_terms
   if (any(vapply(terms, function(t) !t$intercept || length(t$slopes) > 0, TRUE))) {
-    stop("fereg: ", fun, "() needs fixed effects without varying slopes", call. = FALSE)
+    stop("bias correction and APEs need intercept-only fixed effects (no varying slopes)", call. = FALSE)
   }
   k <- length(terms)
   if (panel.structure == "classic" && !k %in% 1:2) {
@@ -497,7 +490,7 @@ bias_setup <- function(object, data, time_var = NULL, common = FALSE, vcov = NUL
     i1 <- s$input$fe[[1]]$factors
     i2 <- s$input$fe[[2]]$factors
     if (length(i1) != 1 || length(i2) != 1) {
-      stop("fereg: jackknife = \"double\" needs two fixed effects that are single variables", call. = FALSE)
+      stop("the double jackknife needs two single-variable fixed effects", call. = FALSE)
     }
     v1 <- reg$values[[i1]]
     v2 <- reg$values[[i2]]

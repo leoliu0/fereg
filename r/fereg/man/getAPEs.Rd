@@ -26,7 +26,7 @@ correction for a \code{\link[=biasCorr]{biasCorr()}} object.}
 \code{"unrestricted"} (no sampling term).}
 
 \item{weak.exo}{\code{TRUE} if some regressors are weakly exogenous (adds their covariance with the
-sampling term). Set to \code{L > 0} for a \code{\link[=biasCorr]{biasCorr()}} object.}
+sampling term). Set to \code{L > 0} after an analytical \code{\link[=biasCorr]{biasCorr()}} correction.}
 }
 \value{
 An object of class \code{"APEs"}: a list with \code{delta} (the APEs), \code{vcov} (their variance),
@@ -48,7 +48,8 @@ For an analytical correction, the APEs are evaluated at the corrected point and 
 removed (Fernández-Val and Weidner, 2016); \code{panel.structure} and the bandwidth are those of the
 correction and \code{weak.exo} is \code{L > 0} (alpaca). For a jackknife correction, the APEs are the
 jackknife combination of the APEs of the full sample and of the subpanels (each averaged over
-the subpanel's own observations), with the variance at the corrected point.
+the subpanel's own observations), with the variance at the corrected point; \code{weak.exo} applies
+as for an uncorrected estimation.
 
 The variance is the delta-method variance (Fernández-Val and Weidner, 2016, as alpaca) plus,
 when \code{n.pop} is given, a finite-population term for the sampling of the effects multiplied by
@@ -59,11 +60,14 @@ warning (alpaca). \code{sampling.fe} and \code{weak.exo} only change this term.
 \strong{Difference from alpaca.} With \code{n.pop} and fixed-effect groups removed because of a constant
 outcome, the sampling-of-effects term sums over all observations, with zero partial effects for
 the removed ones, consistently with the point estimate; alpaca (and Stata's logitfe) sum over
-the retained observations only, which overstates the variance. The numbers are identical when
-no group is removed. After a correction, the APEs and their variance differ from alpaca's by
-about 1e-6 because alpaca's fixed effects at the corrected coefficients are imprecise (see
-\code{\link[=biasCorr]{biasCorr()}}). Giving \code{panel.structure} or \code{weak.exo} values that contradict the correction of
-a \code{\link[=biasCorr]{biasCorr()}} object is an error (alpaca ignores them).
+the retained observations only, which overstates the variance. The covariance term of weakly
+exogenous regressors also runs over all observations of each individual (pair in a network) in
+time order, the removed ones included; it differs from alpaca's when some observations of a
+retained individual were removed (e.g. a period with a constant outcome). The numbers are
+identical when no observation is removed. After a correction, the APEs and their variance
+differ from alpaca's by about 1e-6 because alpaca's fixed effects at the corrected coefficients
+are imprecise (see \code{\link[=biasCorr]{biasCorr()}}). Giving \code{panel.structure} or \code{weak.exo} values that contradict
+an analytical correction is an error (alpaca ignores them).
 }
 \examples{
 data(trade_toy, package = "fereg")

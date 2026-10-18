@@ -1,8 +1,9 @@
 # getAPEs(): average partial effects and their variance against alpaca 0.3.5 (exact control).
-# With groups removed for a constant outcome, the finite-population term sums over all N* rows
-# (design 6.3) and is checked against that computation on alpaca's ingredients; it equals
-# alpaca's when nothing is removed. Uncorrected estimations at 1e-8; corrected ones at 1e-6
-# (alpaca solves the fixed effects at the corrected coefficients imprecisely).
+# With rows removed for a constant outcome, the finite-population term and the weak-exogeneity
+# covariance sum over all N* rows (design 6.3, core API 2.2) and are checked against that
+# computation on alpaca's ingredients (ape_vcov_all_rows()), which equals alpaca's when nothing
+# is removed. Uncorrected estimations at 1e-8; corrected ones at 1e-6 (alpaca solves the fixed
+# effects at the corrected coefficients imprecisely).
 
 # Every variant of getAPEs() (n.pop NULL / given, both sampling.fe, weak.exo) on `obj` (fereg)
 # and `a` (alpaca), `full` being the N* rows and `fe` the fixed-effect variables.
@@ -27,15 +28,16 @@ check_apes <- function(obj, a, full, fe, group, tol, ps = "classic") {
         expect_identical(ours$panel.structure, theirs$panel.structure)
         expect_identical(ours$sampling.fe, sfe)
         expect_close(ours$delta, theirs$delta, tol, paste(g, "delta"))
-        ref <- if (!is.null(np) && drops) {
-          ape_vcov_all_rows(a, full, fe, np, theirs$panel.structure, sfe, theirs$weak.exo)
+        all_rows <- !is.null(np) && drops
+        ref <- if (all_rows) {
+          ape_vcov_all_rows(a, full, obj$obs_selection %||% seq_len(nrow(full)), fe, np, theirs$panel.structure, sfe, theirs$weak.exo)
         } else {
           theirs$vcov
         }
-        expect_close(ours$vcov, ref, tol, paste(g, if (!is.null(np) && drops) "vcov (all rows)" else "vcov"))
+        expect_close(ours$vcov, ref, tol, paste(g, if (all_rows) "vcov (all rows)" else "vcov"))
         if (corrected) {
           expect_close(ours$bias.term, theirs$bias.term, tol, paste(g, "bias.term"))
-          expect_identical(ours$bandwidth, theirs$bandwidth)
+          expect_equal(ours$bandwidth, as.integer(theirs$bandwidth))
         } else {
           expect_null(ours$bias.term)
         }
@@ -56,23 +58,47 @@ check_case <- function(fml, d, fe, group, ps = "classic", L = c(0L, 2L)) {
   invisible(a)
 }
 
-test_that("the sampling term over all rows is alpaca's when no group is removed", {
+test_that("the all-rows variance reference is alpaca's when no row is removed", {
   skip_if_not(alpaca_ok())
   d <- sim_classic(60, 12, 1)
   a <- al_feglm(y ~ x1 + d | i + t, d)
   expect_identical(a$nobs[["nobs.pc"]], 0L)
   for (we in c(FALSE, TRUE)) {
-    expect_close(ape_vcov_all_rows(a, d, c("i", "t"), 2000, weak.exo = we), alpaca::getAPEs(a, n.pop = 2000, weak.exo = we)$vcov,
-      1e-14, "all-rows reference vs alpaca, no drops")
+    for (sfe in c("independence", "unrestricted")) {
+      expect_close(ape_vcov_all_rows(a, d, seq_len(nrow(d)), c("i", "t"), 2000, sampling.fe = sfe, weak.exo = we),
+        alpaca::getAPEs(a, n.pop = 2000, sampling.fe = sfe, weak.exo = we)$vcov, 1e-13, "all-rows reference vs alpaca, no drops")
+    }
+  }
+  abc <- alpaca::biasCorr(a, L = 2)
+  expect_close(ape_vcov_all_rows(a, d, seq_len(nrow(d)), c("i", "t"), NULL), alpaca::getAPEs(a)$vcov, 1e-13,
+    "all-rows reference vs alpaca, no drops")
+  expect_close(ape_vcov_all_rows(abc, d, seq_len(nrow(d)), c("i", "t"), 2000, weak.exo = TRUE),
+    alpaca::getAPEs(abc, n.pop = 2000)$vcov, 1e-13, "all-rows reference vs alpaca, no drops")
+  # Network: the rows alpaca keeps, estimated again, have nothing to remove.
+  nw <- sim_network(10, 5, 4)
+  nw <- nw[fe_logit(y ~ x + rta | exp_time + imp_time + pair, nw)$obs_selection, ]
+  an <- al_feglm(y ~ x + rta | exp_time + imp_time + pair, nw)
+  expect_identical(an$nobs[["nobs.pc"]], 0L)
+  for (o in list(an, alpaca::biasCorr(an, L = 2, panel.structure = "network"))) {
+    expect_close(ape_vcov_all_rows(o, nw, seq_len(nrow(nw)), c("exp_time", "imp_time", "pair"), 5000, "network", weak.exo = TRUE),
+      alpaca::getAPEs(o, n.pop = 5000, panel.structure = "network", weak.exo = TRUE)$vcov, 1e-13, "all-rows reference vs alpaca, no drops")
   }
 })
 
-test_that("APEs match alpaca: classic two-way, balanced and with removed groups", {
+test_that("APEs match alpaca: classic two-way, balanced and with removed rows", {
   skip_if_not(alpaca_ok())
   check_case(y ~ x1 + d | i + t, sim_classic(60, 12, 1), c("i", "t"), "classic balanced")
   d <- sim_classic(80, 10, 2, sd_a = 2, drop = 0.15)
   a <- check_case(y ~ x1 + d | i + t, d, c("i", "t"), "classic drops")
   expect_gt(a$nobs[["nobs.pc"]], 0)
+  # A period with a constant outcome: retained individuals lose a row, so the weak-exogeneity
+  # covariance over all rows differs from alpaca's (shown without the sampling term).
+  d$y[d$t == 4] <- 1L
+  a <- check_case(y ~ x1 + d | i + t, d, c("i", "t"), "classic period dropped")
+  expect_false(4 %in% a$data$t)
+  m <- fe_logit(y ~ x1 + d | i + t, d)
+  ours <- getAPEs(m, n.pop = 5000, sampling.fe = "unrestricted", weak.exo = TRUE)$vcov
+  expect_gt(rel_diff(ours, alpaca::getAPEs(a, n.pop = 5000, sampling.fe = "unrestricted", weak.exo = TRUE)$vcov), 1e-6)
 })
 
 test_that("APEs match alpaca: dynamic panel (binary lagged outcome), one-way and weights", {
@@ -129,7 +155,7 @@ test_that("getAPEs() on a corrected estimation takes the structure and weak exog
   expect_true(getAPEs(bc2)$weak.exo)
   expect_identical(getAPEs(bc2)$bandwidth, 2L)
   expect_equal(getAPEs(bc2, weak.exo = TRUE, panel.structure = "classic")$vcov, getAPEs(bc2)$vcov)
-  expect_error(getAPEs(bc2, weak.exo = FALSE), "after a bias correction, weak.exo is TRUE (L = 2); drop `weak.exo`", fixed = TRUE)
+  expect_error(getAPEs(bc2, weak.exo = FALSE), "after an analytical bias correction, weak.exo is TRUE (L = 2); drop `weak.exo`", fixed = TRUE)
   expect_error(getAPEs(bc0, weak.exo = TRUE), "weak.exo is FALSE (L = 0)", fixed = TRUE)
   expect_error(getAPEs(bc0, panel.structure = "network"), "the bias correction used panel.structure = \"classic\"", fixed = TRUE)
   ape <- getAPEs(bc0)
@@ -148,7 +174,7 @@ test_that("getAPEs() rejects unsupported objects and arguments before estimating
   expect_error(getAPEs(fe_logit(c(y, d) ~ x1 | i, d)), "takes a single estimation", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t, d, lean = TRUE)), "estimation state was not kept (lean = TRUE)", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ 1 | i + t, d)), "getAPEs() needs at least one regressor", fixed = TRUE)
-  expect_error(getAPEs(fe_logit(y ~ d | t[x1], d)), "needs fixed effects without varying slopes", fixed = TRUE)
+  expect_error(getAPEs(fe_logit(y ~ d | t[x1], d)), "bias correction and APEs need intercept-only fixed effects (no varying slopes)", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t + k, d)), "panel.structure == 'classic' expects a one- or two-way fixed effects model.", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d, d)), "panel.structure == 'classic' expects a one- or two-way fixed effects model.", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i, d), panel.structure = "network"),
