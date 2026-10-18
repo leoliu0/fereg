@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import io
+import math
 import re
 import warnings
 from contextlib import redirect_stdout
@@ -57,7 +58,7 @@ def fit_jk(fml: str, name: str) -> fereg.Felogit:
 
 @pytest.mark.parametrize("c", models(), ids=case_id)
 def test_uncorrected_fit_matches_alpaca(c):
-    m = fit(c["fml"], c["data"])
+    m = fit_case(c["id"])
     assert list(m.coef().index) == c["coef_names"]
     assert_close(m.coef(), c["coef"], RTOL, "coef")
     assert_close(m._vcov, c["vcov"]["iid"], RTOL_UNCORR_VCOV, "vcov iid")
@@ -92,11 +93,10 @@ def test_analytical_matches_alpaca(c, r):
     assert res.deviance_uncorr == pytest.approx(m.deviance, rel=1e-12)
     if "alpaca" in r:
         assert_close(res._vcov, r["alpaca"]["vcov"]["iid"], RTOL_POINT, "alpaca vcov hessian")
-    # attributes (resolved against the model: a one-way model has the individual bias only; a
-    # two-way network model has no pair effect, so no L enters)
+    # attributes: bias is the one corrected (a one-way model has the individual bias only);
+    # bandwidth is the requested L, as alpaca (a two-way network model ignores it)
     assert res.panel_structure == c["structure"]
-    no_lags = c["structure"] == "network" and len(c["fe"]) == 2
-    assert res.bandwidth == (0 if no_lags else r["L"])
+    assert res.bandwidth == r["L"]
     assert res.method == "analytical"
     assert res.jackknife is None
     assert res.bias == ("individual" if len(c["fe"]) == 1 else r["bias"])
@@ -106,7 +106,10 @@ def test_analytical_matches_alpaca(c, r):
     np.testing.assert_array_equal(res._obs, m._obs)
 
 
-@pytest.mark.parametrize(("c", "r"), ANALYTICAL[:4], ids=[correction_id(c, r) for c, r in ANALYTICAL[:4]])
+POST_HOC = ANALYTICAL[:4] + [next((c, r) for c, r in ANALYTICAL if c["id"] == k) for k in ("weights", "offset")]
+
+
+@pytest.mark.parametrize(("c", "r"), POST_HOC, ids=[correction_id(c, r) for c, r in POST_HOC])
 def test_post_hoc_vcov_at_corrected_point(c, r):
     res = fit_case(c["id"]).bias_corr(L=r["L"], panel_structure=c["structure"], bias=r["bias"])
     assert_close(res.vcov("hetero")._vcov, r["vcov"]["hetero"], RTOL_POINT, "hetero")
@@ -173,12 +176,24 @@ def test_methods_on_corrected_result():
 
 
 def test_lean_fit():
+    # the corrected model is lean iff the uncorrected one is (the core refits from the design)
     c = model_case("classic")
     r = next(r for r in c["corrections"] if r["L"] == 0 and r["bias"] == "both")
-    res = fit(c["fml"], c["data"], lean=True).bias_corr()
+    m = fit(c["fml"], c["data"], lean=True)
+    res = m.bias_corr()
     assert_close(res.coef(), r["coef"], RTOL, "coef")
+    assert_close(res._vcov, r["vcov"]["iid"], RTOL_POINT, "vcov at estimation")
+    assert res._out.state is None and res._out.eta is None
     with pytest.raises(ValueError, match="lean=True"):
         res.vcov("hetero")
+    with pytest.raises(ValueError, match="lean=True"):
+        res.predict()
+    e = next(e for e in r["apes"] if e["n_pop"] is not None and e["sampling_fe"] == "independence")
+    assert_close(res.get_apes(n_pop=e["n_pop"]).vcov.to_numpy(), e["vcov"], RTOL_POINT, "APEs of a lean model")
+    full = corrected("classic", 0, "both")
+    assert full._out.state is not None and full._out.eta is not None
+    jk = m.bias_corr(method="jackknife")
+    assert jk._out.state is None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -255,6 +270,117 @@ def test_multiple_without_permuted_dimension_is_an_error():
         m.bias_corr(method="jackknife", jackknife="ss1", bias="individual", multiple=3, split="individuals", seed=1)
     with pytest.raises(ValueError, match=exact(CORE["multiple_individual"])):
         m.bias_corr(method="jackknife", jackknife="ss1", bias="time", multiple=3, split="time", seed=1)
+
+
+# Independent jackknife references: subpanels built here (fereg design 7) and refitted with plain
+# fereg.feglm calls on the subsets of the data.
+
+
+def _halves(idx: np.ndarray, m: int) -> tuple[np.ndarray, np.ndarray]:
+    """1-based indices of m units: first half <= ceil(m/2); second > m/2 (m even) or >= ceil(m/2)."""
+    first = idx <= math.ceil(m / 2)
+    second = idx > m / 2 if m % 2 == 0 else idx >= math.ceil(m / 2)
+    return first, second
+
+
+def _position_halves(ind: np.ndarray, key: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-individual time halves: rows of each individual ordered by ``key`` (ties: row order)."""
+    df = pd.DataFrame({"ind": ind, "key": key, "row": np.arange(len(ind))}).sort_values(["ind", "key", "row"])
+    pos = np.empty(len(ind), dtype=np.int64)
+    pos[df["row"].to_numpy()] = df.groupby("ind").cumcount().to_numpy() + 1
+    t_i = np.bincount(ind)[ind]
+    first = pos <= np.ceil(t_i / 2)
+    second = np.where(t_i % 2 == 0, pos > t_i / 2, pos >= np.ceil(t_i / 2))
+    return first, second
+
+
+def _subfit(d: pd.DataFrame, keep: np.ndarray, fml: str, **kw) -> np.ndarray:
+    """Coefficients and APEs (divided by the subpanel's own N*) of a plain fit on ``d[keep]``."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = fereg.feglm(fml, d.loc[keep].reset_index(drop=True), family="logit", ssc=SSC, **FIT_KW, **kw)
+        return np.concatenate([m.coef().to_numpy(), m.get_apes().coef().to_numpy()])
+
+
+def _mean(fits: list[np.ndarray]) -> np.ndarray:
+    return np.mean(fits, axis=0)
+
+
+def _check_combination(res: fereg.FelogitBiasCorr, combined: np.ndarray, what: str) -> None:
+    p = len(res.coef())
+    assert_close(res.coef(), combined[:p], RTOL, f"{what}: coefficients")
+    assert_close(res.get_apes().coef(), combined[p:], RTOL, f"{what}: APEs")
+
+
+def test_jackknife_with_offset_matches_plain_refits():
+    d = data("classic")
+    fml, kw = "y ~ x1 + x2 + d | i + t", {"offset": "off"}
+    ind, per = d["i"].to_numpy() - 1, d["t"].to_numpy() - 1
+    n, t = ind.max() + 1, per.max() + 1
+    full = _subfit(d, np.ones(len(d), dtype=bool), fml, **kw)
+    m = fit(fml, "classic", **kw)
+    ih, ph = _halves(ind + 1, n), _position_halves(ind, per)
+    ss2 = 3 * full - _mean([_subfit(d, h, fml, **kw) for h in ih]) - _mean([_subfit(d, h, fml, **kw) for h in ph])
+    _check_combination(m.bias_corr(method="jackknife", jackknife="ss2"), ss2, "ss2 with offset")
+    del_i = _mean([_subfit(d, ind != i, fml, **kw) for i in range(n)])
+    del_t = _mean([_subfit(d, per != s, fml, **kw) for s in range(t)])
+    jj = (n + t - 1) * full - (n - 1) * del_i - (t - 1) * del_t
+    _check_combination(m.bias_corr(method="jackknife", jackknife="jj"), jj, "jj with offset")
+
+
+@pytest.mark.parametrize(("variant", "split", "seed"), [("ss2", "both", 7), ("ss1", "time", 3), ("ss2", "individuals", 5)])
+def test_multiple_matches_plain_refits(variant, split, seed):
+    # the partitions rebuilt from the same seed: numpy.random.default_rng(seed), per partition a
+    # permutation of the individuals, then one of the periods (as split asks)
+    d = data("classic")
+    fml = "y ~ x1 + x2 + d | i + t"
+    ind, per = d["i"].to_numpy() - 1, d["t"].to_numpy() - 1
+    n, t = ind.max() + 1, per.max() + 1
+    full = _subfit(d, np.ones(len(d), dtype=bool), fml)
+    rng = np.random.default_rng(seed)
+    per_partition = []
+    for _ in range(2):
+        ip = rng.permutation(n) if split in ("both", "individuals") else np.arange(n)
+        tp = rng.permutation(t) if split in ("both", "time") else np.arange(t)
+        ih = _halves(ip[ind] + 1, n)
+        if variant == "ss2":
+            ph = _position_halves(ind, tp[per])
+            b = 3 * full - _mean([_subfit(d, h, fml) for h in ih]) - _mean([_subfit(d, h, fml) for h in ph])
+        else:
+            th = _halves(tp[per] + 1, t)
+            b = 2 * full - _mean([_subfit(d, a & c, fml) for a in ih for c in th])
+        per_partition.append(b)
+    res = fit_case("classic").bias_corr(method="jackknife", jackknife=variant, multiple=2, split=split, seed=seed)
+    _check_combination(res, _mean(per_partition), f"{variant} multiple, split={split}")
+
+
+def test_string_and_categorical_time_id():
+    # time order = sorted values, as for fixed-effect levels
+    d = data("unbal").copy()
+    fml = "y ~ x1 + x2 + d | i"
+    labels = d["t"].map(lambda v: f"t{v}")  # "t10" sorts before "t2"
+    d["t_pad"] = d["t"].map(lambda v: f"t{v:02d}")  # sorts as the numbers
+    d["t_str"] = labels
+    d["t_rank"] = labels.map({s: k for k, s in enumerate(sorted(labels.unique()))})
+    d["t_cat"] = pd.Categorical(d["t"], categories=sorted(d["t"].unique(), reverse=True))
+    d["t_neg"] = -d["t"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = fereg.feglm(fml, d, family="logit", ssc=SSC, **FIT_KW)
+
+    def jk(time_id):
+        return m.bias_corr(method="jackknife", jackknife="ss1", time_id=time_id).coef().to_numpy()
+
+    np.testing.assert_array_equal(jk("t_pad"), jk("t"))
+    np.testing.assert_array_equal(jk("t_str"), jk("t_rank"))
+    np.testing.assert_array_equal(jk("t_cat"), jk("t_neg"))
+    assert not np.array_equal(jk("t_str"), jk("t"))
+    d.loc[3, "t_str"] = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = fereg.feglm(fml, d, family="logit", ssc=SSC, **FIT_KW)
+    with pytest.raises(ValueError, match="^the time variable has missing values in the estimation sample$"):
+        m.bias_corr(method="jackknife", time_id="t_str")
 
 
 # ------------------------------------------------------------------------------------------------

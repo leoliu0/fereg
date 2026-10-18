@@ -39,12 +39,29 @@ Fixed-effects logit bias corrections and average partial effects (pyfixest has n
 numbers follow the R package alpaca 0.3.5's `biasCorr()` / `getAPEs()`):
 
 ```python
-bc = lg.bias_corr(L=1)                      # analytical (Fernández-Val & Weidner 2016), lags L
-nw = trade.bias_corr(panel_structure="network")   # exporter-time + importer-time (+ pair) effects
-jk = lg.bias_corr(method="jackknife", jackknife="ss2")   # also ss1, js, sj, jj, double; multiple=R
-bc.summary(); bc.vcov("hetero"); bc.coef_uncorr; bc.bias_term
-lg.get_apes(n_pop=10**6).summary()          # APEs, delta method (+ sampling of effects)
-bc.get_apes().tidy()                        # bias-corrected APEs
+import numpy as np
+import pandas as pd
+import fereg
+
+rng = np.random.default_rng(1)
+n_firms, n_years = 200, 10
+df = pd.DataFrame({"firm": np.repeat(np.arange(n_firms), n_years), "year": np.tile(np.arange(n_years), n_firms)})
+alpha = rng.normal(size=n_firms)[df["firm"]]
+df["x1"] = rng.normal(size=len(df)) + 0.5 * alpha
+df["treated"] = (rng.uniform(size=len(df)) < 0.4).astype(float)
+eta = 0.8 * df["x1"] + 0.5 * df["treated"] + alpha + 0.1 * df["year"]
+df["exit"] = (rng.uniform(size=len(df)) < 1 / (1 + np.exp(-eta))).astype(float)
+
+lg = fereg.feglm("exit ~ x1 + treated | firm + year", df, family="logit")
+bc = lg.bias_corr(L=1)                        # analytical (Fernández-Val & Weidner 2016), lags L
+jk = lg.bias_corr(method="jackknife")         # split-panel jackknife; also ss1, js, sj, jj, double
+bc.summary()
+bc.vcov("hetero").tidy()                      # variances at the corrected point
+print(bc.coef_uncorr, bc.bias_term)
+lg.get_apes(n_pop=10**6).summary()            # APEs: delta method + sampling of effects
+bc.get_apes().tidy()                          # bias-corrected APEs
+# network (trade) panels: two or three fixed effects (exporter-time, importer-time, pair) and
+# bias_corr(panel_structure="network")
 ```
 
 `bias_corr()` returns a logit result at the corrected coefficients (fixed effects re-estimated

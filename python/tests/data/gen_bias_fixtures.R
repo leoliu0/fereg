@@ -143,6 +143,12 @@ dyad[, exps := sprintf("c%02d", exp)]
 dyad[, imps := sprintf("c%02d", imp)]
 dyad <- finish(dyad, c("exp", "imp", "exps", "imps", "y", "x1", "x2"), "dyad")
 
+# prior weights w (alpaca weights; fereg aweights) and a user offset off for the classic data
+# (drawn last, so the other data sets do not depend on them)
+classic[, w := runif(.N, 0.5, 2)]
+classic[, off := 0.5 * rnorm(.N)]
+classic <- finish(classic, c("i", "t", "y", "x1", "x2", "d", "w", "off"), "classic")
+
 DATA <- list(classic = classic, unbal = unbal, network = network, drops = drops, dyad = dyad)
 
 # ------------------------------------------------------------------------------------------------
@@ -187,12 +193,13 @@ spec_group <- function(structure, which, k, L) {
   if (k == 3) 3L else NULL
 }
 
-# Exact fixed effects at fixed coefficients: Newton on the FE-only problem from `eta_start`.
-fe_resolve <- function(y, off, fes, eta_start) {
+# Exact fixed effects at fixed coefficients: Newton on the FE-only problem from `eta_start`
+# (prior weights `wt`, offset `off` = X beta + user offset).
+fe_resolve <- function(y, off, fes, eta_start, wt = 1) {
   eta <- eta_start
   for (it in 1:200) {
-    mu <- plogis(eta); w <- mu * (1 - mu)
-    zz <- (y - mu) / w + eta - off
+    mu <- plogis(eta); w <- wt * mu * (1 - mu)
+    zz <- (y - mu) / (mu * (1 - mu)) + eta - off
     eta_new <- off + zz - as.vector(demean(zz, w, fes))
     done <- max(abs(eta_new - eta)) < 1e-12
     eta <- eta_new
@@ -202,14 +209,28 @@ fe_resolve <- function(y, off, fes, eta_start) {
 }
 
 # A fitted model in alpaca's sorted sample `d` plus the pre-drop rows `P` (N* rows).
-setup <- function(dat, fml_alpaca, xnames, fevars, structure) {
-  vars <- unique(c("y", xnames, fevars, "rid"))
+# `weights`: prior-weight column (alpaca's weights). `offset`: user-offset column; alpaca has no
+# offset, so the model is then fitted by fixest (data in input order, which must be sorted by FE1
+# and FE2, i.e. alpaca's order) and polished to the exact MLE by full Newton steps.
+setup <- function(dat, fml_alpaca, xnames, fevars, structure, weights = NULL, offset = NULL) {
+  vars <- unique(c("y", xnames, fevars, weights, offset, "rid"))
   P <- na.omit(dat[, vars, with = FALSE])
-  m <- feglm(fml_alpaca, copy(dat), binomial(), control = CTL)
-  d <- m$data
-  stopifnot(m$nobs[["nobs.full"]] == nrow(P), m$conv)
+  if (is.null(offset)) {
+    m <- feglm(fml_alpaca, copy(dat), binomial(), weights = weights, control = CTL)
+    d <- m$data
+    stopifnot(m$nobs[["nobs.full"]] == nrow(P), m$conv)
+    coef0 <- unname(coef(m)); eta0 <- m$eta
+  } else {
+    stopifnot(is.null(weights))
+    fml <- as.formula(sub(" \\| rid$", "", deparse1(fml_alpaca)))
+    m <- fixest::feglm(fml, P, family = "logit", offset = as.formula(paste("~", offset)), glm.tol = 1e-12,
+                       fixef.tol = 3e-12, glm.iter = 200, notes = FALSE)
+    d <- P[fixest::obs(m)]
+    stopifnot(identical(do.call(order, c(unname(as.list(d[, fevars, with = FALSE])), list(d$rid))), seq_len(nrow(d))))
+    coef0 <- unname(coef(m)); eta0 <- m$linear.predictors
+  }
   X <- as.matrix(d[, xnames, with = FALSE]); attr(X, "dimnames") <- NULL
-  fes <- lapply(fevars, function(v) as.integer(d[[v]]))
+  fes <- lapply(fevars, function(v) as.integer(factor(d[[v]])))
   # FE codes over the pre-drop rows (sorted levels) and the retained rows' positions in P
   fes_full <- lapply(fevars, function(v) match(P[[v]], sort(unique(P[[v]]))))
   pos <- match(d$rid, P$rid)
@@ -218,17 +239,29 @@ setup <- function(dat, fml_alpaca, xnames, fevars, structure) {
   k <- length(fevars)
   ord <- if (structure == "network") order(fes_full[[k]], fes_full[[1]], fes_full[[2]], P$rid)
          else if (k == 2) order(fes_full[[1]], fes_full[[2]], P$rid) else order(fes_full[[1]], P$rid)
-  list(m = m, d = d, P = P, X = X, y = d$y, fes = fes, fes_full = fes_full, pos = pos, ord = ord,
-       n = nrow(d), Nf = nrow(P), k = k, structure = structure, xnames = xnames, fevars = fevars)
+  S <- list(m = m, d = d, P = P, X = X, y = d$y, fes = fes, fes_full = fes_full, pos = pos, ord = ord,
+            n = nrow(d), Nf = nrow(P), k = k, structure = structure, xnames = xnames, fevars = fevars,
+            wt = if (is.null(weights)) rep(1, nrow(d)) else d[[weights]],
+            off = if (is.null(offset)) rep(0, nrow(d)) else d[[offset]])
+  if (!is.null(offset)) {
+    for (it in 1:5) {  # Newton polish: beta += H^-1 MX'v, then the exact FEs at beta
+      q <- point(S, coef0, eta0)
+      coef1 <- coef0 + as.vector(solve(q$H, crossprod(q$MX, q$v)))
+      eta0 <- fe_resolve(S$y, as.vector(X %*% coef1) + S$off, fes, eta0 + as.vector(X %*% (coef1 - coef0)))
+      coef0 <- coef1
+    }
+  }
+  S$coef0 <- coef0; S$eta0 <- eta0
+  S
 }
 
-# Ingredients at (beta, eta).
+# Ingredients at (beta, eta): v, w, z carry the prior weights (alpaca).
 point <- function(S, beta, eta) {
-  mu <- plogis(eta); w <- mu.eta(eta); v <- S$y - mu; z <- d2(eta)
+  mu <- plogis(eta); w <- S$wt * mu.eta(eta); v <- S$wt * (S$y - mu); z <- S$wt * d2(eta)
   MX <- demean(S$X, w, S$fes)
   H <- crossprod(MX * sqrt(w))
   list(beta = beta, eta = eta, w = w, v = v, z = z, MX = MX, H = H,
-       deviance = -2 * sum(S$y * log(mu) + (1 - S$y) * log(1 - mu)))
+       deviance = -2 * sum(S$wt * (S$y * log(mu) + (1 - S$y) * log(1 - mu))))
 }
 
 vcovs <- function(S, q) {
@@ -248,10 +281,12 @@ correct <- function(S, q, which, L) {
 }
 
 # APEs at q: delta (corrected when `corr` = list(which, L)), the delta-method part and the
-# pieces of the sampling term, for both row sets ("all" = fereg, "retained" = alpaca).
+# pieces of the sampling term, for both row sets ("all" = fereg, "retained" = alpaca). The partial
+# effects are unweighted (alpaca), the scores weighted.
 apes <- function(S, q, corr = NULL) {
   X <- S$X; beta <- q$beta; eta <- q$eta; w <- q$w; v <- q$v; z <- q$z; MX <- q$MX
   n <- S$n; Nf <- S$Nf; p <- ncol(X)
+  f <- mu.eta(eta)
   binary <- apply(X, 2, function(x) all(x %in% c(0, 1)))
   Delta <- Delta1 <- Delta2 <- matrix(NA_real_, n, p); J <- matrix(NA_real_, p, p)
   PX <- X - MX
@@ -263,8 +298,8 @@ apes <- function(S, q, corr = NULL) {
       J[, j] <- colSums(MX * Delta1[, j]) / Nf
       J[j, j] <- (sum(mu.eta(e1)) - sum(PX[, j] * Delta1[, j])) / Nf
     } else {
-      Delta[, j] <- beta[j] * w; Delta1[, j] <- beta[j] * z; Delta2[, j] <- beta[j] * d3(eta)
-      J[, j] <- colSums(MX * Delta1[, j]) / Nf; J[j, j] <- J[j, j] + sum(w) / Nf
+      Delta[, j] <- beta[j] * f; Delta1[, j] <- beta[j] * d2(eta); Delta2[, j] <- beta[j] * d3(eta)
+      J[, j] <- colSums(MX * Delta1[, j]) / Nf; J[j, j] <- J[j, j] + sum(f) / Nf
     }
   }
   delta <- colSums(Delta) / Nf
@@ -346,31 +381,38 @@ vcov_entry <- function(V) lapply(V, mat)
 # ------------------------------------------------------------------------------------------------
 # Analytical cases
 # ------------------------------------------------------------------------------------------------
-model_case <- function(id, data, xnames, fevars, structure, corrections) {
+model_case <- function(id, data, xnames, fevars, structure, corrections, weights = NULL, offset = NULL) {
   fml_py <- sprintf("y ~ %s | %s", paste(xnames, collapse = " + "), paste(fevars, collapse = " + "))
   fml_alpaca <- as.formula(sprintf("%s | rid", fml_py))
-  S <- setup(DATA[[data]], fml_alpaca, xnames, fevars, structure)
+  S <- setup(DATA[[data]], fml_alpaca, xnames, fevars, structure, weights = weights, offset = offset)
   m <- S$m
-  q <- point(S, unname(coef(m)), m$eta)
-  check("Hessian", q$H, m$Hessian)
+  q <- point(S, S$coef0, S$eta0)
+  alpaca_fit <- is.null(offset)
   V <- vcovs(S, q)
-  check("vcov iid", V$iid, vcov(m, type = "hessian"))
-  check("vcov hetero", V$hetero, vcov(m, type = "sandwich"))
-  check("vcov cluster", V$cluster, vcov(m, type = "clustered", cluster = as.formula(paste("~", fevars[1]))))
-  out <- list(id = id, data = data, fml = fml_py, fe = fevars, structure = structure,
-              n = S$n, n_full = S$Nf, coef_names = xnames, coef = unname(coef(m)),
+  if (alpaca_fit) {
+    check("Hessian", q$H, m$Hessian)
+    check("vcov iid", V$iid, vcov(m, type = "hessian"))
+    check("vcov hetero", V$hetero, vcov(m, type = "sandwich"))
+    check("vcov cluster", V$cluster, vcov(m, type = "clustered", cluster = as.formula(paste("~", fevars[1]))))
+  } else {
+    # the polished MLE: score of the coefficients at zero
+    stopifnot(max(abs(crossprod(q$MX, q$v))) < 1e-10)
+  }
+  out <- list(id = id, data = data, fml = fml_py, fe = fevars, structure = structure, weights = weights,
+              offset = offset, n = S$n, n_full = S$Nf, coef_names = xnames, coef = S$coef0,
               deviance = q$deviance, cluster = fevars[1], vcov = vcov_entry(V),
-              apes = ape_entries(S, q, NULL, m, q), corrections = list())
+              apes = ape_entries(S, q, NULL, if (alpaca_fit) m, q), corrections = list())
   for (cr in corrections) {
     L <- cr$L; which <- cr$bias
     c0 <- correct(S, q, which, L)
-    eta_c <- fe_resolve(S$y, as.vector(S$X %*% c0$coef), S$fes, q$eta - as.vector(S$X %*% q$beta) + as.vector(S$X %*% c0$coef))
+    eta_c <- fe_resolve(S$y, as.vector(S$X %*% c0$coef) + S$off, S$fes,
+                        q$eta + as.vector(S$X %*% (c0$coef - q$beta)), S$wt)
     qc <- point(S, c0$coef, eta_c)
     Vc <- vcovs(S, qc)
     corr <- list(which = which, L = L)
     e <- list(L = L, bias = which, coef = c0$coef, bias_term = unname(c0$bias_term), deviance = qc$deviance,
               vcov = vcov_entry(Vc), apes = ape_entries(S, qc, corr))
-    if (which == "both") {
+    if (which == "both" && alpaca_fit) {
       bc <- biasCorr(m, L = L, panel.structure = structure)
       check("biasCorr coefficients", c0$coef, coef(bc))
       check("biasCorr bias.term", c0$bias_term, bc$bias.term)
@@ -402,7 +444,9 @@ MODELS <- list(
   model_case("oneway_unbal", "unbal", X3, "i", "classic", list(C(1))),
   model_case("network3", "network", c("x", "rta"), c("exp_time", "imp_time", "pair"), "network", list(C(0), C(2))),
   model_case("network2", "network", c("x", "rta"), c("exp_time", "imp_time"), "network", list(C(0), C(2))),
-  model_case("drops", "drops", X3, c("i", "t"), "classic", list(C(0), C(1), C(0, "individual")))
+  model_case("drops", "drops", X3, c("i", "t"), "classic", list(C(0), C(1), C(0, "individual"))),
+  model_case("weights", "classic", X3, c("i", "t"), "classic", list(C(0), C(1), C(0, "individual")), weights = "w"),
+  model_case("offset", "classic", X3, c("i", "t"), "classic", list(C(0), C(2), C(0, "time")), offset = "off")
 )
 
 # ------------------------------------------------------------------------------------------------

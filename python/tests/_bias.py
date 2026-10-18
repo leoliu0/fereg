@@ -14,6 +14,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import fereg
 
@@ -69,7 +70,26 @@ def fit(fml: str, name: str, vcov="iid", nthreads: int | None = None, **kw) -> f
 @functools.cache
 def fit_case(case_id: str) -> fereg.Felogit:
     c = model_case(case_id)
-    return fit(c["fml"], c["data"])
+    return fit(c["fml"], c["data"], weights=c.get("weights"), offset=c.get("offset"))
+
+
+NO_NPOP = "has no effect without n_pop"
+
+
+def apes_for(m, e: dict, corrected: bool = False, **kw) -> fereg.APEs:
+    """``m.get_apes`` for fixture entry ``e``. Without n_pop, ``sampling_fe="unrestricted"`` and
+    ``weak_exo=True`` have no effect (both terms are multiplied by 0): they are errors, and the
+    expected numbers are those of the defaults. A corrected model takes weak_exo from its
+    correction."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        weak = None if corrected else e["weak_exo"]
+        if e["n_pop"] is None:
+            if e["sampling_fe"] == "unrestricted" or weak:
+                with pytest.raises(ValueError, match=NO_NPOP):
+                    m.get_apes(sampling_fe=e["sampling_fe"], weak_exo=weak or None, **kw)
+            return m.get_apes(**kw)
+        return m.get_apes(n_pop=e["n_pop"], sampling_fe=e["sampling_fe"], weak_exo=weak, **kw)
 
 
 def assert_close(actual, expected, rtol: float, what: str = "") -> None:

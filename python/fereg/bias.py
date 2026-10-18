@@ -31,7 +31,10 @@ Differences from alpaca 0.3.5 (and logitfe 3.0.3 for the jackknife):
   the second fixed effect (input order for ties); one-way models keep the input order; network
   models sort the rows of a pair (third fixed effect) by the levels of the first and second fixed
   effects. Levels sort as numbers for numeric columns, as strings otherwise (categoricals: category
-  order), so the second (classic) / first and second (network) variables must sort in time order.
+  order), so the second (classic) / first and second (network) variables must sort in time order;
+  the same holds for ``time_id`` (time order = sorted values: use numbers, dates or ordered
+  categoricals for calendar order). ``L`` must be smaller than the longest group (alpaca silently
+  returns the ``L = 0`` result otherwise).
 - With a finite population (``n_pop``) and groups dropped for perfect classification, the
   sampling-of-effects term of the APE variance sums over all observations, with zero partial effects
   for the dropped ones, consistently with the point estimate; alpaca and logitfe sum over the
@@ -39,8 +42,11 @@ Differences from alpaca 0.3.5 (and logitfe 3.0.3 for the jackknife):
   term of weakly exogenous regressors (dropped observations of a retained individual, or pair,
   enter in time order). The numbers are identical when no group is dropped.
 - Options without effect are errors (``L`` with the jackknife or with ``bias="time"``, ``multiple``
-  partitions that permute no dimension the subpanels split); a two-way network model with ``L > 0``
-  only warns "L ignored", as alpaca computes it.
+  partitions that permute no dimension the subpanels split, and ``weak_exo=True`` or
+  ``sampling_fe="unrestricted"`` without ``n_pop``, whose terms are multiplied by 0); a two-way
+  network model with ``L > 0`` only warns "L ignored", as alpaca computes it. ``n_pop`` is truncated
+  to an integer (alpaca, R); ``float("inf")`` is an infinite population (factor 1).
+- Frequency weights are an error; prior weights (aweights) are alpaca's weights.
 - alpaca can apply ``biasCorr()`` to a corrected model again; fereg raises. alpaca's ``getAPEs()``
   silently ignores ``panel.structure`` and ``weak.exo`` for corrected models (they come from the
   correction); fereg raises when they are given and differ.
@@ -150,13 +156,15 @@ def _double_design(design: Any) -> Any:
 
 
 def _time_design(model: Felogit, time_id: str) -> tuple[Any, int]:
-    """The design with the ``time_id`` column appended as a factor, and its index."""
-    from .design import _Frame, _time_factor
+    """The design with the ``time_id`` column appended as a factor, and its index. Its levels
+    are ordered as fixed-effect levels are (time order = sorted values: numbers and dates
+    ascending, strings sorted, categoricals in category order)."""
+    from .design import _factor_from_frame, _Frame
 
     if not isinstance(time_id, str):
         raise TypeError("time_id must be the name of a column of the data.")
     d = model._design
-    fc = _time_factor(_Frame(model._ctx.data), time_id)
+    fc = _factor_from_frame(_Frame(model._ctx.data), time_id)
     return replace(d, factors=list(d.factors) + [fc]), len(d.factors)
 
 
@@ -271,14 +279,21 @@ def get_apes(
     if n_pop is not None:
         if not isinstance(n_pop, numbers.Real) or isinstance(n_pop, bool):
             raise TypeError("n_pop must be a number or None.")
-        if not np.isfinite(n_pop) or n_pop < 1:
-            raise ValueError("n_pop must be a finite number >= 1.")
-        n_pop = float(n_pop)
+        if np.isnan(n_pop) or n_pop < 1:
+            raise ValueError("n_pop must be a number >= 1 (float('inf'): an infinite population).")
+        # truncated to an integer, as alpaca (as.integer) and R; inf = infinite population
+        n_pop = float(n_pop) if np.isinf(n_pop) else float(int(n_pop))
     if panel_structure is not None:
         _choice("panel_structure", panel_structure, _STRUCTURES)
     _choice("sampling_fe", sampling_fe, _SAMPLING)
     if weak_exo is not None and not isinstance(weak_exo, (bool, np.bool_)):
         raise TypeError("weak_exo must be a bool or None.")
+    if n_pop is None:
+        # both terms are multiplied by the finite-population factor, 0 without n_pop
+        if weak_exo:
+            raise ValueError("weak_exo=True has no effect without n_pop")
+        if sampling_fe == "unrestricted":
+            raise ValueError("sampling_fe='unrestricted' has no effect without n_pop")
     # model checks (logit, fixed effects, structure): the core's, with the texts of R and Stata
 
     corrected = isinstance(model, FelogitBiasCorr)
@@ -341,8 +356,8 @@ class FelogitBiasCorr(Felogit):
 
     Attributes (alpaca's ``biasCorr`` fields): ``coef_uncorr`` (uncorrected coefficients),
     ``bias_term`` (uncorrected minus corrected coefficients, alpaca's ``bias.term``),
-    ``panel_structure``, ``bandwidth`` (the ``L`` that entered: 0 for the jackknife and for a
-    two-way network model), ``method`` ("analytical" | "jackknife"), ``jackknife`` (variant, None
+    ``panel_structure``, ``bandwidth`` (the requested ``L``, as alpaca; a two-way network model
+    ignores it), ``method`` ("analytical" | "jackknife"), ``jackknife`` (variant, None
     for the analytical correction), ``bias`` (the bias corrected: "both" | "individual" | "time";
     a one-way model has the individual bias only), plus ``multiple``, ``split``, ``seed``,
     ``time_id``, ``deviance_uncorr``, ``n_fits``
@@ -368,7 +383,7 @@ class FelogitBiasCorr(Felogit):
         self.coef_uncorr = pd.Series(np.asarray(report["coef_uncorr"], dtype=float), index=names, name="Estimate")
         self.bias_term = pd.Series(np.asarray(report["bias_term"], dtype=float), index=names, name="bias_term")
         self.panel_structure = report["structure"]
-        self.bandwidth = int(report["bandwidth"])
+        self.bandwidth = int(options["bandwidth"])
         self.method = options["method"]
         self.jackknife = jackknife
         self.bias = report["which"]
@@ -399,7 +414,8 @@ class APEs:
     as for a model (normal inference); ``vcov`` is the variance matrix (a DataFrame). Attributes
     (alpaca's fields): ``bias_term`` (the APE bias term of an analytically corrected model,
     subtracted from the APEs; None otherwise), ``panel_structure``, ``sampling_fe``, ``weak_exo``
-    (as used), ``bandwidth``, ``n_pop``, plus ``adj`` (finite-population factor
+    (as used), ``bandwidth`` (``L`` of the bias correction, 0 for an uncorrected model), ``n_pop``
+    (as used: truncated to an integer), plus ``adj`` (finite-population factor
     (n_pop - N*)/(n_pop - 1), 0 without ``n_pop``), ``binary`` (regressors treated as binary: all
     values 0 or 1) and ``N_full`` (N*, the divisor of the averages).
     """
@@ -415,7 +431,7 @@ class APEs:
         self.panel_structure = out["structure"]
         self.sampling_fe = sampling_fe
         self.weak_exo = bool(out["weak_exo_used"])
-        self.bandwidth = int(out["bandwidth"])
+        self.bandwidth = int(model._bias_options["bandwidth"]) if isinstance(model, FelogitBiasCorr) else 0
         self.n_pop = n_pop
         self.adj = float(out["adj"])
         self.N_full = int(out["n_full"])

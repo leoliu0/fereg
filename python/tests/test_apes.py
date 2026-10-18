@@ -16,7 +16,7 @@ from contextlib import redirect_stdout
 
 import numpy as np
 import pytest
-from _bias import RTOL, RTOL_POINT, ape_id, assert_close, data, fit_case, model_case, models
+from _bias import RTOL, RTOL_POINT, ape_id, apes_for, assert_close, data, fit, fit_case, model_case, models
 
 import fereg
 
@@ -32,31 +32,21 @@ def corrected(cid: str, L: int, bias: str) -> fereg.FelogitBiasCorr:
         return fit_case(cid).bias_corr(L=L, panel_structure=c["structure"], bias=bias)
 
 
-def _apes(m, **kw) -> fereg.APEs:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return m.get_apes(**kw)
-
-
 @pytest.mark.parametrize(("c", "e"), UNCORRECTED, ids=[f"{c['id']}-{ape_id(e)}" for c, e in UNCORRECTED])
 def test_uncorrected_apes(c, e):
-    a = _apes(
-        fit_case(c["id"]),
-        n_pop=e["n_pop"],
-        panel_structure=c["structure"],
-        sampling_fe=e["sampling_fe"],
-        weak_exo=e["weak_exo"],
-    )
+    a = apes_for(fit_case(c["id"]), e, panel_structure=c["structure"])
     assert isinstance(a, fereg.APEs)
     assert list(a.coef().index) == c["coef_names"]
     assert_close(a.coef(), e["delta"], RTOL, "delta")
     assert_close(a.vcov.to_numpy(), e["vcov"], RTOL, "vcov")
     assert_close(a.se(), np.sqrt(np.diag(e["vcov"])), RTOL, "se")
     assert a.bias_term is None
+    assert a.bandwidth == 0
     assert a.N_full == c["n_full"]
     assert a.panel_structure == c["structure"]
-    assert a.sampling_fe == e["sampling_fe"]
-    assert a.weak_exo == e["weak_exo"]
+    with_npop = e["n_pop"] is not None
+    assert a.sampling_fe == (e["sampling_fe"] if with_npop else "independence")
+    assert a.weak_exo == (e["weak_exo"] and with_npop)
     expected_adj = 0.0 if e["n_pop"] is None else (e["n_pop"] - c["n_full"]) / (e["n_pop"] - 1)
     assert a.adj == pytest.approx(expected_adj, rel=1e-15)
     assert list(a.binary[a.binary].index) == [v for v in c["coef_names"] if v in ("d", "rta")]
@@ -67,10 +57,9 @@ def test_uncorrected_apes(c, e):
 )
 def test_corrected_apes(c, r, e):
     res = corrected(c["id"], r["L"], r["bias"])
-    a = _apes(res, n_pop=e["n_pop"], sampling_fe=e["sampling_fe"])
+    a = apes_for(res, e, corrected=True)
     assert a.weak_exo == e["weak_exo"] == (r["L"] > 0)
-    # the L that entered (a two-way network model has no pair effect: none)
-    assert a.bandwidth == (0 if c["structure"] == "network" and len(c["fe"]) == 2 else r["L"])
+    assert a.bandwidth == r["L"]  # the requested L, as alpaca
     assert a.panel_structure == c["structure"]
     assert_close(a.coef(), e["delta"], RTOL_POINT, "corrected delta")
     assert_close(a.bias_term, e["bias_term"], RTOL_POINT, "APE bias term")
@@ -116,6 +105,7 @@ def test_weak_exo_covariance_over_all_rows(corrected_point):
     assert not np.allclose(e["vcov"], alpaca, rtol=1e-6, atol=0)
     assert_close(a.vcov.to_numpy(), e["vcov"], rtol, "all-rows weak-exogeneity covariance")
 
+
 def test_small_population_warns():
     c = model_case("classic")
     m = fit_case("classic")
@@ -145,13 +135,18 @@ def test_summary_and_tidy():
 
 
 APE_ERRORS = [
-    (dict(n_pop=0), ValueError, "n_pop must be a finite number >= 1"),
-    (dict(n_pop=float("nan")), ValueError, "n_pop must be a finite number >= 1"),
+    (dict(n_pop=0), ValueError, "n_pop must be a number >= 1"),
+    (dict(n_pop=0.5), ValueError, "n_pop must be a number >= 1"),
+    (dict(n_pop=float("nan")), ValueError, "n_pop must be a number >= 1"),
+    (dict(n_pop=-float("inf")), ValueError, "n_pop must be a number >= 1"),
     (dict(n_pop="1000"), TypeError, "n_pop must be a number or None"),
     (dict(n_pop=True), TypeError, "n_pop must be a number or None"),
     (dict(sampling_fe="dependent"), ValueError, "sampling_fe must be one of"),
     (dict(panel_structure="grid"), ValueError, "panel_structure must be one of"),
     (dict(weak_exo="yes"), TypeError, "weak_exo must be a bool or None"),
+    # options without effect: without n_pop both terms are multiplied by 0
+    (dict(weak_exo=True), ValueError, "^weak_exo=True has no effect without n_pop$"),
+    (dict(sampling_fe="unrestricted"), ValueError, "^sampling_fe='unrestricted' has no effect without n_pop$"),
 ]
 
 
@@ -159,6 +154,42 @@ APE_ERRORS = [
 def test_rejected_arguments(kw, exc, match):
     with pytest.raises(exc, match=match):
         fit_case("classic").get_apes(**kw)
+
+
+def test_explicit_defaults_accepted_without_n_pop():
+    m = fit_case("classic")
+    a, b = m.get_apes(), m.get_apes(sampling_fe="independence", weak_exo=False)
+    np.testing.assert_array_equal(a.vcov.to_numpy(), b.vcov.to_numpy())
+    with pytest.raises(ValueError, match="^weak_exo=True has no effect without n_pop$"):
+        corrected("classic", 1, "both").get_apes(weak_exo=True)
+    with pytest.raises(ValueError, match="^sampling_fe='unrestricted' has no effect without n_pop$"):
+        corrected("classic", 1, "both").get_apes(sampling_fe="unrestricted")
+
+
+def test_n_pop_infinite_and_truncated():
+    c = model_case("classic")
+    m = fit_case("classic")
+    npop = 2 * c["n_full"]
+    e = next(e for e in c["apes"] if e["n_pop"] == npop and e["sampling_fe"] == "independence" and e["weak_exo"])
+    v0 = np.asarray(next(e for e in c["apes"] if e["n_pop"] is None)["vcov"])
+    adj = (npop - c["n_full"]) / (npop - 1)
+    # infinite population: factor 1, V = V_delta + (V(n_pop) - V_delta) / adj(n_pop)
+    a = m.get_apes(n_pop=float("inf"), weak_exo=True)
+    assert a.adj == 1.0 and a.n_pop == float("inf")
+    assert_close(a.vcov.to_numpy(), v0 + (np.asarray(e["vcov"]) - v0) / adj, RTOL, "n_pop = inf")
+    # non-integer n_pop is truncated (alpaca's as.integer, R's trunc)
+    t = m.get_apes(n_pop=npop + 0.7, weak_exo=True)
+    assert t.n_pop == npop and t.adj == adj
+    np.testing.assert_array_equal(t.vcov.to_numpy(), m.get_apes(n_pop=npop, weak_exo=True).vcov.to_numpy())
+
+
+def test_frequency_weights_rejected():
+    m = fit("y ~ x1 + x2 + d | i + t", "classic", weights="w", weights_type="fweights")
+    msg = "^bias correction and APEs do not support frequency weights$"
+    with pytest.raises(ValueError, match=msg):
+        m.get_apes()
+    with pytest.raises(ValueError, match=msg):
+        m.bias_corr()
 
 
 def test_rejected_structures():
@@ -174,8 +205,9 @@ def test_rejected_structures():
     with pytest.raises(ValueError, match="weak_exo is set by the analytical bias correction"):
         res.get_apes(weak_exo=False)
     # same values are accepted
-    a = res.get_apes(panel_structure="classic", weak_exo=True)
+    a = res.get_apes(panel_structure="classic", weak_exo=True, n_pop=1000)
     np.testing.assert_array_equal(a.coef().to_numpy(), res.get_apes().coef().to_numpy())
+    np.testing.assert_array_equal(a.vcov.to_numpy(), res.get_apes(n_pop=1000).vcov.to_numpy())
 
 
 def test_weak_exo_on_jackknife_result():
