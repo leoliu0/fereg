@@ -436,4 +436,207 @@ expect_key prepare "distance=spherical"
 assert "`e(vce)'" == "conley" & "`e(vcetype)'" == "Conley" & e(conley_cutoff) == 250 & "`e(conley_lat)'" == "lat"
 di as result "I passed"
 
+* ---------------------------------------------------------------------------
+* J) felogit bias correction and APEs (logitfe options): keys and bias-correction variables sent
+*    to cmd=glm, posting of e(b) e(b0) e(b2) e(V2) and the macros, logitfe's titles and APE table,
+*    replay, predict at the corrected point. Numbers are staged (checked against logitfe with the
+*    real plugin in test_logitfe.do).
+* ---------------------------------------------------------------------------
+capture program drop stage_bc
+program stage_bc
+	* stage_bc <nx> <number of absorbed slots>: b = (1..nx, 0.5), b0 = 10*b, b2 = b/100, V2
+	args nx nslots
+	matrix __mock_b = J(1, `nx' + 1, 0)
+	matrix __mock_b0 = J(1, `nx' + 1, 0)
+	matrix __mock_b2 = J(1, `nx', 0)
+	forval j = 1/`nx' {
+		matrix __mock_b[1, `j'] = `j'
+		matrix __mock_b0[1, `j'] = 10 * `j'
+		matrix __mock_b2[1, `j'] = `j' / 100
+	}
+	matrix __mock_b[1, `nx' + 1] = 0.5
+	matrix __mock_b0[1, `nx' + 1] = 5
+	matrix __mock_V = 0.01 * I(`nx' + 1) + J(`nx' + 1, `nx' + 1, 0.001)
+	matrix __mock_V2 = 0.0001 * I(`nx') + J(`nx', `nx', 0.00001)
+	matrix __mock_doft = J(`nslots', 5, 1)
+	foreach s in N ll ll_0 chi2 df_m r2_p num_separated converged N_full bc_nfits {
+		capture scalar drop __mock_`s'
+	}
+	scalar __mock_ll = -250
+	scalar __mock_ll_0 = -270
+	scalar __mock_chi2 = 12
+	scalar __mock_df_m = `nx'
+	scalar __mock_r2_p = .07
+	scalar __mock_num_separated = 0
+	scalar __mock_converged = 1
+	global rfmock_status
+	forval j = 1/`nx' {
+		global rfmock_status $rfmock_status 0
+	}
+end
+capture program drop expect_glm
+program expect_glm
+	* expect_glm "key=value" ... : the last glm call received exactly these arguments
+	foreach kv of local 0 {
+		local args " $rfmock_glm "
+		if (!strpos(`"`args'"', " `kv' ")) {
+			di as err `"FAIL: glm did not receive <`kv'>; got <`args'>"'
+			exit 9
+		}
+	}
+end
+
+clear
+set seed 20261018
+set obs 400
+gen long id = ceil(_n / 8)
+bysort id: gen int year = 2000 + 2 * _n
+gen double x1 = rnormal()
+gen byte x2 = runiform() > 0.5
+gen byte y = runiform() < invlogit(0.5 * x1 + x2 - 0.5)
+replace x1 = . in 3
+xtset id year, delta(2)
+
+* analytical, lags, population(), d(): keys, varlist (xtset variables), e(), display
+stage_bc 2 2
+tempfile lg
+log using "`lg'", text name(bc) replace
+felogit y x1 x2, absorb(id year) analytical lags(1) d(dd) population(1000)
+log close bc
+expect_glm "bc=analytical" "structure=classic" "which=both" "lags=1" "nbc=2" "effects=it" "tdelta=2" "nx=2" "d=1"
+expect_glm "adj=`=strtrim(string((1000 - 399) / 999, "%21.17g"))'"
+assert !strpos(" $rfmock_glm ", " jk=") & !strpos(" $rfmock_glm ", " multiple=")
+assert "$rfmock_glm_nvars" == "7"
+assert !strpos(" $rfmock_prepare ", " sample=all ")
+assert e(N_full) == 399 & reldif(e(fpc), 601 / 999) < 1e-15
+assert e(N_group) == 50 & e(T_min) == 7 & e(T_max) == 8 & reldif(e(T_avg), 399 / 50) < 1e-15
+assert mreldif(e(b), __mock_b) == 0 & mreldif(e(b0), __mock_b0) == 0 & mreldif(e(V), __mock_V) == 0
+assert mreldif(e(b2), __mock_b2) == 0 & mreldif(e(V2), __mock_V2) == 0
+assert "`: colfullnames e(b0)'" == "x1 x2 _cons" & "`: colfullnames e(b2)'" == "x1 x2"
+assert "`: rowfullnames e(V2)'" == "x1 x2"
+assert "`e(bias)'" == "analytical" & "`e(lags)'" == "1" & "`e(ibias)'" == "yes" & "`e(tbias)'" == "yes"
+assert "`e(jackknife)'" == "" & "`e(id)'" == "id" & "`e(time)'" == "year" & "`e(structure)'" == "classic"
+assert "`e(bctitle)'" == "Analytical bias-correction" & "`e(bctitle3)'" == "Triming parameter = 1"
+assert "`e(title)'" == "HDFE Logistic regression" & "`e(d)'" == "dd"
+foreach t in "Analytical bias-correction" "Type of included effects: individual and time effects" ///
+	"Type of bias correction: individual and time effects" "Triming parameter = 1" "ID variable    = id" ///
+	"Time variable  = year" "Average Partial Effects" "Variance adjusted by the finite population parameter   0.6016" ///
+	"HDFE Logistic regression" {
+	rf_log_has "`lg'" "`t'"
+	if (!r(found)) {
+		di as err `"FAIL: display lacks <`t'>"'
+		exit 9
+	}
+}
+* replay, quietly (r(table) of the coefficients), noheader/notable
+log using "`lg'", text name(bc) replace
+felogit, level(90)
+tempname T TA
+matrix `T' = r(table)
+matrix `TA' = r(table_ape)
+log close bc
+rf_log_has "`lg'" "Average Partial Effects"
+assert r(found) == 1
+assert colsof(`T') == 3 & colsof(`TA') == 2 & el(`TA', 1, 2) == 0.02 & reldif(el(`TA', 8, 1), invnormal(0.95)) < 1e-12
+quietly felogit
+assert colsof(r(table)) == 3
+log using "`lg'", text name(bc) replace
+felogit, notable noheader
+log close bc
+rf_log_has "`lg'" "Average Partial Effects"
+assert r(found) == 0
+rf_log_has "`lg'" "Triming parameter"
+assert r(found) == 0
+* predict at the posted (corrected) point: the mock writes 1000 + obs into d
+predict double p1, pr
+assert reldif(p1, invlogit(x1 + 2 * x2 + 0.5 + dd)) < 1e-12 if e(sample)
+predict double xb1, xb
+assert reldif(xb1, x1 + 2 * x2 + 0.5) < 1e-12 if e(sample)
+estat ic
+assert el(r(S), 1, 3) == -250
+drop p1 xb1 dd
+
+* no option: no bias keys, no extra variables, no e(b2)
+stage_bc 2 2
+felogit y x1 x2, absorb(id year)
+assert !strpos(" $rfmock_glm ", " bc=") & "$rfmock_glm_nvars" == "4"
+expect_key prepare "sample=all"
+capture confirm matrix e(b2)
+assert _rc
+assert "`e(bias)'" == "" & "`e(bctitle)'" == ""
+
+* ape alone, one absorbed term (time), factor variables (base level posted as 0 in e(b2))
+gen byte c = mod(id, 3)
+stage_bc 3 1
+felogit y x1 i.c, absorb(year) ape
+expect_glm "bc=ape" "structure=classic" "which=time" "effects=t" "nbc=2" "adj=1"
+assert "`: colfullnames e(b2)'" == "x1 0b.c 1.c 2.c" & e(b2)[1, 2] == 0 & e(V2)[2, 2] == 0
+assert e(b2)[1, 3] == 0.02 & e(b2)[1, 4] == 0.03 & e(fpc) == 1
+assert "`e(bias)'" == "none" & "`e(ibias)'" == "" & "`e(lags)'" == ""
+assert "`e(bctitle)'" == "Uncorrected fixed-effects estimates" & "`e(bctitle2)'" == "Type of bias correction: none"
+
+* jackknife variants; multiple(): logitfe's permutation variables (one per partition and dimension)
+stage_bc 2 2
+felogit y x1 x2, absorb(year id) jackknife
+expect_glm "bc=jackknife" "jk=ss2" "effects=ti" "nbc=2"
+assert "`e(jackknife)'" == "ss2" & "`e(bctitle)'" == "Split-panel jackknife in both dimensions"
+capture mata: mata which mm_sample()
+if (!_rc) {
+	stage_bc 2 2
+	scalar __mock_bc_nfits = 12
+	set seed 99
+	local rs = c(rngstate)
+	felogit y x1 x2, absorb(id year) jackknife ss1 multiple(3) ibias(no)
+	assert c(rngstate) == "`rs'"
+	expect_glm "jk=ss1" "multiple=3" "perm=it" "which=time" "nbc=8"
+	assert "$rfmock_glm_nvars" == "12"
+	assert e(multiple) == 3 & "`e(split)'" == "both" & e(N_subpanels) == 12 & "`e(ibias)'" == "no"
+	assert "`e(bctitle3)'" == "3 multiple partitions in both the cross-section and the time dimension"
+	stage_bc 2 2
+	felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) i
+	expect_glm "multiple=2" "perm=i" "nbc=4"
+	assert "`e(split)'" == "individuals"
+	* logitfe's note: plain ss2 without randomization
+	stage_bc 2 2
+	log using "`lg'", text name(bc) replace
+	felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) individuals tbias(no)
+	log close bc
+	rf_log_has "`lg'" "note: multiple partitions only in the cross-section without"
+	assert r(found) == 1
+	assert !strpos(" $rfmock_glm ", " multiple=") & "`e(split)'" == "" & e(multiple) == .
+}
+
+* network: group codes per absorbed term (missing absorbed values: dropped by prepare, so the
+* codes are nonmissing on the sample), the time variable with lags()
+gen long imp = mod(id * 7, 11)
+replace imp = . in 5
+egen long it = group(imp year)
+egen long et = group(id year)
+egen long pair = group(id imp)
+stage_bc 2 3
+felogit y x1 x2, absorb(et it pair) analytical network lags(2)
+expect_glm "bc=analytical" "structure=network" "which=both" "lags=2" "nbc=4"
+assert !strpos(" $rfmock_glm ", " effects=") & "`e(structure)'" == "network" & "`e(id)'" == ""
+assert "`e(bctitle1)'" == "Type of included effects: exporter-time, importer-time and pair effects"
+stage_bc 2 2
+felogit y x1 x2, absorb(id#year imp#year) ape network
+expect_glm "bc=ape" "structure=network" "nbc=2"
+assert e(N_group) == .
+
+* sample-dependent errors: population() below N*, lags() beyond the shortest panel (logitfe)
+stage_bc 2 2
+rcof "noi felogit y x1 x2, absorb(id year) analytical population(398)" == 198
+rcof "noi felogit y x1 x2, absorb(id year) analytical lags(7)" == 198
+stage_bc 2 2
+felogit y x1 x2, absorb(id year) analytical lags(6)
+expect_glm "lags=6"
+* errors from the parser reach felogit (complete list in test_parse.do)
+rcof "noi felogit y x1 x2 [fw=c], absorb(id year) analytical" == 101
+rcof "noi felogit y x1 x2, absorb(id year) analytical jackknife" == 198
+rcof "noi felogit y x1 x2, absorb(id year) separation(mu) ape" == 198
+rcof "noi feppml y x1 x2, absorb(id year) analytical" == 198
+xtset, clear
+rcof "noi felogit y x1 x2, absorb(id year) analytical" == 5
+di as result "J passed"
+
 di as result "TEST_ADO_MOCK PASSED"

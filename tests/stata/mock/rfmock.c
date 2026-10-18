@@ -1,7 +1,7 @@
 /*
  * rfmock.c -- a fake fereg.plugin for ado-level dry runs (tests/stata/test_ado_mock.do).
  *
- * It implements the plugin protocol (cmd=version|prepare|ols) without estimating anything:
+ * It implements the plugin protocol (cmd=version|prepare|ols|glm) without estimating anything:
  *   prepare  applies the protocol's sample rule (touse = last variable; touse is zeroed for
  *            observations with a missing value, or "" for strings, in any other variable),
  *            counts the sample, returns token 777 and copies the staged scalars
@@ -10,8 +10,12 @@
  *            b= V= doft= (dimensions must match), copies staged scalars __mock_<name> to __rf_<name>,
  *            returns the status list from global $rfmock_status, and writes 1000*k + obs into the
  *            k-th output variable for every sample observation (except the groupvar output when
- *            $rfmock_nogroup is 1).
- * The argv of the last calls are recorded in globals $rfmock_prepare and $rfmock_ols.
+ *            $rfmock_nogroup is 1);
+ *   glm      the same with the glm scalars and the bias-correction matrices b0= b2= V2= (staged
+ *            __mock_b0 __mock_b2 __mock_V2); the varlist is y x... [offset] bcvars... touse out...
+ *            (nx=, offset=, nbc=), and every bias-correction variable must be nonmissing at every
+ *            sample observation (the real plugin reads them there), else r(416).
+ * The argv of the last calls are recorded in globals $rfmock_prepare, $rfmock_ols and $rfmock_glm.
  * Build: tests/stata/mock/build.sh
  */
 #include "stplugin.h"
@@ -98,6 +102,40 @@ STDLL stata_call(int argc, char *argv[]) {
       SF_vstore(tv + k, o, 1000.0 * k + o);
     }
     if (SF_nvars() != tv + nout) { SF_error("mock: varlist length mismatch\n"); return 198; }
+    return 0;
+  }
+  if (!strcmp(argv[0], "glm")) {
+    record("rfmock_glm", argc, argv);
+    const char *tok = key(argc, argv, "token");
+    if (!tok || strcmp(tok, "777")) { SF_error("fereg: stale plugin session; rerun the command\n"); return 198; }
+    int rc;
+    if ((rc = copy_mat("__mock_b", key(argc, argv, "b")))) return rc;
+    if ((rc = copy_mat("__mock_V", key(argc, argv, "V")))) return rc;
+    if ((rc = copy_mat("__mock_doft", key(argc, argv, "doft")))) return rc;
+    if ((rc = copy_mat("__mock_b0", key(argc, argv, "b0")))) return rc;
+    if ((rc = copy_mat("__mock_b2", key(argc, argv, "b2")))) return rc;
+    if ((rc = copy_mat("__mock_V2", key(argc, argv, "V2")))) return rc;
+    const char *names[] = {"N","rank","ic","ic2","converged","ll","ll_0","df_m","chi2","r2_p","deviance","df_a","df_a_initial","df_a_redundant","df_a_nested","num_singletons","num_fe_separated","num_separated","N_full","separation_complete","N_clust","N_clustervars","N_clust1","N_clust2","dkraay_bw","bw","cutoff","hac_T","bc_nfits",NULL};
+    for (int i = 0; names[i]; i++) copy_scalar(names[i]);
+    char st[4000] = ""; SF_macro_use("rfmock_status", st, 4000); SF_macro_save("__rf_status", st);
+    char nv[32]; snprintf(nv, 32, "%d", SF_nvars()); SF_macro_save("rfmock_glm_nvars", nv);
+    const char *s;
+    int nx = atoi(key(argc, argv, "nx")), nout = atoi(key(argc, argv, "nout"));
+    int off = (s = key(argc, argv, "offset")) ? atoi(s) : 0;
+    int nbc = (s = key(argc, argv, "nbc")) ? atoi(s) : 0;
+    int tv = 1 + nx + off + nbc + 1;
+    if (SF_nvars() != tv + nout) { SF_error("mock: varlist length mismatch\n"); return 198; }
+    for (int o = SF_in1(); o <= SF_in2(); o++) {
+      ST_double t, z; SF_vdata(tv, o, &t); if (t == 0) continue;
+      for (int v = tv - nbc; v < tv; v++) {
+        SF_vdata(v, o, &z);
+        if (SF_is_missing(z)) { SF_error("mock: missing bias-correction variable in the sample\n"); return 416; }
+      }
+    }
+    for (int k = 1; k <= nout; k++) for (int o = SF_in1(); o <= SF_in2(); o++) {
+      ST_double t; SF_vdata(tv, o, &t); if (t == 0) continue;
+      SF_vstore(tv + k, o, 1000.0 * k + o);
+    }
     return 0;
   }
   SF_error("mock: unknown cmd\n"); return 198;

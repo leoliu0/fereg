@@ -211,6 +211,61 @@ warning note is printed), else 1.
 Every `vce=` of prepare is accepted (section "Variance estimators"); unadjusted means
 Poisson robust and logit oim, as before.
 
+#### Bias correction and average partial effects (felogit; `bc=`)
+felogit's logitfe options (`analytical`, `jackknife`, `ape`; `stata/_rf_parse_bc.ado` resolves the
+option syntax). Only with `family=logit`; without `bc=` none of the keys below is accepted.
+Varlist: `y x… [offset] bcvar… touse out…` (`nbc` bias-correction variables).
+
+| key | values | meaning |
+|---|---|---|
+| `bc` | `ape analytical jackknife` | APEs only (uncorrected), analytical or jackknife correction (APEs always) |
+| `structure` | `classic network` | classic: xtset panel/time effects, logitfe's normalization; network: exporter-time, importer-time [, pair] (alpaca's) |
+| `effects` | `it ti i t` | classic (required): role of each absorbed term in absorb order, `i` = xtset panel, `t` = xtset time |
+| `which` | `both individual time` | bias corrected (logitfe `ibias()`/`tbias()`); network: `both` |
+| `lags` | integer ≥ 0 (default 0) | bandwidth L (`bc=analytical`); classic: calendar lags (gaps respected); network: rows back within the pair in time order |
+| `jk` | `ss1 ss2 js sj jj double` | jackknife variant (required with `bc=jackknife`) |
+| `multiple` | integer ≥ 0 (default 0) | number R of random partitions (`jk=ss1` or `jk=ss2`) |
+| `perm` | `i t it` | dimensions permuted by every partition, in variable order (required with `multiple`) |
+| `adj` | real (default 1) | factor of the APE sampling-of-effects term: 1, or (M − N*)/(M − 1) for `population(M)` |
+| `tdelta` | real (default 1) | classic: `_dta[_TSdelta]` |
+| `nbc` | integer | number of bias-correction variables in the varlist |
+| `b0` `b2` `V2` | matrix names | required with `bc`: 1×(nx+1) uncorrected coefficients (`_cons` last), 1×nx APEs, nx×nx APE variance |
+
+Bias-correction variables (numeric; read at prepare's observations, where they must be nonmissing):
+- classic: the xtset panel variable, the xtset time variable (raw values), then for every partition
+  r = 1…R of `multiple` one variable per letter of `perm` (panel first): logitfe's `pvar2`/`tvar2`,
+  the permuted ids drawn over the whole dataset by `_rf_bc_perm` (`set seed 13579`, moremata
+  `mm_sample()`, logitfe ado lines 3593-3632).
+- network: one group code per absorbed term (any numeric code constant within the term's groups),
+  then the xtset time variable when `lags` > 0.
+
+Definitions. N* = prepare's input observations (`__rf_N_full`: after the missing-value exclusion,
+before singletons and the fe rule); the APE divisor and the base sample of every jackknife
+subpanel. Individuals 0…N_pre−1 are the distinct panel values over the N* observations in
+ascending order, periods 0…T_pre−1 the distinct time values; a partition's individual (period)
+permutation maps individual i to the rank of its `pvar2` (`tvar2`) value among the N_pre (T_pre)
+values. Classic calendar periods are (t − t_min)/tdelta. `double` pairs panel and time values that
+are equal.
+
+Results. `b` holds the corrected coefficients (`bc=analytical|jackknife`; the uncorrected ones with
+`bc=ape`) and `_cons` re-evaluated at the corrected point; `V` and every scalar (ll, chi2, …) and
+the status codes are those of the uncorrected fit; `b0` the uncorrected coefficients; `b2` the APEs
+(analytically corrected, jackknife-combined or uncorrected) and `V2` their variance, always at the
+uncorrected fit (delta method, plus adj × the sampling-of-effects term over the N* observations,
+plus the weak-exogeneity term when `lags` > 0). Omitted regressors get zeros in `b0`, `b2`, `V2`.
+The outputs `d=` and `fe=` hold the fixed effects re-estimated by maximum likelihood at the
+corrected coefficients. Scalar `__rf_bc_nfits`: number of jackknife subpanel fits (0 otherwise).
+Jackknife subpanels are refitted on the N* observations of the subpanel with prepare's rules
+(singletons per `singletons=`, the fe rule iterated) and this call's `tol`, `maxiter`, `itol`; a
+subpanel APE is divided by the subpanel's own N*.
+
+Errors (r(198) unless stated): a `bc` key without `bc=`, Poisson, slopes or a term count other than
+1-2 (classic, matching `effects`) or 2-3 (network), `jk=` with network, `lags` beyond the
+shortest panel; `double` without equal panel and time values ("Invalid -double- option: no
+observations with the same index for the panel and time variables"); a jackknife subpanel that
+loses a coefficient or does not converge: r(498) "jackknife, subpanel <label>: …"; the
+fixed-effect re-solve at the corrected coefficients does not converge: r(430).
+
 `sepcheck=1` (Poisson only; feppml `tagsep()` / `zvarname()`, ppmlhdfe's secret options): runs
 the separation check on the prepared sample and stores nothing else; no estimation, no
 matrices, touse unchanged, and only the outputs `sep=<pos>` (1 = separated, 0 = not, on the

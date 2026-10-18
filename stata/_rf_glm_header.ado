@@ -38,8 +38,19 @@ Number of clusters (#)    = ######
 		di as text _col(69) as res %10.4f e(r2_p)
 	}
 	else {
-		* felogit: the layout of Stata's logit header plus the absorbed groups
+		* felogit: the layout of Stata's logit header plus the absorbed groups; with a bias
+		* correction or APEs, logitfe's title block first (logitfe.ado lines 2398-2406)
 		local llname = cond("`e(vcetype)'" == "Robust", "Log pseudolikelihood", "Log likelihood")
+		if (`"`e(bctitle)'"' != "") {
+			di as text ""
+			di as text `"`e(bctitle)'"'
+			di as text `"`e(bctitle1)'"'
+			di as text `"`e(bctitle2)'"'
+			di as text "{hline `=length(`"`e(bctitle2)'"')'}"
+			if (`"`e(bctitle3)'"' != "") di as text `"`e(bctitle3)'"'
+			if ("`e(id)'" != "") di as text "ID variable    = " as res "`e(id)'"
+			if ("`e(time)'" != "") di as text "Time variable  = " as res "`e(time)'"
+		}
 		di as text ""
 		di as text "`e(title)'" _c
 		di as text _col(51) "Number of obs" _col(67) "=" _c
