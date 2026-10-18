@@ -317,7 +317,33 @@ fn expand(input: &FitInput, session: &Session, parts: &GlmParts, ex: Excluded, p
     })
 }
 
+/// A GLM fit after IRLS, before its outputs are built: the session (absorber, terms, sample),
+/// the GLM parts and the sample accounting. The bias correction rewrites `parts` at the corrected
+/// point between [`estimate`] and [`output`].
+pub(crate) struct Estimated {
+    pub session: Session,
+    pub dropped: super::Dropped,
+    pub levels_before_separation: Option<Vec<usize>>,
+    pub excluded: Option<Excluded>,
+    pub parts: GlmParts,
+    pub family: Family,
+    pub has_fe: bool,
+    pub intercept: bool,
+    /// A column of ones was sent first (slope-only FE terms with an intercept).
+    pub ones: bool,
+    /// Regressors sent (ones column included).
+    pub nsent: usize,
+    /// The parts were rewritten at bias-corrected coefficients (the state refuses CRV3).
+    pub bias_corrected: bool,
+}
+
 pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
+    let est = estimate(input, spec, sample, ctx, pool)?;
+    output(input, spec, est, ctx, pool)
+}
+
+/// Sample checks and IRLS.
+pub(crate) fn estimate(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, pool: &Pool) -> Result<Estimated, RfError> {
     let Sample { mut session, mut dropped, levels_before_separation, excluded } = sample;
     let mut t = std::time::Instant::now();
     let family = if spec.model == Model::Poisson { Family::Poisson } else { Family::Logit };
@@ -364,8 +390,7 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
             Flavor::Pyfixest => GlmCollinear::Pyfixest { tol: spec.collin_tol },
         },
     };
-    let (_, mut parts) = session.glm_parts(rows, &Layout::ols(nsent), offset, &s, &g, GlmConvention::Fixest, ctx)?;
-    let mut t = std::time::Instant::now();
+    let (_, parts) = session.glm_parts(rows, &Layout::ols(nsent), offset, &s, &g, GlmConvention::Fixest, ctx)?;
 
     // Sample after the GLM-internal (relu / mu) drops and the singleton / perfect-fit passes
     // they trigger.
@@ -374,7 +399,13 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
     dropped.singletons += extra_singletons;
     dropped.perfect_fit += extra_perfect;
     dropped.separated += kept0 - session.n() - extra_singletons - extra_perfect;
+    Ok(Estimated { session, dropped, levels_before_separation, excluded, parts, family, has_fe, intercept, ones, nsent, bias_corrected: false })
+}
 
+/// The fit layer's outputs from an [`Estimated`] fit.
+pub(crate) fn output(input: &FitInput, spec: &FitSpec, est: Estimated, ctx: &Ctx, pool: &Pool) -> Result<FitOutput, RfError> {
+    let Estimated { mut session, dropped, levels_before_separation, excluded, mut parts, family, has_fe, intercept, ones, nsent, bias_corrected } = est;
+    let mut t = std::time::Instant::now();
     // Coefficients: intercept first, then x (fixest order).
     let source = |j: usize| if ones && j == 0 { CoefSource::Intercept } else { CoefSource::X(j - usize::from(ones)) };
     let mut coef_source = Vec::new();
@@ -642,6 +673,7 @@ pub(crate) fn glm(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx, p
             iv: false,
             intercept: intercept_idx,
             fe_hat: fe_hat.map(std::sync::OnceLock::from).unwrap_or_default(),
+            bias_corrected,
         },
     });
     Ok(FitOutput {
