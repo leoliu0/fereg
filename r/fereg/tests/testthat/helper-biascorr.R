@@ -176,7 +176,7 @@ ape_vcov_all_rows <- function(a, full, kept, fe, n.pop, panel.structure = "class
                               weak.exo = FALSE) {
   P <- alpaca_ape_parts(a)
   V <- crossprod(P$Gamma)
-  adj <- if (is.null(n.pop)) 0 else max((n.pop - P$Nf) / (n.pop - 1), 0)
+  adj <- if (is.null(n.pop)) 0 else if (is.infinite(n.pop)) 1 else max((n.pop - P$Nf) / (n.pop - 1), 0)
   if (adj == 0) return(V)
   # alpaca's rows: the estimation rows sorted (stably) by the fixed-effect variables.
   retained <- full[kept, , drop = FALSE]
@@ -208,10 +208,11 @@ ape_vcov_all_rows <- function(a, full, kept, fe, n.pop, panel.structure = "class
 # ---- jackknife reference (design 7): fixest refits on the subpanels ------------------------------
 
 # Coefficients and APEs of a logit fit on the rows `keep` of `d` (fixest), the APEs averaged over
-# the subpanel's own N* = sum(keep) rows; `binary`: names of the binary regressors.
-jk_fit <- function(fml, d, keep, binary) {
-  m <- fixest::feglm(fml, d[keep, , drop = FALSE], family = "logit", glm.tol = 1e-12, fixef.tol = 3e-12,
-    nthreads = 1, notes = FALSE)
+# the subpanel's own N* = sum(keep) rows; `binary`: names of the binary regressors; `offset`: a
+# one-sided formula or NULL.
+jk_fit <- function(fml, d, keep, binary, offset = NULL) {
+  m <- fixest::feglm(fml, d[keep, , drop = FALSE], family = "logit", offset = offset, glm.tol = 1e-12, glm.iter = 100,
+    fixef.tol = 3e-12, nthreads = 1, notes = FALSE)
   beta <- stats::coef(m)
   X <- stats::model.matrix(m, type = "rhs")
   eta <- m$linear.predictors
@@ -234,9 +235,10 @@ half <- function(idx, m, h) if (h == 1) idx <= ceiling(m / 2) else if (m %% 2 ==
 # model); `two_way`: whether the model has time effects (else only the individual-effect bias
 # exists); `perms`: list of list(individual, period) permutations (1-based new indices) for
 # `multiple`; `double`: the two fixed-effect variables sharing identifiers; `cache`: an
-# environment keeping the subpanel fits between calls on the same data and model.
+# environment keeping the subpanel fits between calls on the same data and model; `offset`: as
+# in jk_fit().
 jk_reference <- function(fml, d, ind, time, variant, bias = "both", two_way = TRUE, perms = NULL,
-                         binary = "d", double = NULL, cache = new.env()) {
+                         binary = "d", double = NULL, cache = new.env(), offset = NULL) {
   idx <- function(v) match(v, sort(unique(v), method = "radix"))
   ii <- idx(d[[ind]])
   tt <- idx(d[[time]])
@@ -245,7 +247,7 @@ jk_reference <- function(fml, d, ind, time, variant, bias = "both", two_way = TR
   kind <- if (!two_way) "individual" else bias
   fit <- function(keep) {
     key <- paste(which(keep), collapse = ",")
-    if (is.null(cache[[key]])) cache[[key]] <- jk_fit(fml, d, keep, binary)
+    if (is.null(cache[[key]])) cache[[key]] <- jk_fit(fml, d, keep, binary, offset)
     cache[[key]]
   }
   mean_of <- function(masks) {
@@ -323,4 +325,92 @@ jk_reference <- function(fml, d, ind, time, variant, bias = "both", two_way = TR
     one(if (is.null(p$individual)) ii else p$individual[ii], if (is.null(p$period)) tt else p$period[tt])
   })
   list(coef = Reduce(`+`, lapply(res, `[[`, "coef")) / length(res), ape = Reduce(`+`, lapply(res, `[[`, "ape")) / length(res))
+}
+
+# ---- independent reference on a fixest fit (any offset) ---------------------------------------------
+
+# alpaca's analytical correction (biasCorr.R:117-167) and uncorrected APEs with their delta-method
+# variance (getAPEs.R:168-288), written in plain R on a fixest logit fit `m` of the data `d`
+# (classic structure, `fe` the fixed-effect variables in formula order, unweighted); the weighted
+# projections M_w use fixest::demean() at a tight tolerance. The linear predictor includes the
+# offset. Rows of a group are in time order: the levels of the second fixed effect (one-way:
+# input order).
+fx_parts <- function(m, d, fe) {
+  e <- d[fixest::obs(m), , drop = FALSE]
+  X <- stats::model.matrix(m, type = "rhs")
+  eta <- m$linear.predictors
+  mu <- stats::plogis(eta)
+  w <- mu * (1 - mu)
+  center <- function(A, w) {
+    unname(as.matrix(fixest::demean(A, e[, fe, drop = FALSE], weights = w, tol = 1e-14, iter = 1e5, notes = FALSE, nthreads = 1)))
+  }
+  list(e = e, X = X, y = stats::model.matrix(m, type = "lhs"), eta = eta, mu = mu, w = w, v = e$y - mu,
+    z = w * (1 - 2 * mu), MX = center(X, w), center = center, beta = stats::coef(m))
+}
+
+fx_bias_ref <- function(m, d, fe, L = 0L) {
+  P <- fx_parts(m, d, fe)
+  n <- nrow(P$X)
+  gs <- function(A, g) colSums(rowsum(A, g, reorder = FALSE) / as.vector(rowsum(P$w, g, reorder = FALSE)))
+  b <- gs(P$MX * P$z, P$e[[fe[1]]]) / (2 * n)
+  if (length(fe) > 1) b <- b + gs(P$MX * P$z, P$e[[fe[2]]]) / (2 * n)
+  if (L > 0) {
+    A <- P$MX * P$w
+    key <- if (length(fe) > 1) P$e[[fe[2]]] else seq_len(n)
+    for (rows in split(seq_len(n), P$e[[fe[1]]])) {
+      r <- rows[order(key[rows], rows, method = "radix")]
+      Tg <- length(r)
+      s <- 0
+      for (l in seq_len(min(L, Tg - 1))) {
+        s <- s + colSums(A[r[(l + 1):Tg], , drop = FALSE] * P$v[r[seq_len(Tg - l)]]) * Tg / (Tg - l)
+      }
+      b <- b + s / sum(P$w[r]) / n
+    }
+  }
+  bias.term <- solve(crossprod(P$MX * sqrt(P$w)) / n, -b)
+  list(coef = P$beta - bias.term, bias.term = stats::setNames(as.vector(bias.term), names(P$beta)))
+}
+
+# Uncorrected APEs and their delta-method variance; `Nf` = N*.
+fx_ape_ref <- function(m, d, fe, Nf, binary = "d") {
+  P <- fx_parts(m, d, fe)
+  X <- P$X
+  PX <- X - P$MX
+  p <- ncol(X)
+  Delta <- Delta1 <- matrix(NA_real_, nrow(X), p)
+  J <- matrix(NA_real_, p, p)
+  for (j in seq_len(p)) {
+    if (colnames(X)[j] %in% binary) {
+      eta0 <- P$eta - X[, j] * P$beta[[j]]
+      f1 <- stats::dlogis(eta0 + P$beta[[j]])
+      Delta[, j] <- stats::plogis(eta0 + P$beta[[j]]) - stats::plogis(eta0)
+      Delta1[, j] <- f1 - stats::dlogis(eta0)
+      J[, j] <- -colSums(PX * Delta1[, j]) / Nf
+      J[j, j] <- sum(f1) / Nf + J[j, j]
+      J[-j, j] <- colSums(X[, -j, drop = FALSE] * Delta1[, j]) / Nf + J[-j, j]
+    } else {
+      Delta[, j] <- P$beta[[j]] * P$w
+      Delta1[, j] <- P$beta[[j]] * P$z
+      J[, j] <- colSums(P$MX * Delta1[, j]) / Nf
+      J[j, j] <- sum(P$w) / Nf + J[j, j]
+    }
+  }
+  Psi <- -Delta1 / P$w
+  PPsi <- Psi - P$center(Psi, P$w)
+  Gamma <- (P$MX %*% solve(crossprod(P$MX * sqrt(P$w)) / Nf, J) - PPsi) * P$v / Nf
+  list(delta = stats::setNames(colSums(Delta) / Nf, colnames(X)), vcov = crossprod(Gamma))
+}
+
+# The linear predictor and iid variance (no K adjustment) of the corrected point: fixed effects
+# re-estimated by fixest with X beta_c in the offset.
+fx_corrected_point <- function(m, d, fe, coef_c, offset = NULL) {
+  e <- d[fixest::obs(m), , drop = FALSE]
+  X <- stats::model.matrix(m, type = "rhs")
+  e$.xb <- as.vector(X %*% coef_c) + if (is.null(offset)) 0 else eval(offset[[2]], e)
+  f <- stats::as.formula(paste(as.character(m$fml[[2]]), "~ 1 |", paste(fe, collapse = " + ")))
+  r <- fixest::feglm(f, e, family = "logit", offset = ~.xb, glm.tol = 1e-12, fixef.tol = 3e-12, nthreads = 1, notes = FALSE)
+  mu <- stats::plogis(r$linear.predictors)
+  w <- mu * (1 - mu)
+  MX <- as.matrix(fixest::demean(X, e[, fe, drop = FALSE], weights = w, tol = 1e-14, iter = 1e5, notes = FALSE, nthreads = 1))
+  list(eta = r$linear.predictors, vcov = solve(crossprod(MX * sqrt(w))))
 }

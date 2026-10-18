@@ -17,7 +17,8 @@ getAPEs(
 \code{\link[=biasCorr]{biasCorr()}} result.}
 
 \item{n.pop}{Size of the population, for the finite-population term of the variance (truncated
-to an integer, as alpaca); \code{NULL} (default) gives the delta-method variance only.}
+to an integer, as alpaca; \code{Inf} for an infinite population); \code{NULL} (default) gives the
+delta-method variance only.}
 
 \item{panel.structure}{\code{"classic"} (default) or \code{"network"}, as in \code{\link[=biasCorr]{biasCorr()}}. Taken from the
 correction for a \code{\link[=biasCorr]{biasCorr()}} object.}
@@ -54,8 +55,10 @@ as for an uncorrected estimation.
 The variance is the delta-method variance (Fernández-Val and Weidner, 2016, as alpaca) plus,
 when \code{n.pop} is given, a finite-population term for the sampling of the effects multiplied by
 \eqn{(n.pop - N^*)/(n.pop - 1)}, \eqn{N^*} being the number of observations before the removal
-of constant-outcome groups. When \code{n.pop} is smaller than \eqn{N^*} the factor is zero, with a
-warning (alpaca). \code{sampling.fe} and \code{weak.exo} only change this term.
+of constant-outcome groups (1 for \code{n.pop = Inf}). When \code{n.pop} is smaller than \eqn{N^*} the
+factor is zero, with a warning (alpaca). \code{sampling.fe} and \code{weak.exo} only change this term:
+without \code{n.pop}, \code{weak.exo = TRUE} and \code{sampling.fe = "unrestricted"} have no effect and are
+errors (alpaca accepts them).
 
 \strong{Difference from alpaca.} With \code{n.pop} and fixed-effect groups removed because of a constant
 outcome, the sampling-of-effects term sums over all observations, with zero partial effects for

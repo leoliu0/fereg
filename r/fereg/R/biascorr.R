@@ -33,9 +33,10 @@
 #' order is that of the levels of the second fixed effect within each individual (two-way), the
 #' order of the data rows (one-way), and the order of the (exporter-time, importer-time) levels
 #' within each pair (network): numbers ascending, factors in level order, character strings in
-#' C-locale order (alpaca sorts the data by the fixed-effect variables). A network model with two
-#' fixed effects has no pair effect: `L` is then ignored, with a warning (alpaca ignores it
-#' silently).
+#' C-locale order (alpaca sorts the data by the fixed-effect variables). `L` must be smaller than
+#' the number of observations of the longest group, else it is an error (alpaca silently gives
+#' the result of `L = 0`). A network model with two fixed effects has no pair effect: `L` is then
+#' ignored, with a warning (alpaca ignores it silently).
 #'
 #' **Jackknife.** The full-sample estimate `b` is combined with estimates on subpanels, estimated
 #' again with the sample rules of [feglm()] (each with its own removal of fixed-effect groups with
@@ -84,17 +85,21 @@
 #'   `vcov = ~cl, ssc = ssc(K.adj = FALSE, G.adj = FALSE)`. CRV3 is an error.
 #' * The log-likelihood, deviance and fit statistics are those of the corrected point (alpaca
 #'   keeps the uncorrected deviance, which is in `deviance.uncorr`).
-#' * alpaca has no jackknife. The jackknife follows logitfe's definitions with two fixes: `js`
-#'   and `sj` combine the half-panels of the other dimension (logitfe uses the same dimension
-#'   twice), and `ss2` with a single bias works (logitfe stops). A subpanel estimation that loses
-#'   a regressor or does not converge is an error naming the subpanel (logitfe sets the
-#'   coefficient to zero).
+#' * alpaca has no jackknife. The jackknife follows logitfe's definitions with its dimension
+#'   errors fixed: the individual-effect bias is removed with subpanels in the time dimension and
+#'   the time-effect bias with subpanels across individuals. logitfe swaps them in `js` and `sj`
+#'   with both biases (it uses the same dimension twice) and in the single-bias `js`, `sj`, `jj`
+#'   and `double` variants (its individual-effect-only correction deletes individuals, its
+#'   time-effect-only correction deletes periods); `ss2` with the individual-effect bias alone
+#'   works (logitfe stops). A subpanel estimation that loses a regressor or does not converge is
+#'   an error naming the subpanel (logitfe sets the coefficient to zero).
 #' * `biasCorr()` cannot be applied to a corrected estimation (alpaca corrects again).
 #'
 #' @param object A logit estimation of [feglm()] with fixed effects (intercept-only terms: one or
-#'   two in a classic panel, two or three in a network), estimated with `lean = FALSE`. Its data
-#'   must still be available (it is found again from the call, as for clustered variances after
-#'   estimation): the correction estimates the model again.
+#'   two in a classic panel, two or three in a network). Its data must still be available (it is
+#'   found again from the call, as for clustered variances after estimation): the correction
+#'   estimates the model again. The result is lean (no residuals, fitted values or estimation
+#'   state) when `object` is.
 #' @param L Bandwidth of the spectral term for weakly exogenous regressors (e.g. a lagged
 #'   outcome); `0` (default) for strictly exogenous regressors. Fernández-Val and Weidner suggest
 #'   1 to 4. Analytical correction only.
@@ -114,8 +119,9 @@
 #'   the `panel.id` of the estimation.
 #' @return A `fereg` object of class `c("fereg_biascorr", "fereg")` at the corrected coefficients,
 #'   with in addition `coefficients.uncorr` (the uncorrected coefficients), `bias.term` (the
-#'   uncorrected minus the corrected coefficients), `panel.structure`, `bandwidth` (`L`), `method`,
-#'   `jackknife` (the variant, `NULL` for the analytical correction), `bias`, `multiple`, `split`
+#'   uncorrected minus the corrected coefficients), `panel.structure`, `bandwidth` (the requested
+#'   `L`, as alpaca), `method`, `jackknife` (the variant, `NULL` for the analytical correction),
+#'   `bias` (the bias corrected: `"individual"` for a one-way model), `multiple`, `split`
 #'   (with `multiple`), `nobs.full` (observations before the removal of fixed-effect groups with
 #'   a constant outcome) and `deviance.uncorr` (the deviance of the uncorrected estimation).
 #' @references
@@ -168,10 +174,6 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
     if (multiple > 0) stop("fereg: `multiple` needs method = \"jackknife\"", call. = FALSE)
   }
   if (split_given && multiple == 0) stop("fereg: `split` is only used with `multiple`", call. = FALSE)
-  # The core's text; its fit layer resolves any `bias` of a network to "both".
-  if (panel.structure == "network" && bias != "both") {
-    stop("network structure: only the correction of both biases is available", call. = FALSE)
-  }
   needs_time <- method == "jackknife" && k == 1
   if (!is.null(panel.id) && !needs_time) {
     stop("fereg: `panel.id` is only used by the jackknife of a model with one fixed effect (to split the observations of each individual in time)", call. = FALSE)
@@ -180,7 +182,7 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 
   data <- fetch_data(object, "biasCorr() estimates the model again on it")
   time_var <- if (needs_time) bc_time_var(object, panel.id, data)
-  s <- bias_setup(object, data, time_var, common)
+  s <- bias_setup(object, data, time_var, common, lean = isTRUE(object$lean))
   opts <- list(
     method = method, structure = panel.structure, which = bias, bandwidth = L, time = s$time,
     variant = if (method == "jackknife") jackknife, partitions = list()
@@ -206,7 +208,7 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
   res$bandwidth <- L
   res$method <- method
   res$jackknife <- if (method == "jackknife") jackknife
-  res$bias <- bias
+  res$bias <- rep$which
   res$multiple <- multiple
   res$split <- if (multiple > 0) split
   res$nobs.full <- as.integer(rep$n_full)
@@ -241,8 +243,10 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 #' The variance is the delta-method variance (Fernández-Val and Weidner, 2016, as alpaca) plus,
 #' when `n.pop` is given, a finite-population term for the sampling of the effects multiplied by
 #' \eqn{(n.pop - N^*)/(n.pop - 1)}, \eqn{N^*} being the number of observations before the removal
-#' of constant-outcome groups. When `n.pop` is smaller than \eqn{N^*} the factor is zero, with a
-#' warning (alpaca). `sampling.fe` and `weak.exo` only change this term.
+#' of constant-outcome groups (1 for `n.pop = Inf`). When `n.pop` is smaller than \eqn{N^*} the
+#' factor is zero, with a warning (alpaca). `sampling.fe` and `weak.exo` only change this term:
+#' without `n.pop`, `weak.exo = TRUE` and `sampling.fe = "unrestricted"` have no effect and are
+#' errors (alpaca accepts them).
 #'
 #' **Difference from alpaca.** With `n.pop` and fixed-effect groups removed because of a constant
 #' outcome, the sampling-of-effects term sums over all observations, with zero partial effects for
@@ -259,7 +263,8 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
 #' @param object A logit estimation of [feglm()] (see [biasCorr()] for the requirements) or a
 #'   [biasCorr()] result.
 #' @param n.pop Size of the population, for the finite-population term of the variance (truncated
-#'   to an integer, as alpaca); `NULL` (default) gives the delta-method variance only.
+#'   to an integer, as alpaca; `Inf` for an infinite population); `NULL` (default) gives the
+#'   delta-method variance only.
 #' @param panel.structure `"classic"` (default) or `"network"`, as in [biasCorr()]. Taken from the
 #'   correction for a [biasCorr()] object.
 #' @param sampling.fe `"independence"` (default: the fixed effects are independent sequences) or
@@ -291,6 +296,13 @@ getAPEs <- function(object = NULL, n.pop = NULL, panel.structure = c("classic", 
   if (!is.logical(weak.exo) || length(weak.exo) != 1 || is.na(weak.exo)) {
     stop("fereg: `weak.exo` must be TRUE or FALSE", call. = FALSE)
   }
+  if (is.null(n.pop)) {
+    # Both terms are multiplied by the finite-population factor, which is 0 without n.pop.
+    if (!missing(weak.exo) && weak.exo) stop("weak.exo = TRUE has no effect without n.pop", call. = FALSE)
+    if (!missing(sampling.fe) && identical(match.arg(sampling.fe), "unrestricted")) {
+      stop("sampling.fe = \"unrestricted\" has no effect without n.pop", call. = FALSE)
+    }
+  }
   corrected <- inherits(object, "fereg_biascorr")
   if (corrected) {
     if (!missing(panel.structure) && match.arg(panel.structure) != object$panel.structure) {
@@ -321,7 +333,8 @@ getAPEs <- function(object = NULL, n.pop = NULL, panel.structure = c("classic", 
 
   data <- fetch_data(object, "getAPEs() estimates the model again on it")
   setup <- object$bias.setup
-  s <- bias_setup(object, data, setup$time_var, isTRUE(setup$common), vcov = new_vcov("iid"))
+  # The estimation's own variance request: its variables (clusters, ...) define the sample.
+  s <- bias_setup(object, data, setup$time_var, isTRUE(setup$common), lean = TRUE)
   at <- NULL
   if (corrected) {
     core <- order(object$coef_perm)
@@ -423,19 +436,14 @@ bc_check_object <- function(object, fun) {
   if (!identical(object$family$family, "binomial")) {
     stop("'", fun, "' currently only supports binary choice models.", call. = FALSE)
   }
-  if (is.null(object$state)) {
-    stop("fereg: the estimation state was not kept (lean = TRUE); re-estimate the model with lean = FALSE", call. = FALSE)
-  }
   if (length(object$coefficients) == 0) stop("fereg: ", fun, "() needs at least one regressor", call. = FALSE)
   invisible()
 }
 
-# Number of fixed effects, checked against the panel structure (alpaca's messages).
+# Number of fixed effects, checked against the panel structure (alpaca's messages; the core
+# checks the rest of the model: slopes, IV, ...).
 bc_check_fe <- function(object, panel.structure, fun) {
   terms <- object$fixef_terms
-  if (any(vapply(terms, function(t) !t$intercept || length(t$slopes) > 0, TRUE))) {
-    stop("bias correction and APEs need intercept-only fixed effects (no varying slopes)", call. = FALSE)
-  }
   k <- length(terms)
   if (panel.structure == "classic" && !k %in% 1:2) {
     stop("panel.structure == 'classic' expects a one- or two-way fixed effects model.", call. = FALSE)
@@ -473,10 +481,11 @@ bc_time_var <- function(object, panel.id, data) {
 # effects coded in sorted (C-locale) order, the order of the fixed-effect levels being the time
 # order of alpaca (which sorts the data by the fixed-effect variables). `time_var`: a time
 # variable registered as a factor (index in `$time`). `common`: the first two fixed effects coded
-# on one set of identifiers (double jackknife; numbers are matched by value).
-bias_setup <- function(object, data, time_var = NULL, common = FALSE, vcov = NULL) {
+# on one set of identifiers (double jackknife; numbers are matched by value). `lean`: keep no
+# residuals nor estimation state.
+bias_setup <- function(object, data, time_var = NULL, common = FALSE, vcov = NULL, lean = FALSE) {
   vi <- object$vcov_info
-  modify <- list(vcov = vcov %||% vi$request, ssc = if (is.null(vcov)) vi$ssc, lean = FALSE, notes = FALSE)
+  modify <- list(vcov = vcov %||% vi$request, ssc = if (is.null(vcov)) vi$ssc, lean = lean, notes = FALSE)
   s <- refit_setup(object, modify, data)
   reg <- s$info$reg
   s$time <- if (!is.null(time_var)) time_index(reg, as.name(time_var))
@@ -486,12 +495,10 @@ bias_setup <- function(object, data, time_var = NULL, common = FALSE, vcov = NUL
     v <- reg$values[[j]]
     if (is.character(v)) s$input$factors[[j]] <- sorted_codes(v, v)
   }
-  if (common) {
-    i1 <- s$input$fe[[1]]$factors
-    i2 <- s$input$fe[[2]]$factors
-    if (length(i1) != 1 || length(i2) != 1) {
-      stop("the double jackknife needs two single-variable fixed effects", call. = FALSE)
-    }
+  i1 <- s$input$fe[[1]]$factors
+  i2 <- if (common) s$input$fe[[2]]$factors
+  # (Interactions: the core reports that the double jackknife needs single variables.)
+  if (common && length(i1) == 1 && length(i2) == 1) {
     v1 <- reg$values[[i1]]
     v2 <- reg$values[[i2]]
     if (!(is.numeric(v1) && is.numeric(v2))) {

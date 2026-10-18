@@ -48,7 +48,9 @@ test_that("analytical correction matches alpaca: one-way, weights, character and
   a <- al_feglm(y ~ ylag + x1 + d | i, d)
   for (L in 0:2) check_bc(biasCorr(m, L = L), alpaca::biasCorr(a, L = L), d, "i", sprintf("one-way L=%d", L))
   # The individual effect is the only bias of a one-way model.
-  expect_equal(coef(biasCorr(m, L = 1, bias = "individual")), coef(biasCorr(m, L = 1)), tolerance = 1e-14)
+  bc1 <- biasCorr(m, L = 1)
+  expect_identical(bc1$bias, "individual")
+  expect_equal(coef(biasCorr(m, L = 1, bias = "individual")), coef(bc1), tolerance = 1e-14)
 
   set.seed(11)
   d$w <- runif(nrow(d), 0.5, 2)
@@ -167,7 +169,6 @@ test_that("biasCorr() rejects unsupported objects and combinations (R checks, th
   expect_error(biasCorr(feols(y ~ x1 | i, d, notes = FALSE)), "'biasCorr' called on a non-'feglm' object.", fixed = TRUE)
   expect_error(biasCorr(fepois(y ~ x1 | i, d, notes = FALSE)), "'biasCorr' currently only supports binary choice models.", fixed = TRUE)
   expect_error(biasCorr(fe_logit(c(y, d) ~ x1 | i, d)), "takes a single estimation", fixed = TRUE)
-  expect_error(biasCorr(fe_logit(y ~ x1 + d | i + t, d, lean = TRUE)), "estimation state was not kept (lean = TRUE)", fixed = TRUE)
   expect_error(biasCorr(fe_logit(y ~ 1 | i + t, d)), "biasCorr() needs at least one regressor", fixed = TRUE)
   slopes <- "bias correction and APEs need intercept-only fixed effects (no varying slopes)"
   expect_error(biasCorr(fe_logit(y ~ d | t[x1], d)), slopes, fixed = TRUE)

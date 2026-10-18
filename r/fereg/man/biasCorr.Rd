@@ -18,9 +18,10 @@ biasCorr(
 }
 \arguments{
 \item{object}{A logit estimation of \code{\link[=feglm]{feglm()}} with fixed effects (intercept-only terms: one or
-two in a classic panel, two or three in a network), estimated with \code{lean = FALSE}. Its data
-must still be available (it is found again from the call, as for clustered variances after
-estimation): the correction estimates the model again.}
+two in a classic panel, two or three in a network). Its data must still be available (it is
+found again from the call, as for clustered variances after estimation): the correction
+estimates the model again. The result is lean (no residuals, fitted values or estimation
+state) when \code{object} is.}
 
 \item{L}{Bandwidth of the spectral term for weakly exogenous regressors (e.g. a lagged
 outcome); \code{0} (default) for strictly exogenous regressors. Fernández-Val and Weidner suggest
@@ -50,8 +51,9 @@ the \code{panel.id} of the estimation.}
 \value{
 A \code{fereg} object of class \code{c("fereg_biascorr", "fereg")} at the corrected coefficients,
 with in addition \code{coefficients.uncorr} (the uncorrected coefficients), \code{bias.term} (the
-uncorrected minus the corrected coefficients), \code{panel.structure}, \code{bandwidth} (\code{L}), \code{method},
-\code{jackknife} (the variant, \code{NULL} for the analytical correction), \code{bias}, \code{multiple}, \code{split}
+uncorrected minus the corrected coefficients), \code{panel.structure}, \code{bandwidth} (the requested
+\code{L}, as alpaca), \code{method}, \code{jackknife} (the variant, \code{NULL} for the analytical correction),
+\code{bias} (the bias corrected: \code{"individual"} for a one-way model), \code{multiple}, \code{split}
 (with \code{multiple}), \code{nobs.full} (observations before the removal of fixed-effect groups with
 a constant outcome) and \code{deviance.uncorr} (the deviance of the uncorrected estimation).
 }
@@ -84,9 +86,10 @@ network), with the rows in time order, and gaps in unbalanced panels are ignored
 order is that of the levels of the second fixed effect within each individual (two-way), the
 order of the data rows (one-way), and the order of the (exporter-time, importer-time) levels
 within each pair (network): numbers ascending, factors in level order, character strings in
-C-locale order (alpaca sorts the data by the fixed-effect variables). A network model with two
-fixed effects has no pair effect: \code{L} is then ignored, with a warning (alpaca ignores it
-silently).
+C-locale order (alpaca sorts the data by the fixed-effect variables). \code{L} must be smaller than
+the number of observations of the longest group, else it is an error (alpaca silently gives
+the result of \code{L = 0}). A network model with two fixed effects has no pair effect: \code{L} is then
+ignored, with a warning (alpaca ignores it silently).
 
 \strong{Jackknife.} The full-sample estimate \code{b} is combined with estimates on subpanels, estimated
 again with the sample rules of \code{\link[=feglm]{feglm()}} (each with its own removal of fixed-effect groups with
@@ -136,11 +139,14 @@ fixest's variance types and small-sample corrections: alpaca's \code{vcov(type =
 \verb{vcov = ~cl, ssc = ssc(K.adj = FALSE, G.adj = FALSE)}. CRV3 is an error.
 \item The log-likelihood, deviance and fit statistics are those of the corrected point (alpaca
 keeps the uncorrected deviance, which is in \code{deviance.uncorr}).
-\item alpaca has no jackknife. The jackknife follows logitfe's definitions with two fixes: \code{js}
-and \code{sj} combine the half-panels of the other dimension (logitfe uses the same dimension
-twice), and \code{ss2} with a single bias works (logitfe stops). A subpanel estimation that loses
-a regressor or does not converge is an error naming the subpanel (logitfe sets the
-coefficient to zero).
+\item alpaca has no jackknife. The jackknife follows logitfe's definitions with its dimension
+errors fixed: the individual-effect bias is removed with subpanels in the time dimension and
+the time-effect bias with subpanels across individuals. logitfe swaps them in \code{js} and \code{sj}
+with both biases (it uses the same dimension twice) and in the single-bias \code{js}, \code{sj}, \code{jj}
+and \code{double} variants (its individual-effect-only correction deletes individuals, its
+time-effect-only correction deletes periods); \code{ss2} with the individual-effect bias alone
+works (logitfe stops). A subpanel estimation that loses a regressor or does not converge is
+an error naming the subpanel (logitfe sets the coefficient to zero).
 \item \code{biasCorr()} cannot be applied to a corrected estimation (alpaca corrects again).
 }
 }

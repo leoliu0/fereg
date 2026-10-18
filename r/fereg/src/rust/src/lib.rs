@@ -687,6 +687,15 @@ fn fereg_bias_corr(input: List, spec: List, bias: List, nthreads: i32) -> Result
     let report = named(vec![
         ("coef_uncorr", reals(&r.coef_uncorr)),
         ("bias_term", reals(&r.bias_term)),
+        (
+            "which",
+            match r.which {
+                WhichBias::Both => "both",
+                WhichBias::Individual => "individual",
+                WhichBias::Time => "time",
+            }
+            .into(),
+        ),
         ("bandwidth", int(r.bandwidth)),
         ("ape_jackknife", opt_reals(r.ape_jackknife.as_deref())),
         ("n_full", int(r.n_full)),

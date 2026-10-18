@@ -46,7 +46,7 @@ test_that("jackknife variants x biases match fixest refits of the subpanels (two
   expect_true(a1$weak.exo)
   expect_identical(a1$delta, a0$delta)
   expect_false(isTRUE(all.equal(a1$vcov, a0$vcov)))
-  expect_equal(getAPEs(jk, weak.exo = TRUE)$vcov, getAPEs(jk)$vcov)
+  expect_error(getAPEs(jk, weak.exo = TRUE), "weak.exo = TRUE has no effect without n.pop", fixed = TRUE)
 })
 
 test_that("jackknife variants match fixest refits (one-way: time variable from panel.id)", {

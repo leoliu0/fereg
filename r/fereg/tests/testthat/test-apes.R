@@ -5,8 +5,9 @@
 # is removed. Uncorrected estimations at 1e-8; corrected ones at 1e-6 (alpaca solves the fixed
 # effects at the corrected coefficients imprecisely).
 
-# Every variant of getAPEs() (n.pop NULL / given, both sampling.fe, weak.exo) on `obj` (fereg)
-# and `a` (alpaca), `full` being the N* rows and `fe` the fixed-effect variables.
+# Every variant of getAPEs() on `obj` (fereg) and `a` (alpaca), `full` being the N* rows and `fe`
+# the fixed-effect variables: without n.pop the defaults (weak.exo = TRUE and "unrestricted" have
+# no effect then and are errors), with n.pop both sampling.fe and weak.exo.
 check_apes <- function(obj, a, full, fe, group, tol, ps = "classic") {
   corrected <- inherits(obj, "fereg_biascorr")
   drops <- a$nobs[["nobs.pc"]] > 0
@@ -14,6 +15,7 @@ check_apes <- function(obj, a, full, fe, group, tol, ps = "classic") {
   for (np in list(NULL, n.pop)) {
     for (sfe in c("independence", "unrestricted")) {
       for (we in c(FALSE, TRUE)) {
+        if (is.null(np) && (sfe == "unrestricted" || we)) next
         ours <- if (corrected) {
           getAPEs(obj, n.pop = np, sampling.fe = sfe)
         } else {
@@ -154,9 +156,10 @@ test_that("getAPEs() on a corrected estimation takes the structure and weak exog
   expect_false(getAPEs(bc0)$weak.exo)
   expect_true(getAPEs(bc2)$weak.exo)
   expect_identical(getAPEs(bc2)$bandwidth, 2L)
-  expect_equal(getAPEs(bc2, weak.exo = TRUE, panel.structure = "classic")$vcov, getAPEs(bc2)$vcov)
-  expect_error(getAPEs(bc2, weak.exo = FALSE), "after an analytical bias correction, weak.exo is TRUE (L = 2); drop `weak.exo`", fixed = TRUE)
-  expect_error(getAPEs(bc0, weak.exo = TRUE), "weak.exo is FALSE (L = 0)", fixed = TRUE)
+  expect_equal(getAPEs(bc2, n.pop = 5000, weak.exo = TRUE, panel.structure = "classic")$vcov, getAPEs(bc2, n.pop = 5000)$vcov)
+  expect_error(getAPEs(bc2, n.pop = 5000, weak.exo = FALSE), "after an analytical bias correction, weak.exo is TRUE (L = 2); drop `weak.exo`", fixed = TRUE)
+  expect_error(getAPEs(bc0, n.pop = 5000, weak.exo = TRUE), "weak.exo is FALSE (L = 0)", fixed = TRUE)
+  expect_error(getAPEs(bc2, weak.exo = TRUE), "weak.exo = TRUE has no effect without n.pop", fixed = TRUE)
   expect_error(getAPEs(bc0, panel.structure = "network"), "the bias correction used panel.structure = \"classic\"", fixed = TRUE)
   ape <- getAPEs(bc0)
   expect_length(ape$bias.term, 2)
@@ -172,7 +175,6 @@ test_that("getAPEs() rejects unsupported objects and arguments before estimating
   expect_error(getAPEs(feols(y ~ x1 | i, d, notes = FALSE)), "'getAPEs' called on a non-'feglm' object.", fixed = TRUE)
   expect_error(getAPEs(fepois(y ~ x1 | i, d, notes = FALSE)), "'getAPEs' currently only supports binary choice models.", fixed = TRUE)
   expect_error(getAPEs(fe_logit(c(y, d) ~ x1 | i, d)), "takes a single estimation", fixed = TRUE)
-  expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t, d, lean = TRUE)), "estimation state was not kept (lean = TRUE)", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ 1 | i + t, d)), "getAPEs() needs at least one regressor", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ d | t[x1], d)), "bias correction and APEs need intercept-only fixed effects (no varying slopes)", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t + k, d)), "panel.structure == 'classic' expects a one- or two-way fixed effects model.", fixed = TRUE)
