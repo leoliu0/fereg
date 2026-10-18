@@ -93,6 +93,9 @@ def summary(models, digits: int = 3) -> None:
         print(line)
         if m._sample_split_var is not None:
             print(f"sample: {m._sample_split_var} = {m._sample_split_value}")
+        correction = getattr(m, "_correction_line", None)
+        if correction is not None:
+            print(f"Bias correction: {correction}")
         print("Inference: ", m._vcov_type_detail)
         print("Observations: ", m._N)
         print("")

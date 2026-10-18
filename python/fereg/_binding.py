@@ -14,6 +14,9 @@ from . import _core
 
 __all__ = [
     "fit_design",
+    "bias_dims_design",
+    "bias_corr_design",
+    "apes_design",
     "factor_arg",
     "core_ssc",
     "pnorm",
@@ -48,7 +51,7 @@ def _f64(a: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
-def fit_design(
+def _fit_call(
     design: Any,
     *,
     model: str,
@@ -68,14 +71,14 @@ def fit_design(
     keep_state: bool = True,
     threads: int = 0,
     drop: np.ndarray | None = None,
-) -> Any:
-    """Runs ``fereg_core::fit`` on a :class:`fereg.design.Design` (pyfixest conventions);
-    ``vcov`` is a :class:`fereg._vcov.VcovSpec`."""
+) -> tuple[tuple, dict]:
+    """Positional and keyword arguments of ``_core.fit`` (shared by the bias-correction entry
+    points, which take the same model) for a :class:`fereg.design.Design`."""
     if drop is None:
         drop = design.drop
     elif design.drop is not None:
         drop = drop | design.drop
-    return _core.fit(
+    args = (
         _f64(design.y),
         [_f64(c) for c in design.x],
         [_f64(c) for c in design.endog],
@@ -88,6 +91,8 @@ def fit_design(
         None if design.offset is None else _f64(design.offset),
         [list(c) for c in design.cluster],
         None if drop is None else np.ascontiguousarray(drop, dtype=np.bool_),
+    )
+    kwargs = dict(
         time=design.time,
         panel=design.panel,
         lat=None if design.lat is None else _f64(design.lat),
@@ -113,6 +118,48 @@ def fit_design(
         keep_state=keep_state,
         threads=int(threads),
     )
+    return args, kwargs
+
+
+def fit_design(design: Any, **options: Any) -> Any:
+    """Runs ``fereg_core::fit`` on a :class:`fereg.design.Design` (pyfixest conventions);
+    ``vcov`` is a :class:`fereg._vcov.VcovSpec`, the other options as :func:`_fit_call`."""
+    args, kwargs = _fit_call(design, **options)
+    return _core.fit(*args, **kwargs)
+
+
+def bias_dims_design(design: Any, *, bias: dict, **options: Any) -> dict:
+    """``fereg_core::fit::bias_dims`` of the logit model ``design`` / ``options`` (as
+    :func:`fit_design`) under the bias options ``bias``: ``{n_individuals, n_periods, n_full}``
+    (the jackknife index spaces N_pre and T_pre, and N*)."""
+    args, kwargs = _fit_call(design, **options)
+    return _core.bias_dims(*args, **kwargs, bias=bias)
+
+
+def bias_corr_design(design: Any, *, bias: dict, **options: Any) -> tuple[Any, dict]:
+    """``fereg_core::fit::bias_corr``: the fit at the corrected coefficients (a ``FitResult``)
+    and the correction report (``{coef_uncorr, bias_term, structure, which, bandwidth, method,
+    variant, n_partitions, ape_jackknife, ape_uncorr, n_full, n_fits, deviance_uncorr,
+    resolve_iterations, notes}``).
+
+    ``bias`` = ``{method: "analytical" | "jackknife", structure: "classic" | "network", which:
+    "both" | "individual" | "time", bandwidth: int, time: factor index | None, variant: "ss1" |
+    "ss2" | "js" | "sj" | "jj" | "double", partitions: [(individual permutation | None, period
+    permutation | None), ...]}`` (permutations: int64 arrays, new 0-based index per individual /
+    period)."""
+    args, kwargs = _fit_call(design, **options)
+    return _core.bias_corr(*args, **kwargs, bias=bias)
+
+
+def apes_design(design: Any, *, ape: dict, **options: Any) -> dict:
+    """``fereg_core::fit::apes``: ``{coef_source, delta, vcov (p x p), bias_term, binary, adj,
+    weak_exo_used, structure, bandwidth, n_full, notes}``.
+
+    ``ape`` = ``{n_pop: float | None, structure: "classic" | "network", sampling: "independence" |
+    "unrestricted", weak_exo: bool, at: None | {bias: <bias options of bias_corr_design>, coef:
+    corrected coefficients, ape_jackknife: jackknife APEs | None}}`` (``at=None``: uncorrected)."""
+    args, kwargs = _fit_call(design, **options)
+    return _core.apes(*args, **kwargs, ape=ape)
 
 
 def _vectorized(f, x, *params):

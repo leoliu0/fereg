@@ -812,6 +812,101 @@ class Felogit(Feglm):
     def _response(self, eta: np.ndarray) -> np.ndarray:
         return 1.0 / (1.0 + np.exp(-eta))
 
+    def bias_corr(
+        self,
+        L: int = 0,
+        panel_structure: str = "classic",
+        method: str = "analytical",
+        jackknife: str | None = None,
+        bias: str = "both",
+        multiple: int = 0,
+        split: str | None = None,
+        time_id: str | None = None,
+        seed: int | None = None,
+    ):
+        """Incidental-parameter bias correction of the coefficients (alpaca ``biasCorr``; pyfixest
+        has no bias correction). Returns a :class:`fereg.bias.FelogitBiasCorr`: the model at the
+        corrected coefficients, with the fixed effects re-estimated there; every method of this
+        class works on it (CRV3 excepted).
+
+        ``method="analytical"`` (Fernandez-Val and Weidner 2016; network: Hinz, Stammann and
+        Wanner 2020): ``panel_structure="classic"`` takes one or two fixed effects (individual,
+        then time), ``"network"`` two or three (exporter-time, importer-time, pair). ``L`` is the
+        bandwidth for weakly exogenous regressors (rows back within an individual, or a pair in
+        network models, in time order; gaps ignored; ``L`` must be smaller than the longest group,
+        else an error, where alpaca silently gives the ``L = 0`` result; a two-way network model
+        has no pair effect and ignores ``L`` with a warning). ``bias`` chooses the bias removed:
+        ``"both"`` (alpaca), ``"individual"`` (first fixed effect, with the ``L`` term) or
+        ``"time"`` (second fixed effect; two-way classic models; ``L`` must be 0); network models
+        correct both.
+
+        ``method="jackknife"`` (classic models; ``L`` not used): ``jackknife`` is the variant,
+        ``"ss2"`` (default: split-panel in both dimensions), ``"ss1"`` (four quadrants), ``"js"``
+        (delete-one individual, split-panel time), ``"sj"`` (split-panel individuals, delete-one
+        period), ``"jj"`` (delete-one in both) or ``"double"`` (delete-one id for models whose two
+        fixed effects share one id space, e.g. exporter and importer). The individual-effect bias
+        is removed with time-dimension subpanels and the time-effect bias with individual-dimension
+        subpanels; ``bias`` chooses which. Subpanels are formed over the observations before the
+        fixed-effect based drops and refitted with the full sample rules. ``multiple=R`` (ss1/ss2)
+        averages R corrections over random permutations of the individuals and/or periods
+        (``split="both"`` (default), ``"individuals"`` or ``"time"``) drawn with
+        ``numpy.random.default_rng(seed)``. One-way models need the time variable ``time_id``:
+        time order = sorted values (numbers and dates ascending, strings sorted, categoricals in
+        category order), as for fixed-effect levels; use numbers, dates or ordered categoricals for
+        calendar order. Prior weights (aweights) are supported, frequency weights are not. The
+        result is lean (no per-observation output, no post-hoc ``vcov``) iff this model is.
+
+        Differences from alpaca and logitfe (sample, exact fixed-effect re-solve, statistics at the
+        corrected point, time order, jackknife fixes): see :mod:`fereg.bias`.
+        """
+        from .bias import bias_corr
+
+        return bias_corr(
+            self,
+            L=L,
+            panel_structure=panel_structure,
+            method=method,
+            jackknife=jackknife,
+            bias=bias,
+            multiple=multiple,
+            split=split,
+            time_id=time_id,
+            seed=seed,
+        )
+
+    def get_apes(
+        self,
+        n_pop: float | None = None,
+        panel_structure: str | None = None,
+        sampling_fe: str = "independence",
+        weak_exo: bool | None = None,
+    ):
+        """Average partial effects with standard errors (alpaca ``getAPEs``); returns a
+        :class:`fereg.bias.APEs`.
+
+        Partial effects: the derivative of the probability for continuous regressors, the change
+        from 0 to 1 for binary ones (all values 0 or 1), averaged over the N* observations before
+        the fixed-effect based drops (dropped observations have zero effect). On a bias-corrected
+        model the APEs are corrected too (analytical: APE bias term at the corrected point;
+        jackknife: the same combination of subpanel APEs) and ``panel_structure`` (and, for the
+        analytical correction, ``weak_exo = L > 0``) come from the correction.
+
+        The variance is the delta-method part (Fernandez-Val and Weidner 2016) plus, when the
+        population size ``n_pop`` is given (truncated to an integer, as alpaca; ``float("inf")``:
+        an infinite population, factor 1), the sampling of the effects times
+        (n_pop - N*)/(n_pop - 1) (``n_pop`` < N*: warning and factor 0, alpaca):
+        ``sampling_fe="independence"`` (default) or ``"unrestricted"`` (no term), and with
+        ``weak_exo=True`` the covariance of weakly exogenous regressors. Without ``n_pop`` both
+        terms vanish, so ``weak_exo=True`` and ``sampling_fe="unrestricted"`` are errors there
+        (alpaca ignores them). ``panel_structure``:
+        ``"classic"`` (default) or ``"network"``, as for :meth:`bias_corr`. With groups dropped for
+        perfect classification, the sampling term sums over all N* observations (alpaca: over the
+        retained ones only; see :mod:`fereg.bias`).
+        """
+        from .bias import get_apes
+
+        return get_apes(self, n_pop=n_pop, panel_structure=panel_structure, sampling_fe=sampling_fe, weak_exo=weak_exo)
+
 
 class Fegaussian(Feols):
     """Gaussian GLM results: OLS estimates with normal-based inference (pyfixest ``Fegaussian``)."""

@@ -26,7 +26,7 @@ from .results import (
     _to_pandas,
 )
 
-__all__ = ["feols", "fepois", "feglm", "ssc", "estimate", "fit_context"]
+__all__ = ["feols", "fepois", "feglm", "ssc", "estimate", "fit_context", "core_options"]
 
 DEFAULT_FIXEF_TOL = 1e-8
 DEFAULT_FIXEF_MAXITER = 16_000
@@ -78,18 +78,13 @@ def ssc(
     return {"k_adj": k_adj, "k_fixef": k_fixef, "G_adj": G_adj, "G_df": G_df, "k_exact": k_exact, "t_df": t_df}
 
 
-def fit_context(ctx: FitContext, *, vcov: VcovSpec | None = None, design: Any = None, lean: bool | None = None) -> Any:
-    """Runs the core on ``ctx`` (optionally with another variance request / design / ``lean``)."""
-    d = ctx.design if design is None else design
-    spec = ctx.vcov if vcov is None else vcov
+def core_options(ctx: FitContext, *, vcov: VcovSpec | None = None, lean: bool | None = None) -> dict:
+    """Keyword options of the core entry points (:func:`fereg._binding.fit_design` and the
+    bias-correction calls) for the model of ``ctx``."""
     lean = ctx.lean if lean is None else lean
-    if d.endog and spec.kind in ("hc2", "hc3"):
-        # pyfixest `_deparse_vcov_input`.
-        raise VcovTypeNotSupportedError("HC2 and HC3 inference types are not supported for IV regressions.")
-    return fit_design(
-        d,
+    return dict(
         model=ctx.model,
-        vcov=spec,
+        vcov=ctx.vcov if vcov is None else vcov,
         ssc=ctx.ssc,
         weights_type=ctx.weights_type,
         fixef_rm=ctx.fixef_rm,
@@ -106,6 +101,16 @@ def fit_context(ctx: FitContext, *, vcov: VcovSpec | None = None, design: Any = 
         keep_state=not lean,
         threads=ctx.threads,
     )
+
+
+def fit_context(ctx: FitContext, *, vcov: VcovSpec | None = None, design: Any = None, lean: bool | None = None) -> Any:
+    """Runs the core on ``ctx`` (optionally with another variance request / design / ``lean``)."""
+    d = ctx.design if design is None else design
+    options = core_options(ctx, vcov=vcov, lean=lean)
+    if d.endog and options["vcov"].kind in ("hc2", "hc3"):
+        # pyfixest `_deparse_vcov_input`.
+        raise VcovTypeNotSupportedError("HC2 and HC3 inference types are not supported for IV regressions.")
+    return fit_design(d, **options)
 
 
 def estimate(ctx: FitContext) -> Feols:
