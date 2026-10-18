@@ -53,7 +53,7 @@ with in addition \code{coefficients.uncorr} (the uncorrected coefficients), \cod
 uncorrected minus the corrected coefficients), \code{panel.structure}, \code{bandwidth} (\code{L}), \code{method},
 \code{jackknife} (the variant, \code{NULL} for the analytical correction), \code{bias}, \code{multiple}, \code{split}
 (with \code{multiple}), \code{nobs.full} (observations before the removal of fixed-effect groups with
-a constant outcome), \code{loglik.uncorr} and \code{deviance.uncorr}.
+a constant outcome) and \code{deviance.uncorr} (the deviance of the uncorrected estimation).
 }
 \description{
 Reduces the incidental parameter bias of a fixed-effects logit estimation with \code{\link[=feglm]{feglm()}}, as
@@ -135,8 +135,7 @@ fixest's variance types and small-sample corrections: alpaca's \code{vcov(type =
 \verb{vcov = "hetero", ssc = ssc(K.adj = FALSE, G.adj = FALSE)} and \code{"clustered"} is
 \verb{vcov = ~cl, ssc = ssc(K.adj = FALSE, G.adj = FALSE)}. CRV3 is an error.
 \item The log-likelihood, deviance and fit statistics are those of the corrected point (alpaca
-keeps the uncorrected deviance); the uncorrected ones are in \code{loglik.uncorr} and
-\code{deviance.uncorr}.
+keeps the uncorrected deviance, which is in \code{deviance.uncorr}).
 \item alpaca has no jackknife. The jackknife follows logitfe's definitions with two fixes: \code{js}
 and \code{sj} combine the half-panels of the other dimension (logitfe uses the same dimension
 twice), and \code{ss2} with a single bias works (logitfe stops). A subpanel estimation that loses

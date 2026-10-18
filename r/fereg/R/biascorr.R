@@ -83,8 +83,7 @@
 #'   `vcov = "hetero", ssc = ssc(K.adj = FALSE, G.adj = FALSE)` and `"clustered"` is
 #'   `vcov = ~cl, ssc = ssc(K.adj = FALSE, G.adj = FALSE)`. CRV3 is an error.
 #' * The log-likelihood, deviance and fit statistics are those of the corrected point (alpaca
-#'   keeps the uncorrected deviance); the uncorrected ones are in `loglik.uncorr` and
-#'   `deviance.uncorr`.
+#'   keeps the uncorrected deviance, which is in `deviance.uncorr`).
 #' * alpaca has no jackknife. The jackknife follows logitfe's definitions with two fixes: `js`
 #'   and `sj` combine the half-panels of the other dimension (logitfe uses the same dimension
 #'   twice), and `ss2` with a single bias works (logitfe stops). A subpanel estimation that loses
@@ -118,7 +117,7 @@
 #'   uncorrected minus the corrected coefficients), `panel.structure`, `bandwidth` (`L`), `method`,
 #'   `jackknife` (the variant, `NULL` for the analytical correction), `bias`, `multiple`, `split`
 #'   (with `multiple`), `nobs.full` (observations before the removal of fixed-effect groups with
-#'   a constant outcome), `loglik.uncorr` and `deviance.uncorr`.
+#'   a constant outcome) and `deviance.uncorr` (the deviance of the uncorrected estimation).
 #' @references
 #' Cruz-Gonzalez, M., I. Fernández-Val and M. Weidner (2017). "Bias corrections for probit and
 #' logit models with two-way fixed effects". The Stata Journal, 17(3), 517-545.
@@ -225,7 +224,6 @@ biasCorr <- function(object = NULL, L = 0L, panel.structure = c("classic", "netw
   res$multiple <- multiple
   res$split <- if (multiple > 0) split
   res$nobs.full <- as.integer(rep$n_full)
-  res$loglik.uncorr <- rep$loglik_uncorr
   res$deviance.uncorr <- rep$deviance_uncorr
   # What getAPEs() needs: the jackknife-corrected average partial effects and the correction's
   # options (with the setup that gives the same core input).
@@ -435,6 +433,7 @@ bc_check_object <- function(object, fun) {
   if (is.null(object$state)) {
     stop("fereg: the estimation state was not kept (lean = TRUE); re-estimate the model with lean = FALSE", call. = FALSE)
   }
+  if (length(object$coefficients) == 0) stop("fereg: ", fun, "() needs at least one regressor", call. = FALSE)
   invisible()
 }
 

@@ -147,6 +147,7 @@ test_that("getAPEs() rejects unsupported objects and arguments before estimating
   expect_error(getAPEs(fepois(y ~ x1 | i, d, notes = FALSE)), "'getAPEs' currently only supports binary choice models.", fixed = TRUE)
   expect_error(getAPEs(fe_logit(c(y, d) ~ x1 | i, d)), "takes a single estimation", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t, d, lean = TRUE)), "estimation state was not kept (lean = TRUE)", fixed = TRUE)
+  expect_error(getAPEs(fe_logit(y ~ 1 | i + t, d)), "getAPEs() needs at least one regressor", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ d | t[x1], d)), "needs fixed effects without varying slopes", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d | i + t + k, d)), "panel.structure == 'classic' expects a one- or two-way fixed effects model.", fixed = TRUE)
   expect_error(getAPEs(fe_logit(y ~ x1 + d, d)), "panel.structure == 'classic' expects a one- or two-way fixed effects model.", fixed = TRUE)
