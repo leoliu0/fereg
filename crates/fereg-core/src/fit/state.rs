@@ -97,6 +97,8 @@ pub(crate) struct State {
     pub intercept: Option<usize>,
     /// Leverage of the fixed-effect columns (kept order), computed by the first HC2/HC3 request.
     pub fe_hat: OnceLock<Vec<f64>>,
+    /// A bias-corrected logit fit: CRV3 (which re-estimates the model) is not available.
+    pub bias_corrected: bool,
 }
 
 impl State {
@@ -123,6 +125,9 @@ impl State {
     }
 
     pub(crate) fn vcov(&self, kind: VcovKind, ssc: &Ssc, data: &VcovData, ctx: &Ctx) -> Result<VcovOutput, RfError> {
+        if kind == VcovKind::Crv3 && self.bias_corrected {
+            return Err(RfError::InvalidInput("CRV3 is not available after bias correction".into()));
+        }
         let nobs = self.obs.len();
         let rows_needed = self.obs.last().map_or(0, |&i| i as usize + 1);
         let (factors, names, cluster) = (data.factors, data.factor_names, data.cluster);

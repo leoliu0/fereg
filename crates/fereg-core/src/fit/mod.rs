@@ -13,6 +13,7 @@
 use crate::api::{Ctx, RfError, Separation};
 use crate::par;
 
+mod bias;
 pub mod dist;
 mod design;
 mod extra;
@@ -22,6 +23,11 @@ mod input;
 mod ols;
 mod state;
 mod vcov;
+
+pub use bias::{
+    ApeAt, ApeOptions, ApeOutput, BiasDims, BiasFit, BiasMethod, BiasOptions, BiasReport, JackknifeOptions, Normalization, Permutation, Sampling, Structure,
+    Variant, WhichBias, apes, bias_corr, bias_dims,
+};
 
 /// A categorical column over the input rows.
 #[derive(Clone, Copy, Debug)]
