@@ -5,14 +5,48 @@
 alpaca_ok <- function() requireNamespace("alpaca", quietly = TRUE) && requireNamespace("data.table", quietly = TRUE)
 
 # fereg at tight tolerances, evaluated in the caller's frame so that biasCorr() / getAPEs() find
-# the data again from the call; alpaca at the control that gives the maximum likelihood estimate
-# (its default control rejects the last IRLS step).
+# the data again from the call.
 fe_logit <- function(fml, data, ...) {
   eval.parent(substitute(feglm(fml, data, family = "logit", glm.tol = 1e-12, fixef.tol = 1e-12, notes = FALSE, ...)))
 }
+
+# alpaca at the maximum likelihood estimate. alpaca keeps an IRLS step only if the computed
+# deviance drops (its default control stops one step early). The last step of a fit lowers the
+# deviance by about one unit in the last place, so whether alpaca keeps it (whole, halved or not
+# at all) depends on the platform's rounding, and its coefficients can stop up to about 2e-8 short
+# (macOS and Windows). The estimate is therefore that of glm() on alpaca's sample (fixed effects as
+# dummies, the redundant ones removed first: glm.fit() ties its rank tolerance to `epsilon`),
+# which keeps every finite step, and the fields alpaca derives from the estimate are computed from
+# it as at the end of alpaca's feglmFit(): linear predictor, centered regressors, Hessian and
+# deviance. alpaca's own estimate must agree to 1e-7.
 al_feglm <- function(fml, data, ...) {
-  alpaca::feglm(fml, data.table::copy(data.table::as.data.table(data)), stats::binomial(), ...,
+  a <- alpaca::feglm(fml, data.table::copy(data.table::as.data.table(data)), stats::binomial(), ...,
     control = alpaca::feglmControl(dev.tol = 1e-20, center.tol = 1e-14, iter.max = 100L))
+  fe <- names(a$lvls.k)
+  X <- stats::model.matrix(a$formula, a$data, rhs = 1L)[, -1L, drop = FALSE]
+  Z <- cbind(X, stats::model.matrix(stats::reformulate(fe), a$data))
+  q <- qr(Z, tol = 1e-9)
+  cols <- sort(q$pivot[seq_len(q$rank)])
+  stopifnot(seq_len(ncol(X)) %in% cols)
+  y <- a$data[[1L]]
+  wt <- a$weights
+  fam <- a$family
+  g <- suppressWarnings(stats::glm.fit(Z[, cols, drop = FALSE], y, weights = wt, family = fam,
+    control = stats::glm.control(epsilon = 1e-14, maxit = 100L)))
+  stopifnot(g$converged)
+  beta <- stats::setNames(g$coefficients[seq_len(ncol(X))], names(a$coefficients))
+  stopifnot(rel_diff(a$coefficients, beta) < 1e-7)
+  eta <- g$linear.predictors
+  mu <- fam$linkinv(eta)
+  w <- wt * fam$mu.eta(eta)^2 / fam$variance(mu)
+  MX <- alpaca:::centerVariables(unname(X), w, alpaca:::getIndexList(fe, a$data), a$control$center.tol)
+  colnames(MX) <- names(beta)
+  a$coefficients <- beta
+  a$eta <- eta
+  a$Hessian <- crossprod(MX * w, MX)
+  if (a$control$keep.mx) a$MX <- MX
+  a$deviance <- sum(fam$dev.resids(y, mu, wt))
+  a
 }
 
 # Relative difference scaled by the largest reference entry (vectors and matrices).

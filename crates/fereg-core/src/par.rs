@@ -5,6 +5,8 @@
 //! - Work is split into fixed-size chunks ([`CHUNK`]) independent of the thread count, and
 //!   per-chunk results are combined in chunk order, so results are bit-identical for any
 //!   number of threads.
+//! - Every thread fereg starts (pool workers, [`spawn_scoped`]) runs with the floating-point
+//!   control state of the thread that starts it ([`FpEnv`]).
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
@@ -54,13 +56,78 @@ pub fn threads_for(requested: usize, work: usize) -> usize {
 }
 
 /// Runs `body` on the calling thread with a scoped pool of `threads` workers (0 = all CPUs).
-/// No worker outlives this call.
+/// No worker outlives this call. Workers take the calling thread's [`FpEnv`].
 pub fn with_pool<R>(threads: usize, body: impl FnOnce(&Pool) -> R) -> Result<R, RfError> {
+    let env = FpEnv::current();
     rayon::ThreadPoolBuilder::new()
         .num_threads(resolve_threads(threads))
         .thread_name(|i| format!("fereg-{i}"))
-        .build_scoped(|thread| thread.run(), |pool| body(&Pool { pool }))
+        .build_scoped(
+            move |thread| {
+                env.apply();
+                thread.run()
+            },
+            |pool| body(&Pool { pool }),
+        )
         .map_err(|e| RfError::Internal(format!("cannot start thread pool: {e}")))
+}
+
+/// Spawns `f` on a new thread of the scope `s`, with the calling thread's [`FpEnv`].
+pub(crate) fn spawn_scoped<'scope, T: Send + 'scope>(
+    s: &'scope std::thread::Scope<'scope, '_>,
+    f: impl FnOnce() -> T + Send + 'scope,
+) -> std::thread::ScopedJoinHandle<'scope, T> {
+    let env = FpEnv::current();
+    s.spawn(move || {
+        env.apply();
+        f()
+    })
+}
+
+/// Floating-point control state of a thread: the x87 control word and MXCSR (x86-64; nothing
+/// elsewhere). POSIX threads inherit it from the thread that creates them; Windows threads start
+/// from the system default instead (x87 precision 53 bits), which is not the state of the R main
+/// thread (mingw-w64 programs start with 64-bit x87 precision). The C runtime's x87 code, such as
+/// mingw-w64's `exp()` behind the logit link, then rounds differently on fereg's threads than on
+/// the calling thread. Serial code runs on either (the calling thread is one of the CRV3 refit and
+/// jackknife subpanel workers, and which subpanel it takes is a race), so without this state the
+/// results of the R package on Windows depend on the thread count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FpEnv {
+    #[cfg(target_arch = "x86_64")]
+    x87: u16,
+    #[cfg(target_arch = "x86_64")]
+    mxcsr: u32,
+}
+
+impl FpEnv {
+    /// The calling thread's state.
+    pub(crate) fn current() -> FpEnv {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut x87 = 0u16;
+            let mut mxcsr = 0u32;
+            // SAFETY: both instructions only store a control register into the local.
+            unsafe {
+                std::arch::asm!("fnstcw word ptr [{}]", in(reg) &mut x87, options(nostack, preserves_flags));
+                std::arch::asm!("stmxcsr dword ptr [{}]", in(reg) &mut mxcsr, options(nostack, preserves_flags));
+            }
+            FpEnv { x87, mxcsr }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        FpEnv {}
+    }
+
+    /// Makes this the calling thread's state.
+    pub(crate) fn apply(self) {
+        // SAFETY: the values were read from a thread of this process, so this thread's code runs
+        // in a floating-point environment that code already runs in there.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            std::arch::asm!("fldcw word ptr [{}]", in(reg) &self.x87, options(nostack, preserves_flags, readonly));
+            std::arch::asm!("ldmxcsr dword ptr [{}]", in(reg) &self.mxcsr, options(nostack, preserves_flags, readonly));
+        }
+    }
 }
 
 /// Number of chunks of size `chunk` covering `0..n`.
@@ -230,5 +297,22 @@ mod tests {
         let a = run(1);
         assert_eq!(a, run(3));
         assert_eq!(a, run(8));
+    }
+
+    /// Pool workers and scoped threads run with the creating thread's x87 precision (64 bits here,
+    /// as on the R main thread on Windows, where new threads would start with 53 bits).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn threads_take_the_creators_floating_point_state() {
+        let saved = FpEnv::current();
+        let caller = FpEnv { x87: saved.x87 | 0x0300, ..saved };
+        caller.apply();
+        let here = FpEnv::current();
+        let workers = with_pool(3, |pool| pool.rayon().broadcast(|_| FpEnv::current())).unwrap();
+        let spawned = std::thread::scope(|s| spawn_scoped(s, FpEnv::current).join().unwrap());
+        saved.apply();
+        assert_eq!(here, caller);
+        assert_eq!(workers, vec![caller; 3]);
+        assert_eq!(spawned, caller);
     }
 }

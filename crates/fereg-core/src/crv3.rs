@@ -571,7 +571,7 @@ fn refits(p: &JkProblem, cluster: &[u32], g_count: usize, ctx: &Ctx, pool: &Pool
     };
     let results: Vec<Result<Done, RfError>> = std::thread::scope(|s| {
         let work = &work;
-        let handles: Vec<_> = (1..workers).map(|tid| s.spawn(move || work(tid, &|| false))).collect();
+        let handles: Vec<_> = (1..workers).map(|tid| par::spawn_scoped(s, move || work(tid, &|| false))).collect();
         let mine = work(0, &main_poll);
         if mine.is_err() {
             stop.store(true, Ordering::Relaxed);

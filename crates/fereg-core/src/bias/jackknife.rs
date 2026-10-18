@@ -408,7 +408,7 @@ where
     };
     let results: Vec<Done> = std::thread::scope(|s| {
         let work = &work;
-        let handles: Vec<_> = (1..workers).map(|tid| s.spawn(move || work(tid, &|| false))).collect();
+        let handles: Vec<_> = (1..workers).map(|tid| par::spawn_scoped(s, move || work(tid, &|| false))).collect();
         let mine = work(0, &main_poll);
         while !handles.iter().all(|h| h.is_finished()) {
             main_poll();
