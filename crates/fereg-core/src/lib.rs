@@ -6,8 +6,12 @@
 //! conventions; `fit` is the host-neutral layer of the Python and R packages (fixest / pyfixest
 //! conventions).
 
+#[cfg(test)]
+extern crate self as fereg_core;
+
 pub mod absorber;
 pub mod api;
+pub mod bias;
 pub mod cg;
 pub mod conley;
 pub mod crv3;

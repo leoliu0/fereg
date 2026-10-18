@@ -625,6 +625,7 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
             iv,
             intercept: intercept_idx,
             fe_hat: fe_hat.map(std::sync::OnceLock::from).unwrap_or_default(),
+            bias_corrected: false,
         },
     });
     Ok(FitOutput {
