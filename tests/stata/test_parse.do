@@ -296,4 +296,175 @@ foreach t in "111|bw(2)" "5|kiefer" "5|dkraay(2)" "9|" {
 }
 di as text "ok  _rf_parse_hac"
 
+* ---------------------------------------------------------------------------
+* 5) _rf_parse_bc: felogit's bias-correction and APE options (logitfe 3.0.3 names). Every
+*    rejected combination and the s() of the accepted ones; _rf_bc_perm keeps the RNG state.
+* ---------------------------------------------------------------------------
+capture program drop bc_parse
+program bc_parse
+	* bc_parse "<options>" "<absorb, _cons = none>" ["<family logit>" "<separation fe>" "<nx 1>" "<weight>"]
+	args opts absorb family sep nx weight
+	if (`"`family'"' == "") local family logit
+	if (`"`sep'"' == "") local sep fe
+	if (`"`nx'"' == "") local nx 1
+	if (`"`absorb'"' == "_cons") _rf_parse_absorb
+	else _rf_parse_absorb `absorb'
+	local G `s(G)'
+	local ivars `"`s(ivars)'"'
+	local ints `s(intercepts)'
+	local ns `s(num_slopes)'
+	local noabs = (`"`s(absvars)'"' == "_cons")
+	_rf_parse_bc, family(`family') `opts' weight(`weight') separation(`sep') g(`G') ivars(`ivars') ///
+		intercepts(`ints') numslopes(`ns') isnoabsorb(`noabs') nx(`nx')
+end
+capture program drop bc_rc
+program bc_rc
+	* bc_rc <rc> "<options>" ["<absorb>"] [family sep nx weight]
+	args rc opts absorb family sep nx weight
+	if (`"`absorb'"' == "") local absorb idcode year
+	capture noisily bc_parse `"`opts'"' `"`absorb'"' `"`family'"' `"`sep'"' `"`nx'"' `"`weight'"'
+	if (_rc != `rc') {
+		di as err `"FAIL _rf_parse_bc `opts' [absorb(`absorb') `family' `sep' `nx' `weight']: rc `=_rc', expected `rc'"'
+		exit 9
+	}
+	di as text `"ok  _rf_parse_bc `opts' [absorb(`absorb')] fails with rc `rc'"'
+end
+
+xtset idcode year
+* option combinations
+foreach o in "analytical jackknife" "analytical ibias(maybe)" "analytical tbias(1)" "ss1" "individuals" ///
+	"analytical ss2" "analytical time" "ape js" "ape individuals" "multiple(2)" "analytical multiple(2)" ///
+	"ape multiple(2)" "lags(1)" "jackknife lags(1)" "ape lags(1)" "ibias(no)" "ape ibias(no)" "ape tbias(yes)" ///
+	"network" "population(100)" "jackknife ss1 ss2" "jackknife js jj" "jackknife sj double" ///
+	"jackknife multiple(-1)" "jackknife js multiple(2)" "jackknife sj multiple(2)" "jackknife jj multiple(2)" ///
+	"jackknife double multiple(2)" "jackknife jj individuals" "jackknife double time" ///
+	"jackknife ss1 individuals" "jackknife ss2 time" "analytical lags(-1)" ///
+	"analytical ibias(no) tbias(no)" "jackknife ibias(no) tbias(no)" "analytical lags(1) ibias(no)" ///
+	"analytical population(-5)" "analytical population(1.5)" "analytical population(abc)" ///
+	"ape analytical" "analytical ape" "jackknife ape" "ape jackknife ss1" {
+	bc_rc 198 "`o'"
+}
+* model restrictions: weights, separation, regressors, absorbed terms
+bc_rc 101 "analytical" "" "" "" "" fweight
+bc_rc 101 "ape" "" "" "" "" pweight
+bc_rc 198 "analytical" "" "" "fe mu"
+bc_rc 198 "jackknife" "" "" "none"
+bc_rc 102 "ape" "" "" "" 0
+bc_rc 198 "analytical" "" poisson
+bc_rc 198 "ape" "" poisson
+foreach a in "_cons" "idcode##c.age" "idcode year##c.age" "idcode ind_code" "idcode#year" "year#idcode" ///
+	"idcode year ind_code" "idcode i.idcode" "L.idcode year" "ind_code" {
+	bc_rc 198 "analytical" "`a'"
+}
+* one fixed effect: only its own bias exists
+bc_rc 198 "analytical tbias(yes)" "idcode"
+bc_rc 198 "analytical ibias(no)" "idcode"
+bc_rc 198 "jackknife tbias(yes)" "idcode"
+bc_rc 198 "analytical ibias(yes)" "year"
+bc_rc 198 "analytical tbias(no)" "year"
+bc_rc 198 "analytical lags(1)" "year"
+bc_rc 198 "jackknife ibias(no)" "i.idcode"
+* network
+bc_rc 198 "analytical network" "idcode"
+bc_rc 198 "analytical network" "idcode year ind_code occ_code"
+bc_rc 198 "jackknife network" "idcode year ind_code"
+bc_rc 198 "analytical network ibias(no)" "idcode year ind_code"
+bc_rc 198 "ape network tbias(yes)" "idcode year"
+bc_rc 198 "analytical network" "idcode year##c.age"
+* xtset requirements (logitfe's messages, r(5))
+xtset, clear
+bc_rc 5 "analytical"
+bc_rc 5 "ape" "idcode"
+bc_rc 5 "analytical network lags(1)" "idcode year ind_code"
+preserve
+quietly keep if idcode == 1
+tsset year
+bc_rc 5 "analytical" "year"
+restore
+xtset idcode year
+
+* accepted combinations
+bc_parse "" "idcode year"
+assert "`s(bc)'" == ""
+bc_parse "analytical" "idcode year"
+assert "`s(bc)'" == "analytical" & "`s(structure)'" == "classic" & "`s(effects)'" == "it" & "`s(which)'" == "both"
+assert "`s(ibias)'" == "yes" & "`s(tbias)'" == "yes" & "`s(lags)'" == "0" & "`s(ivar)'" == "idcode" & "`s(tvar)'" == "year"
+assert "`s(title)'" == "Analytical bias-correction" & "`s(title3)'" == "Triming parameter = 0"
+assert "`s(title1)'" == "Type of included effects: individual and time effects"
+assert "`s(title2)'" == "Type of bias correction: individual and time effects"
+bc_parse "an lags(2) tbias(no)" "year i.idcode"
+assert "`s(effects)'" == "ti" & "`s(which)'" == "individual" & "`s(tbias)'" == "no" & "`s(lags)'" == "2"
+assert "`s(title2)'" == "Type of bias correction: individual effects only" & "`s(title3)'" == "Triming parameter = 2"
+bc_parse "analytical ibias(no)" "idcode year"
+assert "`s(which)'" == "time" & "`s(title2)'" == "Type of bias correction: time effects only"
+bc_parse "jackknife" "idcode year"
+assert "`s(bc)'" == "jackknife" & "`s(variant)'" == "ss2" & "`s(multiple)'" == "0"
+assert "`s(title)'" == "Split-panel jackknife in both dimensions" & "`s(title3)'" == ""
+foreach v in ss1 js sj jj double {
+	bc_parse "jack `v'" "idcode year"
+	assert "`s(variant)'" == "`v'"
+}
+bc_parse "jack sj" "idcode year"
+assert "`s(title)'" == "Split-panel jackknife in cross-section, delete-one jackknife in time series"
+bc_parse "jack double tbias(no)" "idcode"
+assert "`s(which)'" == "individual" & "`s(effects)'" == "i" & "`s(title1)'" == "Type of included effects: individual effects only"
+bc_parse "ape" "year"
+assert "`s(bc)'" == "ape" & "`s(which)'" == "time" & "`s(ibias)'" == "" & "`s(title)'" == "Uncorrected fixed-effects estimates"
+assert "`s(title1)'" == "Type of included effects: time effects only" & "`s(title2)'" == "Type of bias correction: none"
+bc_parse "analytical population(20000)" "idcode year"
+assert "`s(population)'" == "20000"
+* population(0) passes the parser and fails against N* after prepare (test_logitfe)
+bc_parse "ape population(0)" "idcode year"
+assert "`s(population)'" == "0"
+bc_parse "analytical" "idcode year"
+assert "`s(population)'" == ""
+bc_parse "analytical network lags(1)" "idcode#year ind_code#year idcode#ind_code"
+assert "`s(structure)'" == "network" & "`s(which)'" == "both" & "`s(ivar)'" == "" & "`s(tvar)'" == "year"
+assert "`s(title1)'" == "Type of included effects: exporter-time, importer-time and pair effects"
+bc_parse "ape network" "idcode#year ind_code#year"
+assert "`s(title1)'" == "Type of included effects: exporter-time and importer-time effects"
+capture mata: mata which mm_sample()
+if (_rc) {
+	bc_rc 499 "jackknife multiple(2)"
+	di as text "(moremata not found: multiple() acceptance and _rf_bc_perm not tested)"
+}
+else {
+	bc_parse "jackknife ss1 multiple(3) time" "idcode year"
+	assert "`s(multiple)'" == "3" & "`s(perm)'" == "t" & "`s(split)'" == "time"
+	assert "`s(title3)'" == "3 multiple partitions in the time dimension"
+	bc_parse "jackknife multiple(4)" "idcode year"
+	assert "`s(perm)'" == "it" & "`s(split)'" == "both"
+	assert "`s(title3)'" == "4 multiple partitions in both the cross-section and the time dimension"
+	bc_parse "jackknife ss1 multiple(2) individuals time ibias(no)" "idcode year"
+	assert "`s(perm)'" == "it" & "`s(which)'" == "time"
+	bc_parse "jackknife ss2 multiple(2) individuals ibias(no)" "idcode year"
+	assert "`s(perm)'" == "i" & "`s(title3)'" == "2 multiple partitions in the cross-section dimension"
+	* partitions that permute only a dimension the subpanels do not split: an error (logitfe: a note)
+	bc_rc 198 "jackknife ss2 multiple(3) individuals tbias(no)"
+	bc_rc 198 "jackknife ss1 multiple(3) time ibias(no)"
+	bc_rc 198 "jackknife ss1 multiple(3) time" "year"
+	bc_rc 198 "jackknife ss2 multiple(3) individuals" "idcode"
+	* _rf_bc_perm: one permutation of the distinct values per partition and dimension, the
+	* session's RNG state unchanged
+	set seed 271828
+	local before = c(rngstate)
+	_rf_bc_perm, ivar(idcode) tvar(year) multiple(2) perm(it) names(__p1 __t1 __p2 __t2)
+	assert c(rngstate) == "`before'"
+	foreach v in __p1 __p2 {
+		quietly tab idcode
+		local n = r(r)
+		quietly bysort idcode (`v'): assert `v' == `v'[1]
+		quietly bysort `v' (idcode): assert idcode == idcode[1]
+		quietly summarize `v'
+		assert r(min) == 1 & r(max) == `n'
+	}
+	quietly tab year
+	assert r(r) == 15
+	quietly summarize __t1
+	assert r(min) == 1 & r(max) == 15
+	assert __p1 != __p2 in 1
+	drop __p1 __t1 __p2 __t2
+}
+di as text "ok  _rf_parse_bc"
+
 di as result "TEST_PARSE PASSED"

@@ -29,6 +29,8 @@ program _rf_glm, eclass
 		TEChnique(string) TRAnsform(string) ACCELeration(string) POOLsize(string)
 		ABSORBER(string)
 		TAGSEP(name) ZVARname(name)
+		ANalytical JACKknife APE SS1 SS2 JS SJ JJ DOUBLE MULtiple(integer 0) Individuals Time
+		LAGS(integer 0) IBIAS(string) TBIAS(string) POPulation(string) NETwork
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -245,6 +247,18 @@ program _rf_glm, eclass
 	local num_slots `s(num_slots)'
 	local is_noabsorb = (`"`absvars'"' == "_cons")
 
+	* Bias correction and average partial effects (felogit; logitfe's options): _rf_parse_bc
+	_rf_parse_bc, family(`family') `analytical' `jackknife' `ape' `ss1' `ss2' `js' `sj' `jj' `double' ///
+		multiple(`multiple') `individuals' `time' lags(`lags') ibias(`ibias') tbias(`tbias') ///
+		population(`population') `network' weight(`weight') separation(`separation') g(`G') ///
+		ivars(`all_ivars') intercepts(`intercepts') numslopes(`num_slopes') isnoabsorb(`is_noabsorb') ///
+		nx(`: word count `indepvars'')
+	local bc `s(bc)'
+	foreach k in structure effects which ibias tbias lags variant multiple perm split ivar tvar tdelta population ///
+		title title1 title2 title3 {
+		local bc_`k' `"`s(`k')'"'
+	}
+
 	if ("`family'" == "poisson" & !`drop_singletons' & `verbose' > -1) {
 		di as err "warning: keeping singleton groups will keep fixed effects that cause separation"
 	}
@@ -286,6 +300,48 @@ program _rf_glm, eclass
 	local modelvars `rf_modelvars'
 	if ("`rf_markvars'" != "") markout `touse' `rf_markvars'
 	local nmodel : word count `modelvars'
+
+	* Bias correction: variables the plugin reads at the prepared observations (protocol, cmd=glm
+	* bc keys). Classic: the xtset panel and time variables, marked out here as logitfe does.
+	* Network: one group code per absorbed term (and the time variable for lags()). multiple():
+	* logitfe's permuted ids of each partition (_rf_bc_perm).
+	local bcvars
+	if ("`bc'" != "") {
+		if ("`bc_structure'" == "classic") {
+			markout `touse' `bc_ivar' `bc_tvar'
+			local bcvars `bc_ivar' `bc_tvar'
+		}
+		else {
+			if (`bc_lags' > 0) markout `touse' `bc_tvar'
+			forval g = 1/`G' {
+				local iv : word `g' of `all_ivars'
+				local fv
+				foreach v of local iv {
+					if (strpos("`v'", ".")) {
+						tsrevar `v'
+						local v `r(varlist)'
+					}
+					local fv `fv' `v'
+				}
+				tempvar bcfe`g'
+				qui egen long `bcfe`g'' = group(`fv') if `touse'
+				local bcvars `bcvars' `bcfe`g''
+			}
+			if (`bc_lags' > 0) local bcvars `bcvars' `bc_tvar'
+		}
+		if (`bc_multiple' > 0) {
+			local permvars
+			forval r = 1/`bc_multiple' {
+				forval j = 1/`=strlen("`bc_perm'")' {
+					tempvar bcp`r'_`j'
+					local permvars `permvars' `bcp`r'_`j''
+				}
+			}
+			_rf_bc_perm, ivar(`bc_ivar') tvar(`bc_tvar') multiple(`bc_multiple') perm(`bc_perm') names(`permvars')
+			local bcvars `bcvars' `permvars'
+		}
+	}
+	local nbc : word count `bcvars'
 
 	local factors `absfactors'
 	foreach v in `base_clustervars' `tvar' `ivar' {
@@ -357,7 +413,7 @@ program _rf_glm, eclass
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
 	* No if, in, weight, exposure, offset or markout: touse is 1 everywhere and the plugin does
 	* not read it
-	if (`"`if'`in'`weight'`exposure'`offset'`rf_markvars'"' == "") local args `"`args' "sample=all""'
+	if (`"`if'`in'`weight'`exposure'`offset'`rf_markvars'`bc'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
 	_rf_load `facvars' `slopevars_r' `conley_lat' `conley_lon' `wvar' `modelvars' `touse', prepare `args' `common' `abskind'
 	local token `_rf_token'
@@ -380,6 +436,36 @@ program _rf_glm, eclass
 		}
 	}
 	if (`hac' & !`is_tagsep') _rf_hac_gaps `touse' `tvar'
+	* Bias correction: N* = observations before the singleton and fe-separation drops (logitfe
+	* n_orig), the finite-population factor, the panel statistics and the lags() check (logitfe)
+	if ("`bc'" != "") {
+		tempname bc_adj
+		local N_star = scalar(__rf_N_full)
+		scalar `bc_adj' = 1
+		if ("`bc_population'" != "") {
+			if (`bc_population' < `N_star') {
+				di as err "Invalid population option: population must be a finite positive integer"
+				di as err "        higher or equal than the number of original observations (`N_star')."
+				exit 198
+			}
+			scalar `bc_adj' = (`bc_population' - `N_star') / (`bc_population' - 1)
+		}
+		if ("`bc_structure'" == "classic") {
+			mata: _rf_bc_tstats("`bc_ivar'", "`touse'")
+			if (`bc_lags' > 0 & `bc_T_min' - 1 < `bc_lags') {
+				di
+				di as text "Maximum possible lags for at least one group within" as res " `bc_ivar' " as text "are (" `bc_T_min' - 1 ")."
+				di as err "Number of lags (`bc_lags') exceeds maximum possible lags."
+				exit 198
+			}
+			if (`verbose' > -1) {
+				version 11.2: quietly tsreport if `touse', panel
+				if (r(N_gaps) != 0) {
+					di as text "Warning: time variable " as res "`bc_tvar'" as text " has " as res "`r(N_gaps)'" as text " gap(s) in relevant range"
+				}
+			}
+		}
+	}
 	if ("`family'" == "poisson") {
 		qui count if `touse' & `yvar' < 0
 		if (r(N)) {
@@ -418,6 +504,10 @@ program _rf_glm, eclass
 	}
 	local nx : word count `xvars'
 	local K_all = `nx' + 1
+	if ("`bc'" != "" & `nx' == 0) {
+		di as err "too few variables specified"
+		exit 102
+	}
 
 // --------------------------------------------------------------------------
 // tagsep(): the ReLU separation check alone; tag the separated observations and exit (ppmlhdfe)
@@ -521,8 +611,26 @@ program _rf_glm, eclass
 	local args `"`args' "separation=`glmsep'" "guess=`guess'" "log=`=("`log'" != "nolog")'" "offset=`=("`offvar'" != "")'""'
 	_rf_model cached `yvar' `xvars' : `modelvars'
 	local args `"`args' "d=`pos_d'" "fe=`pos_fe'" "b=`b'" "V=`V'" "doft=`doft'" "cached=`rf_cached'""'
+	if ("`bc'" != "") {
+		* bias correction / APEs (protocol: cmd=glm, bias-correction keys)
+		tempname b0 b2 V2
+		matrix `b0' = J(1, `K_all', 0)
+		matrix `b2' = J(1, `nx', 0)
+		matrix `V2' = J(`nx', `nx', 0)
+		local args `"`args' "bc=`bc'" "structure=`bc_structure'" "which=`bc_which'" "lags=`bc_lags'""'
+		local args `"`args' "adj=`=strtrim(string(`bc_adj', "%21.17g"))'" "nbc=`nbc'" "b0=`b0'" "b2=`b2'" "V2=`V2'""'
+		if ("`bc_structure'" == "classic") {
+			local args `"`args' "effects=`bc_effects'" "tdelta=`=strtrim(string(`bc_tdelta', "%21.17g"))'""'
+		}
+		if ("`bc'" == "jackknife") {
+			* names of the sent regressors, for subpanel error messages
+			local xnames : subinstr local sent_full " " ",", all
+			local args `"`args' "jk=`bc_variant'" "xnames=`xnames'""'
+		}
+		if (`bc_multiple' > 0) local args `"`args' "multiple=`bc_multiple'" "perm=`bc_perm'""'
+	}
 	local _rf_status
-	capture noisily _rf_load `yvar' `xvars' `offvar' `touse' `outvars', glm `args' `common'
+	capture noisily _rf_load `yvar' `xvars' `offvar' `bcvars' `touse' `outvars', glm `args' `common'
 	if (_rc) {
 		local rc = _rc
 		if ("`outvars'" != "") capture drop `outvars'
@@ -684,6 +792,41 @@ program _rf_glm, eclass
 	mata: st_matrixrowstripe("e(dof_table)", (J(`num_slots', 1, ""), tokens(st_local("dof_rownames"))'))
 	mata: st_matrixcolstripe("e(dof_table)", (J(5, 1, ""), ("Categories" \ "Redundant" \ "Num Coefs" \ "Exact?" \ "Nested?")))
 
+	* Bias correction and APEs: e(b) holds the corrected coefficients (uncorrected with ape),
+	* e(V) the uncorrected variance (logitfe); e(b0) the uncorrected coefficients; e(b2)/e(V2) the APEs
+	if ("`bc'" != "") {
+		mata: _rf_bc_expand("`b0'", "`b2'", "`V2'", "`mask'")
+		ereturn matrix b0 = `b0'
+		ereturn matrix b2 = `b2'
+		ereturn matrix V2 = `V2'
+		ereturn scalar fpc = scalar(`bc_adj')
+		if ("`bc_structure'" == "classic") {
+			ereturn scalar N_group = `bc_N_group'
+			ereturn scalar T_min = `bc_T_min'
+			ereturn scalar T_avg = `bc_T_avg'
+			ereturn scalar T_max = `bc_T_max'
+		}
+		if (`bc_multiple' > 0) ereturn scalar multiple = `bc_multiple'
+		capture confirm scalar __rf_bc_nfits
+		if (!_rc) {
+			if (scalar(__rf_bc_nfits) > 0) ereturn scalar N_subpanels = scalar(__rf_bc_nfits)
+		}
+		ereturn local bias = cond("`bc'" == "ape", "none", "`bc'")
+		if ("`bc'" == "jackknife") ereturn local jackknife `bc_variant'
+		if ("`bc'" == "analytical") ereturn local lags `bc_lags'
+		if ("`bc_ibias'" != "") {
+			ereturn local ibias `bc_ibias'
+			ereturn local tbias `bc_tbias'
+		}
+		ereturn local structure `bc_structure'
+		if ("`bc_split'" != "") ereturn local split `bc_split'
+		ereturn local id `bc_ivar'
+		ereturn local time `bc_tvar'
+		foreach t in title title1 title2 title3 {
+			ereturn local bc`t' `"`bc_`t''"'
+		}
+	}
+
 	if ("`d'" != "") label variable `d' "Sum of fixed effects"
 	local i 0
 	foreach t of local fevars {
@@ -751,5 +894,49 @@ void _rf_prettify_z(string scalar zvar, string scalar touse)
 	}
 	f = 1e6 / zz[best]
 	if (0.01 <= f & f <= 100) z[., .] = z :* f
+}
+
+// Panel statistics of the estimation sample (logitfe: e(N_group), e(T_min), e(T_avg) = N/N_group,
+// e(T_max)) into the caller's locals bc_N_group, bc_T_min, bc_T_avg, bc_T_max
+void _rf_bc_tstats(string scalar ivar, string scalar touse)
+{
+	real colvector id, c
+	real matrix info
+
+	id = sort(st_data(., ivar, touse), 1)
+	info = panelsetup(id, 1)
+	c = info[., 2] - info[., 1] :+ 1
+	st_local("bc_N_group", strofreal(rows(c), "%21.0g"))
+	st_local("bc_T_min", strofreal(min(c), "%21.0g"))
+	st_local("bc_T_max", strofreal(max(c), "%21.0g"))
+	st_local("bc_T_avg", strofreal(rows(id) / rows(c), "%21.17g"))
+}
+
+// e(b0), e(b2), e(V2): the plugin's matrices over the sent regressors, expanded to every term of
+// fullvarlist (mask: 1 = sent) with zeros for base and omitted terms, and e(b)'s column names
+void _rf_bc_expand(string scalar b0, string scalar b2, string scalar V2, string scalar mask)
+{
+	real rowvector m, i
+	real matrix B0, B2, W2
+	string matrix stripe
+	real scalar k
+
+	m = strtoreal(tokens(mask))
+	k = cols(m)
+	i = selectindex(m)
+	stripe = st_matrixcolstripe("e(b)")
+	B0 = J(1, k + 1, 0)
+	B0[(i, k + 1)] = st_matrix(b0)
+	B2 = J(1, k, 0)
+	B2[i] = st_matrix(b2)
+	W2 = J(k, k, 0)
+	W2[i, i] = st_matrix(V2)
+	st_matrix(b0, B0)
+	st_matrixcolstripe(b0, stripe)
+	st_matrix(b2, B2)
+	st_matrixcolstripe(b2, stripe[1::k, .])
+	st_matrix(V2, W2)
+	st_matrixcolstripe(V2, stripe[1::k, .])
+	st_matrixrowstripe(V2, stripe[1::k, .])
 }
 end

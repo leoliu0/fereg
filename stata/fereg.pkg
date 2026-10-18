@@ -4,7 +4,8 @@ d
 d fereg (OLS and IV/2SLS), feppml (Poisson pseudo-maximum likelihood) and felogit (logit)
 d estimate models with any number of absorbed high-dimensional fixed effects, heterogeneous
 d slopes, weights and multiway clustering. Syntax, estimates and stored results follow reghdfe,
-d ivreghdfe and ppmlhdfe. The estimation core is a compiled Rust plugin (Linux, macOS, Windows).
+d ivreghdfe and ppmlhdfe; felogit's incidental-parameter bias corrections and average partial
+d effects follow logitfe. The estimation core is a compiled Rust plugin (Linux, macOS, Windows).
 d
 d Author: Leo Liu, auleo.liu@gmail.com
 d License: MIT
@@ -23,6 +24,8 @@ f _rf_footnote.ado
 f _rf_glm.ado
 f _rf_glm_header.ado
 f _rf_glm_replay.ado
+f _rf_parse_bc.ado
+f _rf_bc_perm.ado
 f _rf_header.ado
 f _rf_load.ado
 f _rf_model.ado
