@@ -20,7 +20,8 @@
 *   - multiple(): _rf_bc_perm's draws equal logitfe's own multiplepvar()/multipletvar() exactly, and
 *     the estimates equal logitfe's;
 *   - the fixed effects saved by d() at the corrected point satisfy the likelihood equations of
-*     every absorbed group (FE re-solve); felogit leaves the RNG state unchanged.
+*     every absorbed group (FE re-solve); felogit leaves the RNG state unchanged; results are
+*     bit-identical for 1 and 4 threads.
 *
 * Run from tests/stata (needs fereg.plugin, logitfe 3.0.3 and moremata on the adopath; run_all.do
 * checks the versions):
@@ -116,7 +117,7 @@ end
 * fecheck: the fixed effects saved in e(d) solve the likelihood equations at the posted (corrected)
 * coefficients: sum(y - Pr) = 0 within every group of each listed variable
 capture program drop fecheck
-program fecheck
+program fecheck, sortpreserve
 	args groups
 	tempvar p r s
 	quietly predict double `p' if e(sample), pr
@@ -720,6 +721,7 @@ forval r = 1/2 {
 	assert fp`r' == lp`r' & ft`r' == lt`r'
 }
 drop obs lp* lt* fp* ft*
+sort id year
 di as result "D1 static passed"
 
 // ===========================================================================
@@ -804,5 +806,15 @@ fcmp t_dbl 1e-4 1e-4 0 : felogit `S', absorb(id jd) jackknife double tol(1e-12)
 fcmp t_dbl_ib 1e-4 1e-4 0 : felogit `S', absorb(id jd) jackknife double tbias(no) tol(1e-12)
 fcmp t_dbl_tb 1e-4 1e-4 0 : felogit `S', absorb(id jd) jackknife double ibias(no) tol(1e-12)
 di as result "D3 passed"
+* results are bit-identical for any number of threads
+foreach o in "analytical" "jackknife double" "jackknife jj" {
+	quietly felogit `S', absorb(id jd) `o' threads(1) tol(1e-12)
+	matrix T1 = e(b), e(b2)
+	matrix T1V = e(V2)
+	quietly felogit `S', absorb(id jd) `o' threads(4) tol(1e-12)
+	matrix T4 = e(b), e(b2)
+	assert mreldif(T1, T4) == 0 & mreldif(T1V, e(V2)) == 0
+}
+di as result "threads passed"
 
 di as result "test_logitfe passed"

@@ -22,6 +22,9 @@ pub struct Stored {
     /// (`cached=`) instead of reading them again.
     pub model: Vec<f64>,
     pub nmodel: usize,
+    /// Prepare's sample rules (`singletons=`, `sep=fe`), reused by felogit's jackknife refits.
+    pub drop_singletons: bool,
+    pub sep_fe: bool,
 }
 
 static SESSION: Mutex<Option<Stored>> = Mutex::new(None);

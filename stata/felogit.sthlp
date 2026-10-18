@@ -438,7 +438,7 @@ With {opt analytical}, {opt jackknife} or {opt ape} also:
 {synopt:{cmd:e(N_group)}}number of individuals (classic structure){p_end}
 {synopt:{cmd:e(T_min)}, {cmd:e(T_avg)}, {cmd:e(T_max)}}observations per individual (classic structure){p_end}
 {synopt:{cmd:e(multiple)}}number of random partitions of {opt multiple()}{p_end}
-{synopt:{cmd:e(N_subpanels)}}number of jackknife subpanel fits{p_end}
+{synopt:{cmd:e(N_subpanels)}}number of jackknife subpanels{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}

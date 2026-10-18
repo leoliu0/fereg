@@ -254,10 +254,12 @@ the status codes are those of the uncorrected fit; `b0` the uncorrected coeffici
 uncorrected fit (delta method, plus adj × the sampling-of-effects term over the N* observations,
 plus the weak-exogeneity term when `lags` > 0). Omitted regressors get zeros in `b0`, `b2`, `V2`.
 The outputs `d=` and `fe=` hold the fixed effects re-estimated by maximum likelihood at the
-corrected coefficients. Scalar `__rf_bc_nfits`: number of jackknife subpanel fits (0 otherwise).
+corrected coefficients. Scalar `__rf_bc_nfits`: number of jackknife subpanels (0 otherwise).
 Jackknife subpanels are refitted on the N* observations of the subpanel with prepare's rules
-(singletons per `singletons=`, the fe rule iterated) and this call's `tol`, `maxiter`, `itol`; a
-subpanel APE is divided by the subpanel's own N*.
+(singletons per `singletons=`, the fe rule per `sep=`, both iterated) and this call's `tol`,
+`maxiter`, `itol`, `guess`, `separation`; a subpanel APE is divided by the subpanel's own N*. A
+subpanel that keeps every observation of the full fit's final sample has that sample (the drops
+are iterated) and takes the full-sample estimates without a refit.
 
 Errors (r(198) unless stated): a `bc` key without `bc=`, Poisson, slopes or a term count other than
 1-2 (classic, matching `effects`) or 2-3 (network), `jk=` with network, `lags` beyond the

@@ -12,6 +12,7 @@ use std::time::Instant;
 use fereg_core::{Ctx, RfError};
 
 mod args;
+mod bc;
 mod cmd_glm;
 mod cmd_iv;
 mod cmd_misc;

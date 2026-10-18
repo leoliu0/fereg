@@ -181,7 +181,7 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
             ));
         }
         let n_kept = session.n();
-        store::put(Stored { token, obs, nobs: spi::nobs(), n_kept, session, model, nmodel });
+        store::put(Stored { token, obs, nobs: spi::nobs(), n_kept, session, model, nmodel, drop_singletons, sep_fe });
         ph.mark("prepare: store");
         Ok(())
     })
