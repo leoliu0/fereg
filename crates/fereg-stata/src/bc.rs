@@ -43,6 +43,8 @@ pub struct BcKeys {
     pub b0: String,
     pub b2: String,
     pub v2: String,
+    /// `xnames=` (jackknife): the sent regressors' names.
+    pub xnames: Vec<String>,
 }
 
 fn bad<T>(m: impl Into<String>) -> Result<T, RfError> {
@@ -129,7 +131,12 @@ pub fn keys(a: &Args, family: Family) -> Result<Option<BcKeys>, RfError> {
     if !network && nbc != 2 + multiple * per {
         return bad(format!("nbc={nbc} does not match the classic structure (2 + multiple x perm = {})", 2 + multiple * per));
     }
-    Ok(Some(BcKeys { method, network, effects, which, lags, multiple, perm_i, perm_t, adj, tdelta, nbc, b0, b2, v2 }))
+    // Regressor names (comma list, one per sent regressor): only for jackknife error messages.
+    let xnames: Vec<String> = match method {
+        Method::Jackknife(_) => a.str_req("xnames")?.split(',').map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    Ok(Some(BcKeys { method, network, effects, which, lags, multiple, perm_i, perm_t, adj, tdelta, nbc, b0, b2, v2, xnames }))
 }
 
 /// Dense codes of `v` (ascending values) and the number of distinct values.
@@ -193,6 +200,8 @@ struct SubData<'a> {
     spec: Spec,
     glm: GlmOptions,
     binary: Vec<bool>,
+    /// Stata names of the regressors (coefficient order), for error messages.
+    names: Vec<String>,
     /// Pre-drop rows kept by the full fit (a subpanel keeping all of them has the full sample).
     full_kept: Vec<usize>,
     full: SubFit,
@@ -239,8 +248,9 @@ impl SubData<'_> {
         let (_, p) = s.glm_parts(block, &Layout::ols(kx), off, &self.spec, &self.glm, GlmConvention::Ppmlhdfe, ctx)?;
         if let Some(j) = p.status.iter().position(|&st| st != 0) {
             return Err(RfError::InvalidInput(format!(
-                "regressor {} of {kx} is not estimable (collinear or a perfect predictor in this subpanel)",
-                j + 1
+                "the coefficient of regressor {} ({}) is not estimable (collinear or a perfect predictor in this subpanel)",
+                j + 1,
+                self.names[j]
             )));
         }
         if !p.converged {
@@ -272,6 +282,9 @@ pub fn run(bk: &BcKeys, stored: &mut Stored, res: &mut EstResult, parts: &GlmPar
     let s = &mut stored.session;
     let n_full = stored.obs.len();
     let nterms = s.terms().len();
+    if matches!(bk.method, Method::Jackknife(_)) && bk.xnames.len() != nx {
+        return bad(format!("xnames= lists {} names for {nx} regressors", bk.xnames.len()));
+    }
     if s.terms().iter().any(|t| !t.intercept || !t.slopes.is_empty()) {
         return bad("bias correction and APEs need intercept-only fixed effects (no varying slopes)");
     }
@@ -361,11 +374,15 @@ pub fn run(bk: &BcKeys, stored: &mut Stored, res: &mut EstResult, parts: &GlmPar
         individual_effects: bk.effects.contains(&b'i'),
         time_effects: bk.effects.contains(&b't'),
     });
+    // The lag-group term (core API rev2): classic, the xtset panel variable's term in absorb order
+    // (none in a time-effects-only model, which has no lags); network, the pair term (third).
+    let lag_term = if bk.network { (nterms == 3).then_some(2) } else { bk.effects.iter().position(|&e| e == b'i') };
     let spec = BiasSpec {
         normalization: if bk.network { Normalization::Alpaca } else { Normalization::Logitfe },
         structure,
         which: bk.which,
         bandwidth: bk.lags,
+        lag_term,
         order: order_kept.as_deref(),
         logitfe,
     };
@@ -381,7 +398,16 @@ pub fn run(bk: &BcKeys, stored: &mut Stored, res: &mut EstResult, parts: &GlmPar
         s.absorber_mut(),
         &coef,
         &parts.eta,
-        &ApeSpec { structure, sampling: Sampling::Independence, weak_exo: bk.lags > 0, adj: bk.adj, correction: None, full: Some(full), want_vcov: true },
+        &ApeSpec {
+            structure,
+            sampling: Sampling::Independence,
+            weak_exo: bk.lags > 0,
+            lag_term,
+            adj: bk.adj,
+            correction: None,
+            full: Some(full),
+            want_vcov: true,
+        },
         ctx,
     )?;
 
@@ -403,6 +429,7 @@ pub fn run(bk: &BcKeys, stored: &mut Stored, res: &mut EstResult, parts: &GlmPar
                 correction: Some(spec),
                 full: None,
                 want_vcov: false,
+                lag_term,
             };
             ape = bias::apes(&d, s.absorber_mut(), &c.coef, &c.eta, &a, ctx)?.delta;
             res.notes.extend(c.notes);
@@ -461,6 +488,7 @@ pub fn run(bk: &BcKeys, stored: &mut Stored, res: &mut EstResult, parts: &GlmPar
                 spec: Spec { want_resid: false, want_d: false, want_fe: false, want_groupvar: false, dof: DofOptions::none(), ..call.spec.clone() },
                 glm: GlmOptions { log: false, ..call.glm.clone() },
                 binary: bias::binary(&d.x),
+                names: kept_x.iter().map(|&j| bk.xnames[j].clone()).collect(),
                 full_kept: kidx.clone(),
                 full: SubFit { coef: coef.clone(), ape: unc.delta.clone() },
                 n_full,

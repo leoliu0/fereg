@@ -340,7 +340,8 @@ foreach o in "analytical jackknife" "analytical ibias(maybe)" "analytical tbias(
 	"jackknife double multiple(2)" "jackknife jj individuals" "jackknife double time" ///
 	"jackknife ss1 individuals" "jackknife ss2 time" "analytical lags(-1)" ///
 	"analytical ibias(no) tbias(no)" "jackknife ibias(no) tbias(no)" "analytical lags(1) ibias(no)" ///
-	"analytical population(-5)" {
+	"analytical population(-5)" "analytical population(1.5)" "analytical population(abc)" ///
+	"ape analytical" "analytical ape" "jackknife ape" "ape jackknife ss1" {
 	bc_rc 198 "`o'"
 }
 * model restrictions: weights, separation, regressors, absorbed terms
@@ -412,6 +413,11 @@ assert "`s(bc)'" == "ape" & "`s(which)'" == "time" & "`s(ibias)'" == "" & "`s(ti
 assert "`s(title1)'" == "Type of included effects: time effects only" & "`s(title2)'" == "Type of bias correction: none"
 bc_parse "analytical population(20000)" "idcode year"
 assert "`s(population)'" == "20000"
+* population(0) passes the parser and fails against N* after prepare (test_logitfe)
+bc_parse "ape population(0)" "idcode year"
+assert "`s(population)'" == "0"
+bc_parse "analytical" "idcode year"
+assert "`s(population)'" == ""
 bc_parse "analytical network lags(1)" "idcode#year ind_code#year idcode#ind_code"
 assert "`s(structure)'" == "network" & "`s(which)'" == "both" & "`s(ivar)'" == "" & "`s(tvar)'" == "year"
 assert "`s(title1)'" == "Type of included effects: exporter-time, importer-time and pair effects"
@@ -433,11 +439,11 @@ else {
 	assert "`s(perm)'" == "it" & "`s(which)'" == "time"
 	bc_parse "jackknife ss2 multiple(2) individuals ibias(no)" "idcode year"
 	assert "`s(perm)'" == "i" & "`s(title3)'" == "2 multiple partitions in the cross-section dimension"
-	* logitfe's note: randomizing the dimension that is not split gives the plain estimator
-	bc_parse "jackknife ss2 multiple(3) individuals tbias(no)" "idcode year"
-	assert "`s(multiple)'" == "0" & "`s(perm)'" == "" & "`s(title3)'" == ""
-	bc_parse "jackknife ss1 multiple(3) time" "year"
-	assert "`s(multiple)'" == "0" & "`s(perm)'" == ""
+	* partitions that permute only a dimension the subpanels do not split: an error (logitfe: a note)
+	bc_rc 198 "jackknife ss2 multiple(3) individuals tbias(no)"
+	bc_rc 198 "jackknife ss1 multiple(3) time ibias(no)"
+	bc_rc 198 "jackknife ss1 multiple(3) time" "year"
+	bc_rc 198 "jackknife ss2 multiple(3) individuals" "idcode"
 	* _rf_bc_perm: one permutation of the distinct values per partition and dimension, the
 	* session's RNG state unchanged
 	set seed 271828

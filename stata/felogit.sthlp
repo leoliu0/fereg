@@ -187,6 +187,8 @@ the fixed effects are then re-estimated by maximum likelihood at the corrected c
 {opt lags(#)} (default 0) is the bandwidth for predetermined (weakly exogenous) regressors, such as a lagged
 dependent variable: lags are calendar periods of the {cmd:xtset} time variable (gaps respected); # must not exceed
 the number of observations of the shortest panel minus 1. {opt lags()} requires the individual-effect bias.
+With {opt analytical} or {opt jackknife}, {cmd:e(V2)}, like {cmd:e(V)}, is the variance at the uncorrected fit
+(as in {cmd:logitfe}). {opt ape} cannot be combined with them: they report the corrected APEs anyway.
 
 {phang}
 {opt jackknife} corrects by the split-panel jackknife of Dhaene and Jochmans (2015) or delete-one jackknives
@@ -198,7 +200,8 @@ variables share their ids, such as importer-exporter data). Every subpanel is a 
 before the drop of groups with a constant outcome and is refitted with {cmd:felogit}'s own sample rules.
 {opt multiple(R)} ({opt ss1} and {opt ss2}) averages the corrections of R random partitions; {opt individuals}
 or {opt time} randomizes only the order of the individuals or of the periods (default both). The partitions are
-{cmd:logitfe}'s and need {cmd:moremata} ({cmd:ssc install moremata}).
+{cmd:logitfe}'s and need {cmd:moremata} ({cmd:ssc install moremata}). Partitions that permute only a dimension
+the subpanels of the corrected bias do not split are an error ({it:multiple partitions have no effect}).
 
 {phang}
 {opt ibias(yes|no)} and {opt tbias(yes|no)} (with {opt analytical} or {opt jackknife}; default yes/yes) select the
@@ -207,11 +210,12 @@ individual-effect bias, of order 1/T, and the time-effect bias, of order 1/N.
 {phang}
 {opt population(#)} is the size of the population for the finite-population factor
 (M - N*)/(M - 1) of the sampling-of-effects term of the APE variance (M = #, N* = e(N_full)); M must be at least
-N*. Without it the factor is 1 (infinite population), as in {cmd:logitfe}.
+N* (so {cmd:population(0)} is an error). Without it the factor is 1 (infinite population), as in {cmd:logitfe}.
 
 {phang}
 {opt network} selects the network structure (with {opt analytical} or {opt ape}; the jackknife is for the classic
-structure). {opt lags()} then orders each pair's observations by the {cmd:xtset} time variable.
+structure). {opt lags(L)} then counts, as {cmd:alpaca}, L observations back within each pair, the pair's
+observations ordered by the {cmd:xtset} time variable (not calendar periods: gaps are ignored).
 
 {dlgtab:Optimization and performance}
 
@@ -331,7 +335,8 @@ the same when the sample contains every period.{p_end}
 is {cmd:logitfe}'s {opt nocorrection}. The fixed effects are those of {opt absorb()} ({cmd:logitfe}'s
 {opt ieffects()} and {opt teffects()}). Combinations {cmd:logitfe} ignores or resets silently are errors:
 {opt lags()} with {opt ibias(no)} or time effects only, {opt individuals} or {opt time} without {opt multiple()},
-{opt ibias()}/{opt tbias()} without a correction.{p_end}
+{opt ibias()}/{opt tbias()} without a correction, {opt ape} with {opt analytical} or {opt jackknife} (the
+corrections report APEs themselves), {opt population(0)} (any value below e(N_full)).{p_end}
 {phang2}o {cmd:e(b)} also holds {cmd:_cons} ({help felogit##differences:above}), re-evaluated at the corrected point.
 {opt vce()} is allowed and {cmd:e(V)} is the uncorrected variance under it ({cmd:logitfe}: always the inverse
 Hessian). {cmd:e(N_drop)}, {cmd:e(N_group_drop)}, {cmd:e(N_time_drop)}, {cmd:e(rankV)} and {cmd:e(rankV2)} are not
@@ -339,7 +344,11 @@ stored; see {cmd:e(N_full)} and {cmd:e(num_separated)}. {cmd:e(chi2)} is {cmd:fe
 {cmd:logitfe}'s likelihood-ratio test including the dummies.{p_end}
 {phang2}o The network correction ({opt network}) has no {cmd:logitfe} counterpart; it follows {cmd:alpaca}.{p_end}
 {phang2}o Lags count calendar periods of the {cmd:xtset} time variable (gaps respected), as in {cmd:logitfe};
-{cmd:fereg}'s R and Python versions follow {cmd:alpaca}, which counts observations.{p_end}
+{cmd:fereg}'s R and Python versions follow {cmd:alpaca}, which counts observations. With {opt network}, lags
+count each pair's observations ordered by the time variable ({cmd:alpaca}), not calendar periods.{p_end}
+{phang2}o {opt multiple()} whose partitions only permute a dimension the subpanels do not split
+({opt ibias(no)} with {opt time}, {opt tbias(no)} with {opt individuals}, or the one-way models with the
+same split) is an error; {cmd:logitfe} prints a note and computes the estimator without partitions.{p_end}
 
 
 {marker postestimation}{...}
@@ -491,7 +500,7 @@ With {opt analytical}, {opt jackknife} or {opt ape} also:
 {synopt:{cmd:e(dof_table)}}absorbed degrees of freedom: categories, redundant, coefficients, inexact, nested{p_end}
 {synopt:{cmd:e(b0)}}uncorrected coefficients (with a bias correction or APEs){p_end}
 {synopt:{cmd:e(b2)}}average partial effects (APEs), one per regressor; 0 for base and omitted levels{p_end}
-{synopt:{cmd:e(V2)}}variance-covariance matrix of the APEs{p_end}
+{synopt:{cmd:e(V2)}}variance-covariance matrix of the APEs, at the uncorrected fit (also after a correction){p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Functions}{p_end}

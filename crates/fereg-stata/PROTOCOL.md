@@ -230,6 +230,7 @@ Varlist: `y x… [offset] bcvar… touse out…` (`nbc` bias-correction variable
 | `tdelta` | real (default 1) | classic: `_dta[_TSdelta]` |
 | `nbc` | integer | number of bias-correction variables in the varlist |
 | `b0` `b2` `V2` | matrix names | required with `bc`: 1×(nx+1) uncorrected coefficients (`_cons` last), 1×nx APEs, nx×nx APE variance |
+| `xnames` | comma list | required with `bc=jackknife`: one name per sent regressor (subpanel error messages) |
 
 Bias-correction variables (numeric; read at prepare's observations, where they must be nonmissing):
 - classic: the xtset panel variable, the xtset time variable (raw values), then for every partition
@@ -239,7 +240,9 @@ Bias-correction variables (numeric; read at prepare's observations, where they m
 - network: one group code per absorbed term (any numeric code constant within the term's groups),
   then the xtset time variable when `lags` > 0.
 
-Definitions. N* = prepare's input observations (`__rf_N_full`: after the missing-value exclusion,
+Definitions. Lag groups (lags and the weak-exogeneity term of `V2`): classic, the term of the xtset
+panel variable (its position in `effects`, any absorb order); network, the third (pair) term.
+N* = prepare's input observations (`__rf_N_full`: after the missing-value exclusion,
 before singletons and the fe rule); the APE divisor and the base sample of every jackknife
 subpanel. Individuals 0…N_pre−1 are the distinct panel values over the N* observations in
 ascending order, periods 0…T_pre−1 the distinct time values; a partition's individual (period)
@@ -265,8 +268,9 @@ Errors (r(198) unless stated): a `bc` key without `bc=`, Poisson, slopes or a te
 1-2 (classic, matching `effects`) or 2-3 (network), `jk=` with network, `lags` beyond the
 shortest panel; `double` without equal panel and time values ("Invalid -double- option: no
 observations with the same index for the panel and time variables"); a jackknife subpanel that
-loses a coefficient or does not converge: r(498) "jackknife, subpanel <label>: …"; the
-fixed-effect re-solve at the corrected coefficients does not converge: r(430).
+loses a coefficient or does not converge: r(498) "jackknife, subpanel <label>: the coefficient of
+regressor <j> (<name from xnames>) is not estimable (…)" (core prefix and labels); the fixed-effect
+re-solve at the corrected coefficients does not converge: r(430).
 
 `sepcheck=1` (Poisson only; feppml `tagsep()` / `zvarname()`, ppmlhdfe's secret options): runs
 the separation check on the prepared sample and stores nothing else; no estimation, no

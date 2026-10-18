@@ -30,7 +30,7 @@ program _rf_glm, eclass
 		ABSORBER(string)
 		TAGSEP(name) ZVARname(name)
 		ANalytical JACKknife APE SS1 SS2 JS SJ JJ DOUBLE MULtiple(integer 0) Individuals Time
-		LAGS(integer 0) IBIAS(string) TBIAS(string) POPulation(integer 0) NETwork
+		LAGS(integer 0) IBIAS(string) TBIAS(string) POPulation(string) NETwork
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -442,7 +442,7 @@ program _rf_glm, eclass
 		tempname bc_adj
 		local N_star = scalar(__rf_N_full)
 		scalar `bc_adj' = 1
-		if (`bc_population' > 0) {
+		if ("`bc_population'" != "") {
 			if (`bc_population' < `N_star') {
 				di as err "Invalid population option: population must be a finite positive integer"
 				di as err "        higher or equal than the number of original observations (`N_star')."
@@ -622,7 +622,11 @@ program _rf_glm, eclass
 		if ("`bc_structure'" == "classic") {
 			local args `"`args' "effects=`bc_effects'" "tdelta=`=strtrim(string(`bc_tdelta', "%21.17g"))'""'
 		}
-		if ("`bc'" == "jackknife") local args `"`args' "jk=`bc_variant'""'
+		if ("`bc'" == "jackknife") {
+			* names of the sent regressors, for subpanel error messages
+			local xnames : subinstr local sent_full " " ",", all
+			local args `"`args' "jk=`bc_variant'" "xnames=`xnames'""'
+		}
 		if (`bc_multiple' > 0) local args `"`args' "multiple=`bc_multiple'" "perm=`bc_perm'""'
 	}
 	local _rf_status

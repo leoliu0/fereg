@@ -578,7 +578,7 @@ assert "`e(bctitle)'" == "Uncorrected fixed-effects estimates" & "`e(bctitle2)'"
 * jackknife variants; multiple(): logitfe's permutation variables (one per partition and dimension)
 stage_bc 2 2
 felogit y x1 x2, absorb(year id) jackknife
-expect_glm "bc=jackknife" "jk=ss2" "effects=ti" "nbc=2"
+expect_glm "bc=jackknife" "jk=ss2" "effects=ti" "nbc=2" "xnames=x1,x2"
 assert "`e(jackknife)'" == "ss2" & "`e(bctitle)'" == "Split-panel jackknife in both dimensions"
 capture mata: mata which mm_sample()
 if (!_rc) {
@@ -596,14 +596,14 @@ if (!_rc) {
 	felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) i
 	expect_glm "multiple=2" "perm=i" "nbc=4"
 	assert "`e(split)'" == "individuals"
-	* logitfe's note: plain ss2 without randomization
+	* partitions with no effect (logitfe: a note and the plain estimator): an error
 	stage_bc 2 2
 	log using "`lg'", text name(bc) replace
-	felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) individuals tbias(no)
+	capture noisily felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) individuals tbias(no)
+	assert _rc == 198
 	log close bc
-	rf_log_has "`lg'" "note: multiple partitions only in the cross-section without"
+	rf_log_has "`lg'" "multiple partitions have no effect: the subpanels"
 	assert r(found) == 1
-	assert !strpos(" $rfmock_glm ", " multiple=") & "`e(split)'" == "" & e(multiple) == .
 }
 
 * network: group codes per absorbed term (missing absorbed values: dropped by prepare, so the
@@ -626,6 +626,8 @@ assert e(N_group) == .
 * sample-dependent errors: population() below N*, lags() beyond the shortest panel (logitfe)
 stage_bc 2 2
 rcof "noi felogit y x1 x2, absorb(id year) analytical population(398)" == 198
+rcof "noi felogit y x1 x2, absorb(id year) ape population(0)" == 198
+rcof "noi felogit y x1 x2, absorb(id year) analytical ape" == 198
 rcof "noi felogit y x1 x2, absorb(id year) analytical lags(7)" == 198
 stage_bc 2 2
 felogit y x1 x2, absorb(id year) analytical lags(6)

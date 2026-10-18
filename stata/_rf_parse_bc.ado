@@ -8,7 +8,9 @@
 *
 * Options, messages and defaults follow logitfe 3.0.3 (Cruz-Gonzalez, Fernandez-Val and Weidner),
 * with these fereg rules: no option means no correction (logitfe's default is analytical); ape alone
-* is logitfe's nocorrection; every combination logitfe ignores or resets silently is an error.
+* is logitfe's nocorrection; every combination logitfe ignores or resets silently is an error; where
+* logitfe has no message, the texts are those of fereg-core's bias correction (shared with R and
+* Python).
 * Validation that needs the sample (lags() against the shortest panel, population() against N*)
 * is done by _rf_glm after prepare.
 *
@@ -20,18 +22,18 @@
 *   s(ibias) s(tbias)   yes | no              (analytical and jackknife)
 *   s(lags)        bandwidth L (analytical; 0 otherwise)
 *   s(variant)     ss1 ss2 js sj jj double   (jackknife)
-*   s(multiple)    R (0 = none; set to 0 when logitfe's note applies)
+*   s(multiple)    R (0 = none)
 *   s(perm)        i | t | it   (dimensions permuted by each multiple() partition, in RNG order)
 *   s(split)       both | individuals | time  (e(split) with multiple())
 *   s(ivar) s(tvar) s(tdelta)   xtset panel and time variables and delta (tvar: also network)
-*   s(population)  M (0 = not given)
+*   s(population)  M ("" = not given)
 *   s(title) s(title1) s(title2) s(title3)   logitfe's titles
 program _rf_parse_bc, sclass
 	version 16
 	#delimit ;
 	syntax , family(string) [ANalytical JACKknife APE SS1 SS2 JS SJ JJ DOUBLE
 		MULtiple(integer 0) Individuals Time LAGS(integer 0) IBIAS(string) TBIAS(string)
-		POPulation(integer 0) NETwork
+		POPulation(string) NETwork
 		weight(string) separation(string) g(integer 0) ivars(string asis) intercepts(string)
 		numslopes(string) isnoabsorb(integer 0) nx(integer 1) ] ;
 	#delimit cr
@@ -43,7 +45,7 @@ program _rf_parse_bc, sclass
 	if (`lags' != 0) local given `given' lags()
 	if ("`ibias'" != "") local given `given' ibias()
 	if ("`tbias'" != "") local given `given' tbias()
-	if (`population' != 0) local given `given' population()
+	if ("`population'" != "") local given `given' population()
 	if ("`given'" == "") exit
 	if ("`family'" != "logit") {
 		di as err "option `: word 1 of `given'' not allowed with feppml"
@@ -61,6 +63,12 @@ program _rf_parse_bc, sclass
 	}
 	if ("`analytical'" != "" & "`jackknife'" != "") {
 		di as err "Incompatible options: -jackknife- and -analytical-."
+		exit 198
+	}
+	* the corrections compute the APEs themselves (logitfe: -nocorrection- and -analytical- exclude
+	* each other)
+	if ("`ape'" != "" & "`analytical'`jackknife'" != "") {
+		di as err "Incompatible options: -ape- and -`analytical'`jackknife'-."
 		exit 198
 	}
 	local bc = cond("`analytical'" != "", "analytical", cond("`jackknife'" != "", "jackknife", cond("`ape'" != "", "ape", "")))
@@ -128,12 +136,17 @@ program _rf_parse_bc, sclass
 		exit 198
 	}
 	if (`lags' > 0 & "`ibias'" == "no") {
-		di as err "Incompatible options: -lags(`lags')- and -ibias(no)-: the lags enter the individual-effect bias."
+		di as err "lags(`lags') has no effect: lags only apply to the individual-effect bias"
 		exit 198
 	}
-	if (`population' < 0) {
-		di as err "Invalid population option: population must be a finite positive integer"
-		exit 198
+	if ("`population'" != "") {
+		capture confirm integer number `population'
+		local bad = _rc
+		if (!`bad') local bad = (`population' < 0)
+		if (`bad') {
+			di as err "Invalid population option: population must be a finite positive integer"
+			exit 198
+		}
 	}
 	if (`multiple' > 0) {
 		capture mata: mata which mm_sample()
@@ -159,12 +172,12 @@ program _rf_parse_bc, sclass
 		exit 102
 	}
 	if (`isnoabsorb') {
-		di as err "option `bcname' requires absorb() with the fixed effects (the -xtset- panel and/or time variable, or the network terms)"
+		di as err "bias correction and APEs need fixed effects"
 		exit 198
 	}
 	forval j = 1/`g' {
 		if (`: word `j' of `numslopes'' != 0 | `: word `j' of `intercepts'' != 1) {
-			di as err "option `bcname' requires absorb() terms without slopes (c. variables)"
+			di as err "bias correction and APEs need intercept-only fixed effects (no varying slopes)"
 			exit 198
 		}
 	}
@@ -176,16 +189,17 @@ program _rf_parse_bc, sclass
 	if ("`network'" != "") {
 		local structure network
 		if (!inlist(`g', 2, 3)) {
-			di as err "option network requires absorb() with two or three fixed effects: exporter-time, importer-time and (optionally) pair"
+			di as err `"panel structure "network" expects a two- or three-way fixed effects model"'
+			di as err "(absorb() with exporter-time, importer-time and optionally pair effects, in this order)"
 			exit 198
 		}
 		if ("`bc'" == "jackknife") {
-			di as err "Incompatible options: -network- and -jackknife-: the jackknife is available for the classic panel structure only."
+			di as err "the jackknife is not available for the network structure"
 			exit 198
 		}
 		foreach o in ibias tbias {
 			if ("``o''" != "") {
-				di as err "Incompatible options: -network- and -`o'(``o'')-: the network correction removes the bias of every fixed effect."
+				di as err "network structure: only the correction of both biases is available (option `o'(``o''))"
 				exit 198
 			}
 		}
@@ -217,8 +231,13 @@ program _rf_parse_bc, sclass
 			di as err "Error: must -tsset- data and specify panelvar and timevar"
 			exit 5
 		}
+		if (!inlist(`g', 1, 2)) {
+			di as err `"panel structure "classic" expects a one- or two-way fixed effects model"'
+			di as err "(use the network option for exporter-time, importer-time and pair effects)"
+			exit 198
+		}
 		local effects
-		local ok = inlist(`g', 1, 2)
+		local ok 1
 		forval j = 1/`g' {
 			local iv : word `j' of `ivars'
 			local iv `iv'
@@ -240,7 +259,7 @@ program _rf_parse_bc, sclass
 		else if (`has_i') {
 			local title1 "individual effects only"
 			if ("`tbias'" == "yes") {
-				di as err "Incompatible options: -tbias(yes)- requires time effects; absorb() has individual effects only."
+				di as err "the time-effect bias needs time fixed effects (option tbias(yes); absorb() has individual effects only)"
 				exit 198
 			}
 			if ("`ibias'" == "no") {
@@ -252,7 +271,7 @@ program _rf_parse_bc, sclass
 		else {
 			local title1 "time effects only"
 			if ("`ibias'" == "yes") {
-				di as err "Incompatible options: -ibias(yes)- requires individual effects; absorb() has time effects only."
+				di as err "the individual-effect bias needs individual fixed effects (option ibias(yes); absorb() has time effects only)"
 				exit 198
 			}
 			if ("`tbias'" == "no") {
@@ -261,7 +280,7 @@ program _rf_parse_bc, sclass
 				exit 198
 			}
 			if (`lags' > 0) {
-				di as err "Incompatible options: -lags(`lags')- requires individual effects; absorb() has time effects only."
+				di as err "lags(`lags') has no effect: lags only apply to the individual-effect bias"
 				exit 198
 			}
 		}
@@ -294,23 +313,15 @@ program _rf_parse_bc, sclass
 			local perm it
 			local split both
 		}
+		* partitions that permute only a dimension the subpanels do not split change nothing: an
+		* error (logitfe prints a note and drops multiple())
 		if ("`which'" == "individual" & "`perm'" == "i") {
-			di
-			di as text "note: multiple partitions only in the cross-section without"
-			di as text "correction for time fixed-effects delivers the same"
-			di as text "estimator without multiple partitions."
-			local multiple 0
+			di as err "multiple partitions have no effect: the subpanels of this bias split only the time dimension, which no partition permutes"
+			exit 198
 		}
 		else if ("`which'" == "time" & "`perm'" == "t") {
-			di
-			di as text "note: multiple partitions only in the time-dimension without"
-			di as text "correction for individual fixed-effects delivers the same"
-			di as text "estimator without multiple partitions."
-			local multiple 0
-		}
-		if (`multiple' == 0) {
-			local perm
-			local split
+			di as err "multiple partitions have no effect: the subpanels of this bias split only the individual dimension, which no partition permutes"
+			exit 198
 		}
 	}
 

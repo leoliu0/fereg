@@ -20,8 +20,11 @@
 *   - multiple(): _rf_bc_perm's draws equal logitfe's own multiplepvar()/multipletvar() exactly, and
 *     the estimates equal logitfe's;
 *   - the fixed effects saved by d() at the corrected point satisfy the likelihood equations of
-*     every absorbed group (FE re-solve); felogit leaves the RNG state unchanged; results are
-*     bit-identical for 1 and 4 threads.
+*     every absorbed group (FE re-solve; also with an offset); felogit leaves the RNG state
+*     unchanged; results are bit-identical for 1 and 4 threads and do not depend on the order of
+*     the absorb() terms; vce() changes e(V) only;
+*   - the network structure against alpaca 0.3.5 (gen_bc_network.R: bc_network.csv and
+*     bc_network_ref.csv): uncorrected APEs and e(V2), analytical L = 0 and L = 2.
 *
 * Run from tests/stata (needs fereg.plugin, logitfe 3.0.3 and moremata on the adopath; run_all.do
 * checks the versions):
@@ -763,6 +766,37 @@ assert r_d2 > 1e-4
 * errors: lags beyond the shortest panel (logitfe's check), lags with ibias(no)
 rcof "noi felogit `D', absorb(id year) analytical lags(7)" == 198
 rcof "noi felogit `D', absorb(id year) analytical lags(1) ibias(no)" == 198
+* the term order of absorb() does not matter: the panel variable's term is the lag group of the
+* weak-exogeneity term of e(V2) wherever it stands
+quietly felogit `D', absorb(id year) analytical lags(1) tol(1e-12)
+matrix O1 = e(b), e(b2)
+matrix O1V = e(V2)
+quietly felogit `D', absorb(year id) analytical lags(1) tol(1e-12)
+matrix O2 = e(b), e(b2)
+mata: st_numscalar("r_ord", max((mreldif(st_matrix("O1"), st_matrix("O2")), mreldif(st_matrix("O1V"), st_matrix("e(V2)")))))
+di as text "  absorb(year id) vs absorb(id year), lags(1): max rel. diff " %9.2e r_ord
+assert r_ord < 1e-9
+* vce(): e(V) is plain felogit's variance under it; the APEs and e(V2) do not depend on it
+quietly felogit `D', absorb(id year) vce(cluster id) tol(1e-12)
+matrix VC = e(V)
+quietly felogit `D', absorb(id year) analytical lags(1) vce(cluster id) tol(1e-12)
+assert mreldif(VC, e(V)) < 1e-12 & "`e(vcetype)'" == "Robust" & "`e(clustvar)'" == "id"
+matrix O3 = e(b), e(b2)
+assert mreldif(O1, O3) < 1e-12 & mreldif(O1V, e(V2)) < 1e-12
+* errors: ape with a correction, population() below N* (0 included)
+rcof "noi felogit `D', absorb(id year) analytical ape" == 198
+rcof "noi felogit `D', absorb(id year) jackknife ape" == 198
+rcof "noi felogit `D', absorb(id year) ape population(0)" == 198
+rcof "noi felogit `D', absorb(id year) analytical population(0)" == 198
+* an offset: the fixed effects of d() at the corrected point solve the likelihood equations with it
+quietly gen double off = 0.4 * x1 - 0.2
+felogit y x2, absorb(id year) offset(off) analytical tol(1e-12) d(dd)
+assert reldif(_b[x2], el(e(b0), 1, 1)) > 1e-6
+fecheck "id year"
+drop dd
+felogit y x2, absorb(id year) offset(off) jackknife ss2 tol(1e-12) d(dd)
+fecheck "id year"
+drop dd off
 di as result "D1 dynamic passed"
 
 // ===========================================================================
@@ -786,7 +820,7 @@ fcmp ud_an1 1e-6 1e-6 1 : felogit `D', absorb(id year) analytical lags(1) tol(1e
 * a regressor that is zero in the second half of the periods is lost in a subpanel: an error
 * (logitfe enters it as 0)
 gen double x3 = x1 * (year <= 1994)
-rcof "noi felogit y x1 x3, absorb(id year) jackknife ss1" != 0
+rcof "noi felogit y x1 x3, absorb(id year) jackknife ss1" == 498
 di as result "D2 passed"
 
 // ===========================================================================
@@ -816,5 +850,79 @@ foreach o in "analytical" "jackknife double" "jackknife jj" {
 	assert mreldif(T1, T4) == 0 & mreldif(T1V, e(V2)) == 0
 }
 di as result "threads passed"
+
+// ===========================================================================
+// D4: network structure (exporter-time, importer-time, pair effects) vs alpaca 0.3.5: the data
+// and alpaca's numbers come from gen_bc_network.R (alpaca at tight tolerances: exact MLE, corrected
+// point within ~1e-10 of an exact fixed-effect re-solve; no group with a constant outcome, so
+// N* = N and the sampling-of-effects term is alpaca's)
+// ===========================================================================
+import delimited using "bc_network_ref.csv", varnames(1) stringcols(_all) clear
+mata:
+// reference <case> <quantity> as matrix <out>, named as alpaca (matrices: names "row:col")
+void nwref(string scalar cs, string scalar q, string scalar out)
+{
+	string matrix S
+	string colvector rn, cn
+	string rowvector names
+	real colvector v
+	real matrix A
+	real scalar k, i, p, r, c
+
+	S = st_sdata(., ("case", "quantity", "name", "value"))
+	S = select(S, (S[., 1] :== cs) :& (S[., 2] :== q))
+	if (!rows(S)) _error(3498, "no reference " + cs + " " + q)
+	v = strtoreal(S[., 4])
+	if (!strpos(S[1, 3], ":")) {
+		st_matrix(out, v')
+		st_matrixcolstripe(out, (J(rows(v), 1, ""), S[., 3]))
+		return
+	}
+	p = strpos(S[., 3], ":")
+	rn = substr(S[., 3], 1, p :- 1)
+	cn = substr(S[., 3], p :+ 1, .)
+	k = sqrt(rows(v))
+	names = rn[1..k]'
+	A = J(k, k, .)
+	for (i = 1; i <= rows(v); i++) {
+		r = selectindex(names :== rn[i])
+		c = selectindex(names :== cn[i])
+		A[r, c] = v[i]
+	}
+	st_matrix(out, A)
+	st_matrixcolstripe(out, (J(k, 1, ""), names'))
+	st_matrixrowstripe(out, (J(k, 1, ""), names'))
+}
+end
+foreach c in noc an0 an2 {
+	foreach q in b b2 {
+		mata: nwref("`c'", "`q'", "A_`c'_`q'")
+	}
+}
+mata: nwref("noc", "V2", "A_noc_V2"); nwref("noc", "V2_weakexo", "A_noc_V2w")
+mata: nwref("all", "N", "A_N"); nwref("all", "M", "A_M")
+local M = el(A_M, 1, 1)
+import delimited using "bc_network.csv", varnames(1) clear asdouble
+xtset pair year
+local W y ylag x rta
+felogit `W', absorb(exp_time imp_time pair) network ape population(`M') tol(1e-12)
+assert e(N) == el(A_N, 1, 1) & e(N_full) == e(N) & reldif(e(fpc), (`M' - e(N)) / (`M' - 1)) < 1e-15
+mata: rf_cmp("e(b)", "A_noc_b", 1e-7, "network b (uncorrected)")
+mata: rf_cmp("e(b2)", "A_noc_b2", 1e-7, "network b2 (uncorrected APEs)")
+mata: rf_cmp("e(V2)", "A_noc_V2", 1e-7, "network V2 (population)")
+felogit `W', absorb(exp_time imp_time pair) network analytical population(`M') tol(1e-12) d(dd)
+mata: rf_cmp("e(b)", "A_an0_b", 1e-7, "network analytical L = 0 (b)")
+mata: rf_cmp("e(b2)", "A_an0_b2", 1e-7, "network analytical L = 0 (b2)")
+mata: rf_cmp("e(V2)", "A_noc_V2", 1e-7, "network analytical L = 0 (V2 at the uncorrected fit)")
+assert "`e(structure)'" == "network" & "`e(bias)'" == "analytical"
+fecheck "exp_time imp_time pair"
+drop dd
+felogit `W', absorb(exp_time imp_time pair) network analytical lags(2) population(`M') tol(1e-12)
+mata: rf_cmp("e(b)", "A_an2_b", 1e-7, "network analytical L = 2 (b)")
+mata: rf_cmp("e(b2)", "A_an2_b2", 1e-7, "network analytical L = 2 (b2)")
+mata: rf_cmp("e(V2)", "A_noc_V2w", 1e-7, "network L = 2: V2 with weak exogeneity")
+assert "`e(lags)'" == "2"
+rcof "noi felogit `W', absorb(exp_time imp_time pair) network jackknife" == 198
+di as result "D4 network passed"
 
 di as result "test_logitfe passed"
