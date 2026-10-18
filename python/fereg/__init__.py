@@ -1,12 +1,15 @@
 """fereg: fast high-dimensional fixed-effects regressions with pyfixest-compatible results.
 
 The estimation itself (fixed-effect absorption, OLS, IV/2SLS, Poisson, logit, variance
-matrices, fit statistics) runs in the Rust core; this package parses formulas, builds the
-design columns and presents the results with pyfixest 0.60.0 names and conventions.
+matrices, fit statistics, logit bias corrections and average partial effects) runs in the Rust
+core; this package parses formulas, builds the design columns and presents the results with
+pyfixest 0.60.0 names and conventions (alpaca 0.3.5's for the bias corrections, which pyfixest
+does not have).
 """
 
 from ._core import __version__
 from ._vcov import VcovTypeNotSupportedError
+from .bias import APEs, FelogitBiasCorr
 from .estimation import feglm, feols, fepois, ssc
 from .etable import etable
 from .results import Fegaussian, Feglm, Feiv, Felogit, Feols, Fepois, FixestMulti
@@ -25,6 +28,8 @@ __all__ = [
     "Fepois",
     "Feglm",
     "Felogit",
+    "FelogitBiasCorr",
+    "APEs",
     "Fegaussian",
     "FixestMulti",
     "VcovTypeNotSupportedError",

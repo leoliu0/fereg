@@ -35,6 +35,25 @@ Driscoll–Kraay for IV and Driscoll–Kraay without `panel_id`, and fixest's Co
 `vcov="conley", vcov_kwargs={"lat": "lat", "lon": "lon", "cutoff": "100km"}` (`cutoff` in km
 or `"60mi"`, default deduced as fixest; `pixel`, `distance="triangular"|"spherical"`).
 
+Fixed-effects logit bias corrections and average partial effects (pyfixest has neither; names and
+numbers follow the R package alpaca 0.3.5's `biasCorr()` / `getAPEs()`):
+
+```python
+bc = lg.bias_corr(L=1)                      # analytical (Fernández-Val & Weidner 2016), lags L
+nw = trade.bias_corr(panel_structure="network")   # exporter-time + importer-time (+ pair) effects
+jk = lg.bias_corr(method="jackknife", jackknife="ss2")   # also ss1, js, sj, jj, double; multiple=R
+bc.summary(); bc.vcov("hetero"); bc.coef_uncorr; bc.bias_term
+lg.get_apes(n_pop=10**6).summary()          # APEs, delta method (+ sampling of effects)
+bc.get_apes().tidy()                        # bias-corrected APEs
+```
+
+`bias_corr()` returns a logit result at the corrected coefficients (fixed effects re-estimated
+exactly there) on which every method works (CRV3 excepted); `bias="individual"|"time"` corrects
+one bias only; the jackknife follows Stata's logitfe with its dimension bugs fixed. The
+corrections use alpaca's sample (all-one groups, which pyfixest keeps at the bound, do not count
+in n; APEs average over every observation before the fixed-effect based drops). The docstring of
+`fereg.bias` lists the differences from alpaca and logitfe.
+
 Not implemented: probit; `nid` variances (raise `NotImplementedError`); wild bootstrap,
 `ccv`, `decompose`, `ritest`, plotting and DiD helpers.
 

@@ -489,114 +489,118 @@ fn parse_spec(
     })
 }
 
-/// Estimates one model (`fereg_core::fit::fit`). Array arguments must be C-contiguous; they are
-/// borrowed, never copied.
-///
-/// `vcov` is the variance estimator: `"iid"`, `"hetero"` (HC1), `"hc2"`, `"hc3"`, `"cluster"`
-/// (CRV1 over `cluster`), `"crv3"` (leave-one-cluster-out jackknife over `cluster`), `"nw"`
-/// (Newey-West: panel when `panel` is given, time series otherwise), `"dk"` (Driscoll-Kraay) or
-/// `"conley"` (spatial HAC over `lat` / `lon`, degrees). `time` and `panel` are indices into
-/// `factors` (time levels ascending = time order). `lag` is the Newey-West / Driscoll-Kraay lag
-/// (`None` = the flavor's default; pyfixest: floor(T^0.25), and a time series needs it);
-/// `cutoff` the Conley cutoff in km (`None` = fixest's deduced cutoff), `pixel` its pixel size in
-/// km (0 = none) and `spherical` its great-circle distance (else fixest's "triangular").
-/// Extensions of the pyfixest flavor (pyfixest raises): HC2/HC3 with fixed effects (exact
-/// leverage of the fixed effects), CRV3 for IV and logit (logit refits are logit), Newey-West /
-/// Driscoll-Kraay for IV at estimation, Driscoll-Kraay without a panel variable, and Conley
-/// (fixest's estimator with the HC1 correction N / (N - df_k)). HC2/HC3 with IV is an error.
-/// `gaussian_glm` marks a pyfixest-flavor `model="ols"` as pyfixest's `feglm(family="gaussian")`
-/// (its separation checks run: `fixef_rm="perfect"` and `relu`; `FitSpec::gaussian_glm`).
-#[pyfunction]
-#[pyo3(signature = (
-    y, x, endog, inst, factors, factor_names, fe, slopes, weights=None, offset=None,
-    cluster=Vec::new(), drop=None, *, time=None, panel=None, lat=None, lon=None, model="ols",
-    flavor="pyfixest", intercept=true, vcov="iid", lag=None, cutoff=None, pixel=0.0,
-    spherical=false, ssc=None, weights_type="aweights", fixef_rm="singleton", relu=false, mu=false,
-    gaussian_glm=false,
-    collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, glm_tol=1e-8, glm_maxiter=25,
-    keep_resid=true, keep_fixef=true, fixef_norm="minnorm", keep_state=true, threads=0, verbose=0
-))]
-#[allow(clippy::too_many_arguments)]
-fn fit<'py>(
-    py: Python<'py>,
-    y: PyReadonlyArray1<'py, f64>,
-    x: Vec<PyReadonlyArray1<'py, f64>>,
-    endog: Vec<PyReadonlyArray1<'py, f64>>,
-    inst: Vec<PyReadonlyArray1<'py, f64>>,
-    factors: &Bound<'py, PyList>,
-    factor_names: Vec<String>,
-    fe: Vec<(Vec<usize>, bool, Vec<usize>)>,
-    slopes: Vec<PyReadonlyArray1<'py, f64>>,
-    weights: Option<PyReadonlyArray1<'py, f64>>,
-    offset: Option<PyReadonlyArray1<'py, f64>>,
-    cluster: Vec<Vec<usize>>,
-    drop: Option<PyReadonlyArray1<'py, bool>>,
-    time: Option<usize>,
-    panel: Option<usize>,
-    lat: Option<PyReadonlyArray1<'py, f64>>,
-    lon: Option<PyReadonlyArray1<'py, f64>>,
-    model: &str,
-    flavor: &str,
-    intercept: bool,
-    vcov: &str,
-    lag: Option<usize>,
-    cutoff: Option<f64>,
-    pixel: f64,
-    spherical: bool,
-    ssc: Option<&Bound<'py, PyDict>>,
-    weights_type: &str,
-    fixef_rm: &str,
-    relu: bool,
-    mu: bool,
-    gaussian_glm: bool,
-    collin_tol: f64,
-    fixef_tol: f64,
-    fixef_maxiter: usize,
-    glm_tol: f64,
-    glm_maxiter: usize,
-    keep_resid: bool,
-    keep_fixef: bool,
-    fixef_norm: &str,
-    keep_state: bool,
-    threads: usize,
-    verbose: u8,
-) -> PyResult<FitResult> {
-    let spec = FitSpec {
-        intercept,
-        ssc: parse_ssc(ssc)?,
-        separation: Separation { relu, mu },
-        gaussian_glm,
-        collin_tol,
-        fixef_tol,
-        fixef_maxiter,
-        glm_tol,
-        glm_maxiter,
-        keep_resid,
-        keep_fixef,
-        keep_state,
-        ..parse_spec(model, flavor, parse_vcov_kind(vcov, lag, cutoff, pixel, spherical)?, weights_type, fixef_rm, fixef_norm)?
+/// Defines a `#[pyfunction]` taking the model arguments of `fit` (same names, order and defaults)
+/// plus `extra` keyword-only arguments; `body` runs with the validated `FitInput` / `FitSpec`, the
+/// requested `threads` and `verbose`. The bias-correction entry points take the very model `fit`
+/// estimates, so their arguments cannot drift apart.
+macro_rules! model_fn {
+    (
+        $(#[$meta:meta])*
+        fn $name:ident($($extra:ident: $ty:ty $(= $default:expr)?),*) -> $ret:ty;
+        |$py:ident, $input:ident, $spec:ident, $threads:ident, $verbose:ident| $body:block
+    ) => {
+        $(#[$meta])*
+        #[pyfunction]
+        #[pyo3(signature = (
+            y, x, endog, inst, factors, factor_names, fe, slopes, weights=None, offset=None,
+            cluster=Vec::new(), drop=None, *, time=None, panel=None, lat=None, lon=None, model="ols",
+            flavor="pyfixest", intercept=true, vcov="iid", lag=None, cutoff=None, pixel=0.0,
+            spherical=false, ssc=None, weights_type="aweights", fixef_rm="singleton", relu=false, mu=false,
+            gaussian_glm=false,
+            collin_tol=1e-9, fixef_tol=1e-8, fixef_maxiter=16000, glm_tol=1e-8, glm_maxiter=25,
+            keep_resid=true, keep_fixef=true, fixef_norm="minnorm", keep_state=true, threads=0, verbose=0
+            $(, $extra $(= $default)?)*
+        ))]
+        #[allow(clippy::too_many_arguments)]
+        fn $name<'py>(
+            $py: Python<'py>,
+            y: PyReadonlyArray1<'py, f64>,
+            x: Vec<PyReadonlyArray1<'py, f64>>,
+            endog: Vec<PyReadonlyArray1<'py, f64>>,
+            inst: Vec<PyReadonlyArray1<'py, f64>>,
+            factors: &Bound<'py, PyList>,
+            factor_names: Vec<String>,
+            fe: Vec<(Vec<usize>, bool, Vec<usize>)>,
+            slopes: Vec<PyReadonlyArray1<'py, f64>>,
+            weights: Option<PyReadonlyArray1<'py, f64>>,
+            offset: Option<PyReadonlyArray1<'py, f64>>,
+            cluster: Vec<Vec<usize>>,
+            drop: Option<PyReadonlyArray1<'py, bool>>,
+            time: Option<usize>,
+            panel: Option<usize>,
+            lat: Option<PyReadonlyArray1<'py, f64>>,
+            lon: Option<PyReadonlyArray1<'py, f64>>,
+            model: &str,
+            flavor: &str,
+            intercept: bool,
+            vcov: &str,
+            lag: Option<usize>,
+            cutoff: Option<f64>,
+            pixel: f64,
+            spherical: bool,
+            ssc: Option<&Bound<'py, PyDict>>,
+            weights_type: &str,
+            fixef_rm: &str,
+            relu: bool,
+            mu: bool,
+            gaussian_glm: bool,
+            collin_tol: f64,
+            fixef_tol: f64,
+            fixef_maxiter: usize,
+            glm_tol: f64,
+            glm_maxiter: usize,
+            keep_resid: bool,
+            keep_fixef: bool,
+            fixef_norm: &str,
+            keep_state: bool,
+            threads: usize,
+            verbose: u8,
+            $($extra: $ty),*
+        ) -> PyResult<$ret> {
+            let spec = FitSpec {
+                intercept,
+                ssc: parse_ssc(ssc)?,
+                separation: Separation { relu, mu },
+                gaussian_glm,
+                collin_tol,
+                fixef_tol,
+                fixef_maxiter,
+                glm_tol,
+                glm_maxiter,
+                keep_resid,
+                keep_fixef,
+                keep_state,
+                ..parse_spec(model, flavor, parse_vcov_kind(vcov, lag, cutoff, pixel, spherical)?, weights_type, fixef_rm, fixef_norm)?
+            };
+            let farrs = extract_factors(factors)?;
+            let y = slice(&y, "y")?;
+            let input = FitInput {
+                n: y.len(),
+                y,
+                x: slices(&x, "x")?,
+                endog: slices(&endog, "endog")?,
+                inst: slices(&inst, "inst")?,
+                factors: factor_cols(&farrs)?,
+                factor_names,
+                fe: fe.into_iter().map(|(factors, intercept, slopes)| FeTerm { factors, intercept, slopes }).collect(),
+                slopes: slices(&slopes, "slopes")?,
+                weights: weights.as_ref().map(|w| slice(w, "weights")).transpose()?,
+                offset: offset.as_ref().map(|o| slice(o, "offset")).transpose()?,
+                cluster,
+                drop: drop.as_ref().map(|d| slice(d, "drop")).transpose()?,
+                time,
+                panel,
+                lat: lat.as_ref().map(|c| slice(c, "lat")).transpose()?,
+                lon: lon.as_ref().map(|c| slice(c, "lon")).transpose()?,
+            };
+            check_lengths(&input)?;
+            let ($input, $spec, $threads, $verbose) = (&input, &spec, threads, verbose);
+            $body
+        }
     };
-    let farrs = extract_factors(factors)?;
-    let y = slice(&y, "y")?;
-    let input = FitInput {
-        n: y.len(),
-        y,
-        x: slices(&x, "x")?,
-        endog: slices(&endog, "endog")?,
-        inst: slices(&inst, "inst")?,
-        factors: factor_cols(&farrs)?,
-        factor_names,
-        fe: fe.into_iter().map(|(factors, intercept, slopes)| FeTerm { factors, intercept, slopes }).collect(),
-        slopes: slices(&slopes, "slopes")?,
-        weights: weights.as_ref().map(|w| slice(w, "weights")).transpose()?,
-        offset: offset.as_ref().map(|o| slice(o, "offset")).transpose()?,
-        cluster,
-        drop: drop.as_ref().map(|d| slice(d, "drop")).transpose()?,
-        time,
-        panel,
-        lat: lat.as_ref().map(|c| slice(c, "lat")).transpose()?,
-        lon: lon.as_ref().map(|c| slice(c, "lon")).transpose()?,
-    };
+}
+
+fn check_lengths(input: &FitInput<'_>) -> PyResult<()> {
     let n = input.n;
     let lens = input.x.iter().chain(&input.endog).chain(&input.inst).chain(&input.slopes).map(|s| s.len());
     let lens = lens
@@ -609,8 +613,32 @@ fn fit<'py>(
     if lens.into_iter().any(|l| l != n) {
         return Err(PyValueError::new_err("every input column must have the length of y"));
     }
-    let out = py.detach(|| with_ctx(threads, verbose, |ctx| cf::fit(&input, &spec, ctx))).map_err(to_pyerr)?;
-    convert(py, out)
+    Ok(())
+}
+
+model_fn! {
+    /// Estimates one model (`fereg_core::fit::fit`). Array arguments must be C-contiguous; they are
+    /// borrowed, never copied.
+    ///
+    /// `vcov` is the variance estimator: `"iid"`, `"hetero"` (HC1), `"hc2"`, `"hc3"`, `"cluster"`
+    /// (CRV1 over `cluster`), `"crv3"` (leave-one-cluster-out jackknife over `cluster`), `"nw"`
+    /// (Newey-West: panel when `panel` is given, time series otherwise), `"dk"` (Driscoll-Kraay) or
+    /// `"conley"` (spatial HAC over `lat` / `lon`, degrees). `time` and `panel` are indices into
+    /// `factors` (time levels ascending = time order). `lag` is the Newey-West / Driscoll-Kraay lag
+    /// (`None` = the flavor's default; pyfixest: floor(T^0.25), and a time series needs it);
+    /// `cutoff` the Conley cutoff in km (`None` = fixest's deduced cutoff), `pixel` its pixel size in
+    /// km (0 = none) and `spherical` its great-circle distance (else fixest's "triangular").
+    /// Extensions of the pyfixest flavor (pyfixest raises): HC2/HC3 with fixed effects (exact
+    /// leverage of the fixed effects), CRV3 for IV and logit (logit refits are logit), Newey-West /
+    /// Driscoll-Kraay for IV at estimation, Driscoll-Kraay without a panel variable, and Conley
+    /// (fixest's estimator with the HC1 correction N / (N - df_k)). HC2/HC3 with IV is an error.
+    /// `gaussian_glm` marks a pyfixest-flavor `model="ols"` as pyfixest's `feglm(family="gaussian")`
+    /// (its separation checks run: `fixef_rm="perfect"` and `relu`; `FitSpec::gaussian_glm`).
+    fn fit() -> FitResult;
+    |py, input, spec, threads, verbose| {
+        let out = py.detach(|| with_ctx(threads, verbose, |ctx| cf::fit(input, spec, ctx))).map_err(to_pyerr)?;
+        convert(py, out)
+    }
 }
 
 macro_rules! dist_fn {
