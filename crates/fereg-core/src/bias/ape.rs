@@ -1,7 +1,7 @@
 //! Average partial effects (design sec. 5) and their variance (sec. 6).
 
 use super::analytical::{bias_sum, plan};
-use super::{BiasSpec, FeCodes, LogitData, Sampling, Structure, center, check_data, check_structure, chol_solve, default_key, derivs, invalid, lag_term, ordered_groups, plogis, wcross};
+use super::{BiasSpec, FeCodes, LogitData, Sampling, Structure, alloc_cols, center, check_data, check_structure, chol_solve, default_key, derivs, invalid, lag_term, ordered_groups, plogis, wcross, zeros};
 use crate::absorber::Absorber;
 use crate::api::Ctx;
 use crate::error::RfError;
@@ -27,8 +27,12 @@ pub struct FullSample<'a> {
 pub struct ApeSpec<'a> {
     pub structure: Structure,
     pub sampling: Sampling,
-    /// Weakly exogenous regressors: add adj * (C + C') (design sec. 6.2).
+    /// Weakly exogenous regressors: add adj * (C + C') (design sec. 6.2), C within the groups of
+    /// the lag term.
     pub weak_exo: bool,
+    /// Index into [`LogitData::fe`] (and [`FullSample::fe`]) of the lag-group term (individuals
+    /// classic, pairs network), as [`BiasSpec::lag_term`]; `None` = FE1 / FE3.
+    pub lag_term: Option<usize>,
     /// Finite-population factor of the sampling-of-effects term (0 = delta method only).
     pub adj: f64,
     /// Analytically corrected APEs: the bias term of this specification, evaluated at the point
@@ -71,6 +75,7 @@ fn apes_impl(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], eta: &[f64], s
     let n = check_data(d, abs, coef, eta)?;
     let k = d.fe.len();
     check_structure(spec.structure, k)?;
+    lag_term(spec.structure, k, spec.lag_term)?;
     if !(spec.adj >= 0.0 && spec.adj.is_finite()) {
         return invalid("APEs: the finite-population factor must be finite and non-negative");
     }
@@ -124,35 +129,24 @@ fn apes_in(
     let nf = d.n_full as f64;
     let binary: Vec<bool> = d.x.iter().map(|x| x.iter().all(|&v| v == 0.0 || v == 1.0)).collect();
     let wt = |r: usize| d.weights.map_or(1.0, |w| w[r]);
-    let mut w = vec![0.0; n];
-    let mut v = vec![0.0; n];
-    let mut z = vec![0.0; n];
-    let mut d1s = vec![0.0; n];
-    let mut d2s = vec![0.0; n];
-    let mut d3s = vec![0.0; n];
+    let mut w = zeros(n)?;
+    let mut v = zeros(n)?;
+    let mut z = zeros(n)?;
+    let mut d1s = zeros(n)?;
     for r in 0..n {
-        let (m, d1, d2, d3) = derivs(eta[r]);
+        let (m, d1, d2, _) = derivs(eta[r]);
         w[r] = wt(r) * d1;
         v[r] = wt(r) * (d.y[r] - m);
         z[r] = wt(r) * d2;
         d1s[r] = d1;
-        d2s[r] = d2;
-        d3s[r] = d3;
     }
-    // MX, H and J only enter the variance.
-    let mx = if spec.want_vcov { center(abs, &d.x, &w, pool, ctx)? } else { vec![vec![0.0; n]; p] };
-    ctx.check()?;
-    let h = if spec.want_vcov { wcross(&mx, &w) } else { Vec::new() };
-    let mut delta_m = vec![vec![0.0; n]; p];
-    let mut delta1 = vec![vec![0.0; n]; p];
-    let mut delta2 = vec![vec![0.0; n]; p];
-    // J[q * p + j]: derivative of APE j with respect to coefficient q.
-    let mut jm = vec![0.0; p * p];
-    let sum_d1: f64 = d1s.iter().sum();
+    let mut delta_m = alloc_cols(p, n)?;
+    let mut delta1 = alloc_cols(p, n)?;
+    let mut delta2 = alloc_cols(p, n)?;
+    let mut sum_f1 = vec![0.0; p];
     for j in 0..p {
         let bj = coef[j];
         if binary[j] {
-            let mut s1 = 0.0;
             for r in 0..n {
                 let e0 = eta[r] - d.x[j][r] * bj;
                 let e1 = e0 + bj;
@@ -161,47 +155,71 @@ fn apes_in(
                 delta_m[j][r] = m1 - m0;
                 delta1[j][r] = f1 - f0;
                 delta2[j][r] = g1 - g0;
-                s1 += f1;
+                sum_f1[j] += f1;
             }
+        } else {
+            for r in 0..n {
+                let (_, d1, d2, d3) = derivs(eta[r]);
+                delta_m[j][r] = bj * d1;
+                delta1[j][r] = bj * d2;
+                delta2[j][r] = bj * d3;
+            }
+        }
+    }
+    let sum_d1: f64 = d1s.iter().sum();
+    drop(d1s);
+    // MX, H and J only enter the variance. J[q * p + j]: derivative of APE j with respect to
+    // coefficient q.
+    let (mx, h, jm) = if spec.want_vcov {
+        let mx = center(abs, &d.x, &w, pool, ctx)?;
+        ctx.check()?;
+        let h = wcross(&mx, &w);
+        let mut jm = vec![0.0; p * p];
+        for j in 0..p {
             for q in 0..p {
-                if q != j {
+                if !(binary[j] && q == j) {
                     jm[q * p + j] = mx[q].iter().zip(&delta1[j]).map(|(a, b)| a * b).sum::<f64>() / nf;
                 }
             }
-            let px: f64 = (0..n).map(|r| (d.x[j][r] - mx[j][r]) * delta1[j][r]).sum();
-            jm[j * p + j] = (s1 - px) / nf;
-        } else {
-            for r in 0..n {
-                delta_m[j][r] = bj * d1s[r];
-                delta1[j][r] = bj * d2s[r];
-                delta2[j][r] = bj * d3s[r];
+            if binary[j] {
+                let px: f64 = (0..n).map(|r| (d.x[j][r] - mx[j][r]) * delta1[j][r]).sum();
+                jm[j * p + j] = (sum_f1[j] - px) / nf;
+            } else {
+                jm[j * p + j] += sum_d1 / nf;
             }
-            for q in 0..p {
-                jm[q * p + j] = mx[q].iter().zip(&delta1[j]).map(|(a, b)| a * b).sum::<f64>() / nf;
-            }
-            jm[j * p + j] += sum_d1 / nf;
         }
-    }
+        (mx, h, jm)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
     let delta: Vec<f64> = delta_m.iter().map(|c| c.iter().sum::<f64>() / nf).collect();
     let need_psi = plan.is_some() || spec.want_vcov;
-    let (mpsi, ppsi) = if need_psi {
-        let psi: Vec<Vec<f64>> = delta1.iter().map(|c| c.iter().zip(&w).map(|(a, w)| -a / w).collect()).collect();
+    // Psi = -Delta1 / w in place over Delta1, M Psi, then P Psi = Psi - M Psi in place over Psi.
+    let (mut mpsi, ppsi) = if need_psi {
+        let mut psi = delta1;
+        psi.iter_mut().for_each(|c| c.iter_mut().zip(&w).for_each(|(a, w)| *a = -*a / w));
         let refs: Vec<&[f64]> = psi.iter().map(Vec::as_slice).collect();
         let mpsi = center(abs, &refs, &w, pool, ctx)?;
-        let ppsi: Vec<Vec<f64>> = psi.iter().zip(&mpsi).map(|(a, m)| a.iter().zip(m).map(|(a, m)| a - m).collect()).collect();
-        (mpsi, ppsi)
+        psi.iter_mut().zip(&mpsi).for_each(|(a, m)| a.iter_mut().zip(m).for_each(|(a, m)| *a -= m));
+        (mpsi, psi)
     } else {
+        drop(delta1);
         (Vec::new(), Vec::new())
     };
     ctx.check()?;
     let bias_term = match (plan, &spec.correction) {
         (Some(pl), Some(c)) => {
-            let a: Vec<Vec<f64>> = (0..p).map(|j| (0..n).map(|r| delta2[j][r] + ppsi[j][r] * z[r]).collect()).collect();
-            let bl: Vec<Vec<f64>> = mpsi.iter().map(|m| m.iter().zip(&w).map(|(a, w)| a * w).collect()).collect();
-            Some(bias_sum(d, c, pl, &a, &bl, &w, &v, -1.0)?)
+            // A = Delta2 + P Psi z over Delta2; Bl = M Psi w over M Psi.
+            for j in 0..p {
+                delta2[j].iter_mut().zip(&ppsi[j]).zip(&z).for_each(|((a, pp), z)| *a += pp * z);
+                mpsi[j].iter_mut().zip(&w).for_each(|(m, w)| *m *= w);
+            }
+            Some(bias_sum(d, c, pl, &delta2, &mpsi, &w, &v, -1.0)?)
         }
         _ => None,
     };
+    drop(delta2);
+    drop(mpsi);
     let corrected: Vec<f64> = match &bias_term {
         Some(b) => delta.iter().zip(b).map(|(a, b)| a - b).collect(),
         None => delta.clone(),
@@ -211,9 +229,12 @@ fn apes_in(
         let hn: Vec<f64> = h.iter().map(|x| x / nf).collect();
         let winvj = chol_solve(&hn, p, &jm, p)?;
         // Gamma (n x p, per column).
-        let gamma: Vec<Vec<f64>> = (0..p)
-            .map(|j| (0..n).map(|r| ((0..p).map(|q| mx[q][r] * winvj[q * p + j]).sum::<f64>() - ppsi[j][r]) * v[r] / nf).collect())
-            .collect();
+        let mut gamma = alloc_cols(p, n)?;
+        for (j, g) in gamma.iter_mut().enumerate() {
+            for (r, gr) in g.iter_mut().enumerate() {
+                *gr = ((0..p).map(|q| mx[q][r] * winvj[q * p + j]).sum::<f64>() - ppsi[j][r]) * v[r] / nf;
+            }
+        }
         vcov = cross(&gamma, &gamma);
         if sampling_term {
             let add = sampling(d, spec, &delta_m, &delta, &gamma, retained)?;
@@ -251,7 +272,7 @@ fn sampling(d: &LogitData, spec: &ApeSpec, delta_m: &[Vec<f64>], delta: &[f64], 
     };
     let m = kept.len();
     // D (m x p row-major) over the row set.
-    let mut dm = vec![0.0; m * p];
+    let mut dm = crate::par::alloc_vec(m * p, 0.0)?;
     for (r, &kr) in kept.iter().enumerate() {
         for j in 0..p {
             let dv = if kr == u32::MAX { 0.0 } else { delta_m[j][kr as usize] };
@@ -281,12 +302,12 @@ fn sampling(d: &LogitData, spec: &ApeSpec, delta_m: &[Vec<f64>], delta: &[f64], 
         }
     }
     if spec.weak_exo {
-        if let Some(q) = lag_term(spec.structure, fe.len()) {
+        if let Some(q) = lag_term(spec.structure, fe.len(), spec.lag_term)? {
             let f = &fe[q];
             let (off, ids) = match order {
                 Some(o) => ordered_groups(f.codes, f.g, Some(&|r| o[r])),
                 None => {
-                    let key = default_key(spec.structure, &fe);
+                    let key = default_key(&fe, q);
                     ordered_groups(f.codes, f.g, key.as_deref())
                 }
             };

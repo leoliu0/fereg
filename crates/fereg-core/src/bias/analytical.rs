@@ -2,7 +2,7 @@
 //! the fixed effects at given coefficients (sec. 3.3).
 
 use super::{
-    BiasSpec, FeCodes, LogitData, Normalization, Structure, WhichBias, center, check_data, check_structure, chol_solve, default_key, derivs,
+    BiasSpec, FeCodes, LogitData, Normalization, Structure, WhichBias, alloc_cols, center, check_data, check_structure, zeros, chol_solve, default_key, derivs,
     invalid, lag_term, ordered_groups, wcross, CENTER_MAXITER, CENTER_TOL,
 };
 use crate::absorber::{Absorber, FeCoefs, SolveOpts};
@@ -67,18 +67,18 @@ pub(crate) fn plan(d: &LogitData, spec: &BiasSpec) -> Result<Plan, RfError> {
             if spec.order.is_some_and(|o| o.len() != n) {
                 return invalid("bias correction: the time order needs one value per kept row");
             }
+            let lt = lag_term(spec.structure, k, spec.lag_term)?;
             let (stat, lag_used): (Vec<usize>, bool) = match (spec.structure, spec.which) {
                 (Structure::Network, _) => ((0..k).collect(), true),
                 (Structure::Classic, WhichBias::Both) => ((0..k).collect(), true),
-                (Structure::Classic, WhichBias::Individual) => (vec![0], true),
+                (Structure::Classic, WhichBias::Individual) => (vec![lt.unwrap_or(0)], true),
                 (Structure::Classic, WhichBias::Time) => {
                     if k < 2 {
                         return invalid("the time-effect bias needs a time fixed effect (a two-way model)");
                     }
-                    (vec![1], false)
+                    (vec![1 - lt.unwrap_or(0)], false)
                 }
             };
-            let lt = lag_term(spec.structure, k);
             if l > 0 && !lag_used {
                 return invalid(format!("bandwidth L = {l} has no effect: it only applies to the individual-effect bias"));
             }
@@ -223,7 +223,7 @@ pub(crate) fn bias_sum(d: &LogitData, spec: &BiasSpec, plan: &Plan, a: &[Vec<f64
                 let (off, ids) = match spec.order {
                     Some(o) => ordered_groups(f.codes, f.g, Some(&|r| o[r])),
                     None => {
-                        let key = default_key(spec.structure, &d.fe);
+                        let key = default_key(&d.fe, q);
                         ordered_groups(f.codes, f.g, key.as_deref())
                     }
                 };
@@ -341,9 +341,9 @@ fn coef_bias(d: &LogitData, abs: &mut dyn Absorber, eta: &[f64], spec: &BiasSpec
     let n = d.y.len();
     let p = d.x.len();
     let wt = |r: usize| d.weights.map_or(1.0, |w| w[r]);
-    let mut w = vec![0.0; n];
-    let mut v = vec![0.0; n];
-    let mut z = vec![0.0; n];
+    let mut w = zeros(n)?;
+    let mut v = zeros(n)?;
+    let mut z = zeros(n)?;
     for r in 0..n {
         let (m, d1, d2, _) = derivs(eta[r]);
         w[r] = wt(r) * d1;
@@ -353,8 +353,16 @@ fn coef_bias(d: &LogitData, abs: &mut dyn Absorber, eta: &[f64], spec: &BiasSpec
     let mx = center(abs, &d.x, &w, pool, ctx)?;
     ctx.check()?;
     let h = wcross(&mx, &w);
-    let a: Vec<Vec<f64>> = mx.iter().map(|c| c.iter().zip(&z).map(|(x, z)| x * z).collect()).collect();
-    let bl: Vec<Vec<f64>> = mx.iter().map(|c| c.iter().zip(&w).map(|(x, w)| x * w).collect()).collect();
+    // A = MX z (new), Bl = MX w (over MX).
+    let mut a = alloc_cols(p, n)?;
+    let mut bl = mx;
+    for (ac, bc) in a.iter_mut().zip(bl.iter_mut()) {
+        for r in 0..n {
+            ac[r] = bc[r] * z[r];
+            bc[r] *= w[r];
+        }
+    }
+    drop(z);
     let b = bias_sum(d, spec, plan, &a, &bl, &w, &v, 1.0)?;
     let hn: Vec<f64> = h.iter().map(|x| x / n as f64).collect();
     let neg: Vec<f64> = b.iter().map(|x| -x).collect();
@@ -392,18 +400,22 @@ pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], et
     let order = abs.row_order().to_vec();
     let n = order.len();
     let at = |k: usize| order[k] as usize;
-    let off: Vec<f64> = (0..n)
-        .map(|k| {
-            let i = at(k);
-            d.offset.map_or(0.0, |o| o[i]) + d.x.iter().zip(coef).map(|(x, c)| x[i] * c).sum::<f64>()
-        })
-        .collect();
-    let y: Vec<f64> = (0..n).map(|k| d.y[at(k)]).collect();
-    let wt: Vec<f64> = (0..n).map(|k| d.weights.map_or(1.0, |w| w[at(k)])).collect();
-    let mut eta: Vec<f64> = (0..n).map(|k| eta_start[at(k)]).collect();
+    let mut off = zeros(n)?;
+    let mut y = zeros(n)?;
+    let mut wt = zeros(n)?;
+    let mut eta = zeros(n)?;
+    for k in 0..n {
+        let i = at(k);
+        off[k] = d.offset.map_or(0.0, |o| o[i]) + d.x.iter().zip(coef).map(|(x, c)| x[i] * c).sum::<f64>();
+        y[k] = d.y[i];
+        wt[k] = d.weights.map_or(1.0, |w| w[i]);
+        eta[k] = eta_start[i];
+    }
     let mut dev = deviance(&y, &wt, &eta);
-    let mut w = vec![0.0; n];
-    let mut u = vec![0.0; n];
+    let mut w = zeros(n)?;
+    let mut u = zeros(n)?;
+    let mut block = zeros(n)?;
+    let mut next = zeros(n)?;
     let opts = SolveOpts { tol: CENTER_TOL, maxiter: CENTER_MAXITER, want_coefs: false };
     for it in 1..=RESOLVE_MAXITER {
         ctx.check()?;
@@ -415,9 +427,11 @@ pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], et
             u[k] = (y[k] - m) / d1;
         }
         abs.set_weights(Some(&w), pool, ctx)?;
-        let mut block = u.clone();
+        block.copy_from_slice(&u);
         abs.residualize(&mut block, 1, &opts, None, pool, ctx)?;
-        let mut next: Vec<f64> = (0..n).map(|k| eta[k] + (u[k] - block[k])).collect();
+        for k in 0..n {
+            next[k] = eta[k] + (u[k] - block[k]);
+        }
         let mut dev_next = deviance(&y, &wt, &next);
         let mut halved = false;
         let mut tries = 0;
@@ -434,14 +448,16 @@ pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], et
         if !step.is_finite() {
             return Err(RfError::Code(430, "bias correction: the re-estimation of the fixed effects diverged".into()));
         }
-        eta = next;
+        std::mem::swap(&mut eta, &mut next);
         dev = dev_next;
         if !halved && step < RESOLVE_TOL {
             // FE coefficients of the solution: the FE part eta - offset - X coef lies in the FE space.
-            let mut fe: Vec<f64> = (0..n).map(|k| eta[k] - off[k]).collect();
-            let info = abs.residualize(&mut fe, 1, &SolveOpts { want_coefs: true, ..opts }, None, pool, ctx)?;
+            for k in 0..n {
+                block[k] = eta[k] - off[k];
+            }
+            let info = abs.residualize(&mut block, 1, &SolveOpts { want_coefs: true, ..opts }, None, pool, ctx)?;
             let fe_coefs = info.coefs.ok_or_else(|| RfError::Internal("absorber returned no FE coefficients".into()))?;
-            let mut out = vec![0.0; n];
+            let mut out = next;
             for k in 0..n {
                 out[at(k)] = eta[k];
             }
