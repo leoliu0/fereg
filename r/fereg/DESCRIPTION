@@ -12,15 +12,18 @@ Description: Ordinary least squares, two-stage least squares, Poisson and
     heteroskedasticity-robust (HC1, HC2, HC3), multiway-clustered, CRV3,
     Newey-West, Driscoll-Kraay or Conley standard errors. The formula syntax,
     arguments, results and methods follow the 'fixest' package and reproduce
-    its estimates. The computations run in a parallel 'Rust' library that
-    eliminates the largest fixed effect exactly and solves for the others by
-    preconditioned conjugate gradient.
+    its estimates. Fixed-effects logit estimates can be corrected for the
+    incidental parameter bias (analytical and jackknife corrections) and give
+    average partial effects, with the interface of the 'alpaca' package. The
+    computations run in a parallel 'Rust' library that eliminates the largest
+    fixed effect exactly and solves for the others by preconditioned conjugate
+    gradient.
 License: MIT + file LICENSE
 URL: https://github.com/leoliu0/fereg
 BugReports: https://github.com/leoliu0/fereg/issues
 Depends: R (>= 4.2)
 Imports: stats
-Suggests: fixest, testthat (>= 3.0.0), data.table, generics, Matrix
+Suggests: fixest, alpaca, testthat (>= 3.0.0), data.table, generics, Matrix
 SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.85)
 Config/testthat/edition: 3
 Encoding: UTF-8

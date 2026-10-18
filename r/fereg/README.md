@@ -36,6 +36,21 @@ objects (`NW()`, `DK()`, `conley()`, `vcov_NW()`, `vcov_DK()`, `vcov_conley()`, 
 CRV3): the leave-one-cluster-out jackknife with fixest's cluster small-sample correction;
 after estimation it re-estimates the model.
 
+Fixed-effects logit: incidental-parameter bias correction and average partial effects with
+alpaca 0.3.5's interface. `biasCorr(fit, L = 0, panel.structure = "classic")` applies the
+analytical correction (Fernández-Val–Weidner; network version of Hinz–Stammann–Wanner with
+`panel.structure = "network"`; bandwidth `L` for weakly exogenous regressors; `bias =
+"individual"`/`"time"` corrects one bias only) or, with `method = "jackknife"`, logitfe's
+split-panel and delete-one jackknives (`jackknife = "ss2"`, `"ss1"`, `"js"`, `"sj"`, `"jj"`,
+`"double"`; `multiple = R` random partitions). The result is a fereg fit at the corrected
+coefficients, with the fixed effects re-estimated there, so `summary()` (any variance but
+CRV3), `etable()`, `fixef()` and `predict()` work as usual. `getAPEs(fit, n.pop = NULL)` gives
+the average partial effects (uncorrected, or corrected for a `biasCorr()` result) with
+delta-method standard errors and alpaca's finite-population term. Differences from alpaca
+(exact maximum likelihood and fixed-effect solves, the finite-population term over all
+observations when groups with a constant outcome are removed) are listed in `?biasCorr` and
+`?getAPEs`.
+
 Not implemented: `fixef.rm = "infinite_coef"`, the panel operators `l()`/`f()`/`d()`,
 `mvsw()`, the `.[]`/`..ctrl` formula macros, and variances given as functions or matrices.
 

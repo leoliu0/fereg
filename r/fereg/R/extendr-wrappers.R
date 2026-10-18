@@ -23,3 +23,15 @@ fereg_fixef <- function(state, nthreads, min_norm = FALSE) {
 fereg_fixef_references <- function(state, order, nthreads) {
   rust_result(.Call(wrap__fereg_fixef_references, state, as.integer(order), as.integer(nthreads)))
 }
+
+fereg_bias_dims <- function(input, spec, bias, nthreads) {
+  rust_result(.Call(wrap__fereg_bias_dims, input, spec, bias, as.integer(nthreads)))
+}
+
+fereg_bias_corr <- function(input, spec, bias, nthreads) {
+  rust_result(.Call(wrap__fereg_bias_corr, input, spec, bias, as.integer(nthreads)))
+}
+
+fereg_apes <- function(input, spec, at, ape, nthreads) {
+  rust_result(.Call(wrap__fereg_apes, input, spec, at, ape, as.integer(nthreads)))
+}

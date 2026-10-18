@@ -280,6 +280,12 @@ cached <- function(cache, key, make) {
 }
 
 fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
+  s <- fit_setup(m, args, data, env, n, w, off, drop, cache)
+  build_result(fereg_fit(s$input, s$spec, args$nthreads), s$info)
+}
+
+# The core's input and spec of one model, and what build_result() needs (`info`).
+fit_setup <- function(m, args, data, env, n, w, off, drop, cache) {
   model <- if (is.null(args$family)) "ols" else args$family
   is_iv <- length(m$endo) > 0
   if (is_iv && model != "ols") stop("fereg: IV is only available in feols()", call. = FALSE)
@@ -316,15 +322,13 @@ fit_one <- function(m, args, data, env, n, w, off, drop, cache) {
     fixef_maxiter = args$fixef.iter, glm_tol = args$glm.tol, glm_maxiter = args$glm.iter,
     keep_resid = !args$lean, keep_fixef = FALSE, keep_state = !args$lean
   )
-  out <- fereg_fit(input, spec, args$nthreads)
-
   info <- list(
     model = model, args = args, m = m, n = n, env = env, y = y, y_name = y_name, lin = lin,
     x_names = lin$names, endo_names = endo_names, inst_names = if (is_iv) inst$names else character(0),
     fe = fe, reg = reg, slope_names = slope_reg$names,
     vcov = v, ssc = ssc_used, weights = w, offset = off, drop = drop
   )
-  build_result(out, info)
+  list(input = input, spec = spec, info = info)
 }
 
 # ---- result object -----------------------------------------------------------------------------

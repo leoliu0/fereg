@@ -127,6 +127,7 @@ print.fereg <- function(x, n, ...) {
   if (!is.null(mi$offset)) cat("Offset: ", mi$offset, "\n", sep = "")
   if (!is.null(mi$weights)) cat("Weights: ", mi$weights, "\n", sep = "")
   for (l in fe_header_lines(x)) cat(l, "\n", sep = "")
+  if (inherits(x, "fereg_biascorr")) cat(bias_label(x), "\n", sep = "")
   cat("Standard-errors:", x$vcov_info$label, "\n")
 
   ct <- x$coeftable

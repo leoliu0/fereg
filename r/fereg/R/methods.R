@@ -100,32 +100,36 @@ check_coord_na <- function(object, values, expr, label) {
 # CRV3 after estimation: the jackknife refits need the data, so the model is estimated again on
 # the same rows with vcov = CRV3 (only its variance is used).
 refit_vcov <- function(object, v, ssc) {
-  r <- object$refit
-  data <- fetch_data(object)
-  n <- data_nrow(data)
-  args <- r$args
-  args$data <- data
-  args$vcov <- v
-  args$ssc <- ssc
-  args$lean <- TRUE
-  args$notes <- FALSE
-  w <- row_vector(args$weights, data, r$env, n, "weights")
-  if (!is.null(w)) w <- as_num(w, "weights")
-  off <- row_vector(args$offset, data, r$env, n, "offset")
-  if (!is.null(off)) off <- as_num(off, "offset")
-  new <- fit_one(r$m, args, data, r$env, n, w, off, r$drop, new.env(parent = emptyenv()))
+  if (inherits(object, "fereg_biascorr")) stop("fereg: CRV3 is not available after bias correction", call. = FALSE)
+  s <- refit_setup(object, list(vcov = v, ssc = ssc, lean = TRUE, notes = FALSE))
+  new <- build_result(fereg_fit(s$input, s$spec, s$info$args$nthreads), s$info)
   if (!identical(names(new$coefficients), names(object$coefficients))) {
     stop("fereg: the re-estimation for CRV3 does not reproduce the model; is the estimation data unchanged?", call. = FALSE)
   }
   apply_vcov(object, new$cov.scaled, new$vcov_info)
 }
 
-# The estimation data, found again from the call (as fixest does).
-fetch_data <- function(object) {
+# The estimation of `object` set up again on its data (found again from the call): fit_setup()'s
+# core input and spec, and build_result()'s info, with the arguments in `modify` replaced.
+refit_setup <- function(object, modify = list(), data = fetch_data(object)) {
+  r <- object$refit
+  n <- data_nrow(data)
+  args <- r$args
+  args$data <- data
+  args[names(modify)] <- modify
+  w <- row_vector(args$weights, data, r$env, n, "weights")
+  if (!is.null(w)) w <- as_num(w, "weights")
+  off <- row_vector(args$offset, data, r$env, n, "offset")
+  if (!is.null(off)) off <- as_num(off, "offset")
+  fit_setup(r$m, args, data, r$env, n, w, off, r$drop, new.env(parent = emptyenv()))
+}
+
+# The estimation data, found again from the call (as fixest does). `why` names what needs it.
+fetch_data <- function(object, why = NULL) {
   data <- tryCatch(eval(object$call$data, object$call_env), error = function(e) NULL)
   if (is.null(data) || !is.list(data) || data_nrow(data) != object$nobs_origin) {
-    stop("fereg: the estimation data (`", deparse1l(object$call$data), "`) cannot be found or has changed; ",
-      "clustered, Newey-West, Driscoll-Kraay, Conley and CRV3 variances after estimation need it", call. = FALSE)
+    why <- why %||% "clustered, Newey-West, Driscoll-Kraay, Conley and CRV3 variances after estimation need it"
+    stop("fereg: the estimation data (`", deparse1l(object$call$data), "`) cannot be found or has changed; ", why, call. = FALSE)
   }
   data
 }
