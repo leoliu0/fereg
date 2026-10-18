@@ -131,27 +131,10 @@ fn fe_resolve_is_exact() {
     }
 }
 
-#[test]
-fn bit_identical_across_threads() {
-    let p = panel(120, 7, 0.1, 3);
-    let input = two_way(&p);
+fn identical_across_threads(p: &Panel, methods: &[BiasOptions]) {
+    let input = two_way(p);
     let sp = FitSpec2::new();
-    let methods = [
-        BiasOptions { bandwidth: 1, ..BiasOptions::default() },
-        BiasOptions { method: jk(Variant::Ss2), ..BiasOptions::default() },
-        BiasOptions { method: jk(Variant::Jj), ..BiasOptions::default() },
-        BiasOptions {
-            method: BiasMethod::Jackknife(JackknifeOptions {
-                variant: Variant::Ss1,
-                partitions: vec![
-                    Permutation { individual: Some((0..120).rev().collect()), period: Some(vec![3, 1, 0, 6, 5, 4, 2]) },
-                    Permutation { individual: None, period: Some(vec![6, 5, 4, 3, 2, 1, 0]) },
-                ],
-            }),
-            ..BiasOptions::default()
-        },
-    ];
-    for o in &methods {
+    for o in methods {
         let run = |t: usize| {
             let ctx = Ctx::quiet(t);
             let b = fit::bias_corr(&input, &sp.0, o, &ctx).unwrap();
@@ -168,6 +151,83 @@ fn bit_identical_across_threads() {
         assert_eq!(format!("{:?}", b1.fit.stats), format!("{:?}", b16.fit.stats));
         assert_eq!(a1, a16);
     }
+}
+
+#[test]
+fn bit_identical_across_threads() {
+    // 40 000 rows (> 2 * CHUNK): every kernel runs on a multi-thread pool.
+    let p = panel(5000, 8, 0.0, 3);
+    assert!(p.y.len() >= 2 * fereg_core::par::CHUNK);
+    let perm_i: Vec<u32> = (0..5000).map(|i| (i * 7 + 3) % 5000).collect();
+    identical_across_threads(
+        &p,
+        &[
+            BiasOptions { bandwidth: 1, ..BiasOptions::default() },
+            BiasOptions { method: jk(Variant::Ss2), ..BiasOptions::default() },
+            BiasOptions {
+                method: BiasMethod::Jackknife(JackknifeOptions {
+                    variant: Variant::Ss1,
+                    partitions: vec![
+                        Permutation { individual: Some(perm_i), period: Some(vec![3, 1, 0, 7, 6, 5, 4, 2]) },
+                        Permutation { individual: None, period: Some(vec![7, 6, 5, 4, 3, 2, 1, 0]) },
+                    ],
+                }),
+                ..BiasOptions::default()
+            },
+        ],
+    );
+    // Delete-one variants (many concurrent subpanel fits) on a small panel.
+    identical_across_threads(&panel(120, 7, 0.1, 3), &[BiasOptions { method: jk(Variant::Jj), ..BiasOptions::default() }]);
+}
+
+#[test]
+fn rows_missing_a_cluster_value_stay_out_of_subpanels() {
+    // Fixest flavor drops rows with a missing cluster value from the estimation (and N*); the
+    // jackknife subpanels must not bring them back.
+    let p = panel(80, 6, 0.0, 41);
+    let cl: Vec<f64> = (0..p.y.len()).map(|r| if r % 17 == 5 { f64::NAN } else { (r % 9) as f64 }).collect();
+    let mut with = two_way(&p);
+    with.factors.push(FactorCol::F64(&cl));
+    with.factor_names.push("cl".into());
+    with.cluster = vec![vec![2]];
+    let keep: Vec<usize> = (0..p.y.len()).filter(|&r| cl[r].is_finite()).collect();
+    let sub = |v: &[f64]| keep.iter().map(|&r| v[r]).collect::<Vec<f64>>();
+    let q = Panel { i: sub(&p.i), t: sub(&p.t), y: sub(&p.y), x1: sub(&p.x1), x2: sub(&p.x2), d: sub(&p.d) };
+    let without = two_way(&q);
+    let ctx = Ctx::quiet(4);
+    let sp = fit::FitSpec { vcov: VcovKind::Cluster, ..spec(Flavor::Fixest) };
+    for variant in [Variant::Ss2, Variant::Jj] {
+        let o = BiasOptions { method: jk(variant), ..BiasOptions::default() };
+        let a = fit::bias_corr(&with, &sp, &o, &ctx).unwrap();
+        let b = fit::bias_corr(&without, &spec(Flavor::Fixest), &o, &ctx).unwrap();
+        check(&format!("{variant:?} coef"), &a.fit.coef, &b.fit.coef, 1e-10);
+        check(&format!("{variant:?} ape"), a.report.ape_jackknife.as_ref().unwrap(), b.report.ape_jackknife.as_ref().unwrap(), 1e-10);
+        assert_eq!(a.report.n_full, b.report.n_full);
+    }
+}
+
+#[test]
+fn logitfe_term_order_does_not_matter() {
+    // Fit layer, logitfe normalization with lags(1) (weak exogeneity forced): fe = [t, id] gives
+    // the numbers of fe = [id, t] (the lag groups are the panel variable's term).
+    let p = panel(150, 8, 0.1, 17);
+    let a_in = two_way(&p);
+    let mut b_in = two_way(&p);
+    b_in.fe.reverse();
+    let ctx = Ctx::quiet(4);
+    let sp = spec(Flavor::Fixest);
+    let o = BiasOptions { bandwidth: 1, normalization: Normalization::Logitfe, panel: Some(0), time: Some(1), ..BiasOptions::default() };
+    let ao = ApeOptions { n_pop: Some(f64::INFINITY), ..ApeOptions::default() };
+    let run = |input: &FitInput| {
+        let b = fit::bias_corr(input, &sp, &o, &ctx).unwrap();
+        let a = fit::apes(input, &sp, ApeAt::Corrected { options: &o, coef: &b.fit.coef, ape_jackknife: None }, &ao, &ctx).unwrap();
+        (b.fit.coef, a)
+    };
+    let ((ca, aa), (cb, ab)) = (run(&a_in), run(&b_in));
+    assert!(aa.weak_exo_used && aa.adj == 1.0);
+    check("coef", &cb, &ca, 1e-9);
+    check("ape", &ab.delta, &aa.delta, 1e-9);
+    check_mat("ape vcov", &ab.vcov, &aa.vcov, 1e-9);
 }
 
 /// Spec wrapper (keeps the test bodies short).
@@ -260,6 +320,36 @@ fn errors() {
         let e = err(fit::bias_corr(&input, &sp, &ind_only(v), &ctx));
         assert!(e.contains("multiple partitions have no effect"), "{e}");
     }
+    // Missing values in the time / panel variable on estimation rows.
+    let mut tna = p.t.clone();
+    tna[7] = f64::NAN;
+    let mut one_na = two_way(&p);
+    one_na.fe.truncate(1);
+    one_na.factors[1] = FactorCol::F64(&tna);
+    let e = err(fit::bias_corr(&one_na, &sp, &BiasOptions { method: jk(Variant::Jj), time: Some(1), ..d.clone() }, &ctx));
+    assert_eq!(e, "the time variable has missing values in the estimation sample");
+    let mut ina = p.i.clone();
+    ina[3] = f64::NAN;
+    let mut lf_na = two_way(&p);
+    lf_na.fe.truncate(1);
+    lf_na.fe[0].factors = vec![1];
+    lf_na.factors.push(FactorCol::F64(&ina));
+    lf_na.factor_names.push("id2".into());
+    let e = err(fit::bias_corr(&lf_na, &sp, &BiasOptions { normalization: Normalization::Logitfe, panel: Some(2), time: Some(1), ..d.clone() }, &ctx));
+    assert_eq!(e, "the panel variable has missing values in the estimation sample");
+    // Frequency weights.
+    let wts = vec![2.0; p.y.len()];
+    let mut fw = two_way(&p);
+    fw.weights = Some(&wts);
+    let e = err(fit::bias_corr(&fw, &fit::FitSpec { flavor: Flavor::Pyfixest, weights_type: fit::WeightsType::Fweights, ..sp.clone() }, &d, &ctx));
+    assert_eq!(e, "bias correction and APEs do not support frequency weights");
+    // n_pop: +Inf = infinite population (adj 1); NaN / negative are errors.
+    let inf = fit::apes(&input, &sp, ApeAt::Uncorrected, &ApeOptions { n_pop: Some(f64::INFINITY), ..ApeOptions::default() }, &ctx).unwrap();
+    assert_eq!(inf.adj, 1.0);
+    for bad in [f64::NAN, -1.0, f64::NEG_INFINITY] {
+        let e = fit::apes(&input, &sp, ApeAt::Uncorrected, &ApeOptions { n_pop: Some(bad), ..ApeOptions::default() }, &ctx).err().unwrap();
+        assert!(e.to_string().contains("n_pop"), "{e}");
+    }
     // n.pop below N*: note and adj = 0.
     let a = fit::apes(&input, &sp, ApeAt::Uncorrected, &ApeOptions { n_pop: Some(10.0), ..ApeOptions::default() }, &ctx).unwrap();
     assert_eq!(a.adj, 0.0);
@@ -325,4 +415,42 @@ fn timings() {
     let t = std::time::Instant::now();
     let b = fit::bias_corr(&input, &sp, &BiasOptions { method: jk(Variant::Jj), ..BiasOptions::default() }, &ctx).unwrap();
     println!("2e4 rows (2000 x 10) jj: {:.2}s, {} subpanel fits", t.elapsed().as_secs_f64(), b.report.n_fits);
+}
+
+/// Smoke at scale: 1e7 rows (1e6 x 10), 16 threads (run with `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn smoke_1e7() {
+    let t = std::time::Instant::now();
+    let p = panel(1_000_000, 10, 0.0, 7);
+    println!("1e7 data: {:.1}s", t.elapsed().as_secs_f64());
+    let input = two_way(&p);
+    let ctx = Ctx::quiet(16);
+    let sp = fit::FitSpec { glm_tol: 1e-10, fixef_tol: 1e-10, keep_fixef: false, ..spec(Flavor::Fixest) };
+    let t = std::time::Instant::now();
+    fit::fit(&input, &sp, &ctx).unwrap();
+    println!("1e7 fit: {:.2}s", t.elapsed().as_secs_f64());
+    let o = BiasOptions { bandwidth: 1, ..BiasOptions::default() };
+    let t = std::time::Instant::now();
+    let b = fit::bias_corr(&input, &sp, &o, &ctx).unwrap();
+    println!("1e7 analytical L=1 (incl. refit): {:.2}s, resolve {} iterations", t.elapsed().as_secs_f64(), b.report.resolve_iterations);
+    // FE score at the re-solved point.
+    let resid = b.fit.resid.as_ref().unwrap();
+    let mut si = vec![0.0f64; 1_000_001];
+    let mut st = vec![0.0f64; 11];
+    for (r, &i) in b.fit.obs.iter().enumerate() {
+        si[p.i[i as usize] as usize] += resid[r];
+        st[p.t[i as usize] as usize] += resid[r];
+    }
+    let score = si.iter().chain(&st).fold(0.0f64, |m, v| m.max(v.abs()));
+    println!("1e7 FE score max |sum_g (y - mu)|: {score:e}");
+    let t = std::time::Instant::now();
+    let a = fit::apes(&input, &sp, ApeAt::Corrected { options: &o, coef: &b.fit.coef, ape_jackknife: None }, &ApeOptions { n_pop: Some(2e7), ..ApeOptions::default() }, &ctx).unwrap();
+    println!("1e7 corrected APEs with n_pop and weak exogeneity (incl. refit + resolve): {:.2}s ({:?})", t.elapsed().as_secs_f64(), a.delta);
+    let t = std::time::Instant::now();
+    let a0 = fit::apes(&input, &sp, ApeAt::Uncorrected, &ApeOptions { n_pop: Some(2e7), weak_exo: true, ..ApeOptions::default() }, &ctx).unwrap();
+    println!("1e7 uncorrected APEs (incl. refit): {:.2}s ({:?})", t.elapsed().as_secs_f64(), a0.delta);
+    let t = std::time::Instant::now();
+    let j = fit::bias_corr(&input, &sp, &BiasOptions { method: jk(Variant::Ss2), ..BiasOptions::default() }, &ctx).unwrap();
+    println!("1e7 ss2: {:.2}s, resolve {} iterations", t.elapsed().as_secs_f64(), j.report.resolve_iterations);
 }

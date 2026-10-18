@@ -1,10 +1,15 @@
 # Reference fixtures for the fixed-effects-logit bias correction and APEs (alpaca normalization).
 # Run from the repository root:  Rscript crates/fereg-core/tests/data/bias/gen_alpaca.R
 # Writes (deterministic, fixed seeds) into crates/fereg-core/tests/data/bias/:
-#   a_classic.csv        i,t,y,x1,x2,d          N=200 x T=8 (d binary); period 8 is all-one among the
+#   a_classic.csv        i,t,y,x1,x2,d,w,off    N=200 x T=8 (d binary); period 8 is all-one among the
 #                                               individuals that are not all-zero, so after the
 #                                               constant-outcome individuals are dropped period 8 is
 #                                               dropped too (dropped rows inside kept individuals).
+#                                               w = prior weight round(U(0.5, 2), 3) (own seed),
+#                                               off = 0.3 sin(i t) + 0.1 t / 8 (offset; an additive
+#                                               f(i) + g(t) would be absorbed by the i + t FEs and
+#                                               leave beta unchanged); only the classic_w /
+#                                               classic_off cases use w / off.
 #   a_dynamic.csv        i,t,y,ylag,x1,d        N=200 x T=10, ylag = y of the previous period (NA at t=1).
 #   a_dynamic_unbal.csv  same columns           a_dynamic with 15% of the rows deleted at random; ylag is
 #                                               NOT recomputed: it stays the generated value of the
@@ -23,8 +28,15 @@
 #   fe (FE columns in formula order), n (estimation rows), n_full (N*: rows after NA removal, before
 #   the constant-outcome drop), n_pop (= 2 N*, the finite-population size used in "apes"),
 #   binary (per x: all values in {0,1} on the estimation sample),
+#   weights / offset (only classic_w / classic_off): name of the prior-weight / offset column,
 #   feglm      {coef, hessian, eta_sum, deviance}: alpaca::feglm with exact control
-#              feglmControl(dev.tol = 1e-20, center.tol = 1e-14, iter.max = 100)
+#              feglmControl(dev.tol = 1e-20, center.tol = 1e-14, iter.max = 100); eta includes the
+#              offset; deviance = -2 sum wt log-likelihood.
+#              classic_off (alpaca has no offset): EVERYTHING in the case is this script's
+#              reimplementation (source "reimpl"): exact joint Newton (beta + FEs) from fixest's fit to
+#              max|d eta| < 1e-13, biasCorr formulas, re-solve with offset X beta_c + off.
+#              Weights (classic_w): v = wt (y - mu), w = wt mu', z = wt mu'' everywhere (bias, MX,
+#              Hessian, scores, re-solve); APE Delta/delta and J are UNweighted (alpaca Q13).
 #   fixest_coef: fixest::feglm(family = "logit", glm.tol = 1e-12, fixef.tol = 1e-11) (cross-check;
 #              fixest 0.14.2 rejects fixef.tol <= 2.2e-12)
 #   bc         [{L, which:"both", coef, bias_term, coef_uncorr, source:"alpaca",
@@ -33,8 +45,8 @@
 #              beta_c); the *_c quantities come from this script's independent reimplementation at the
 #              EXACT FE re-solve (Newton on the FEs with offset X beta_c, max|d eta| < 1e-13):
 #              hessian_c = MX_c' W_c MX_c, vcov_hessian_c = solve(hessian_c),
-#              vcov_sandwich_c = H^-1 (G'G) H^-1 with G = MX_c * (y - mu_c), eta_c_sum = sum(eta_c),
-#              fe_score_max = max over all FE groups of |sum_g (y - mu_c)|.
+#              vcov_sandwich_c = H^-1 (G'G) H^-1 with G = MX_c * wt (y - mu_c), eta_c_sum = sum(eta_c),
+#              fe_score_max = max over all FE groups of |sum_g wt (y - mu_c)|.
 #   bc_which   (classic, oneway, dynamic_unbal) [{L, which, coef, bias_term, source:"reimpl"}]
 #              individual = GS over FE1 (+ spectral over FE1 if L > 0); time = GS over FE2 only.
 #   apes       [{object:"feglm"|"bc", L, n_pop (null|2N*), sampling ("independence"|"unrestricted"),
@@ -120,6 +132,9 @@ zero17 <- dc[t < TT, .(s = sum(y)), by = i][s == 0L, i]
 stopifnot(length(zero17) > 0L)
 dc[t == TT, y := as.integer(!(i %in% zero17))]
 setcolorder(dc, c("i", "t", "y", "x1", "x2", "d"))
+set.seed(20261021L)
+dc[, w := round(runif(.N, 0.5, 2), 3)]
+dc[, off := 0.3 * sin(i * t) + 0.1 * t / 8]
 dc <- wcsv(dc, "a_classic.csv")
 
 # 2) dynamic classic panel, ylag NA in the first period
@@ -200,11 +215,11 @@ gcov <- function(M, N, f) {                         # sum_g sum_{t<s} M_t N_s', 
   }
   C
 }
-fe_resolve <- function(y, off, Dm, eta0) {          # Newton on the FEs given the offset
+fe_resolve <- function(y, off, Dm, eta0, wt) {      # Newton on the FEs given the offset
   eta <- eta0                                       # eta0 - off must lie in the FE span (warm start)
   for (it in 1:100) {
-    mu <- plogis(eta); w <- mu * (1 - mu)
-    u <- (y - mu) / w                               # Newton step = P_w u (incremental form: the
+    mu <- plogis(eta); me <- mu * (1 - mu); w <- wt * me
+    u <- (y - mu) / me                              # Newton step = P_w u (incremental form: the
     step <- u - demean(u, w, Dm)[, 1]               # rounding error shrinks with the step)
     eta <- eta + step
     dlt <- max(abs(step))
@@ -213,12 +228,30 @@ fe_resolve <- function(y, off, Dm, eta0) {          # Newton on the FEs given th
   if (!(dlt < 1e-13)) stop("FE re-solve did not converge: ", dlt)
   eta
 }
+fit_exact <- function(S, beta, eta) {               # joint Newton on (beta, FEs), offset in eta
+  X <- S$X; y <- S$y
+  for (it in 1:100) {
+    mu <- plogis(eta); me <- mu * (1 - mu); w <- S$wt * me
+    u <- (y - mu) / me
+    MX <- demean(X, w, S$Dm); Mu <- demean(u, w, S$Dm)[, 1]
+    db <- solve(crossprod(MX * sqrt(w)), crossprod(MX, w * Mu))[, 1]
+    step <- u - Mu + as.vector(MX %*% db)           # fitted values of the WLS of u on [X, FE]
+    beta <- beta + db; eta <- eta + step
+    dlt <- max(abs(step))
+    if (dlt < 1e-13) break
+  }
+  if (!(dlt < 1e-13)) stop("exact fit did not converge: ", dlt)
+  list(beta = beta, eta = eta)
+}
+deviance_ <- function(y, eta, wt) -2 * sum(wt * ifelse(y == 1, plogis(eta, log.p = TRUE), plogis(-eta, log.p = TRUE)))
 
 # sample: NA removal, stable sort by FE values (alpaca setkeyv), iterated constant-outcome drop
 build_sample <- function(dat, cd) {
-  vars <- unique(c(cd$y, cd$x, cd$fe, cd$extra))
-  full <- dat[complete.cases(dat[, ..vars])]
-  full <- full[do.call(order, c(unname(as.list(full[, cd$fe, with = FALSE])), method = "radix"))]
+  vars <- unique(c(cd$y, cd$x, cd$fe, cd$extra, cd$weights, cd$offset))
+  cc <- which(complete.cases(dat[, ..vars]))
+  full <- dat[cc]
+  ord <- do.call(order, c(unname(as.list(full[, cd$fe, with = FALSE])), method = "radix"))
+  full <- full[ord]; rid <- cc[ord]
   yv <- full[[cd$y]]; keep <- rep(TRUE, nrow(full))
   repeat {
     n0 <- sum(keep)
@@ -231,9 +264,11 @@ build_sample <- function(dat, cd) {
   fe_all <- lapply(cd$fe, function(f) full[[f]])
   X_all <- as.matrix(full[, cd$x, with = FALSE]); storage.mode(X_all) <- "double"
   fes <- lapply(fe_all, function(f) f[keep])
+  wt <- if (is.null(cd$weights)) rep(1, nrow(full)) else as.numeric(full[[cd$weights]])
+  off <- if (is.null(cd$offset)) rep(0, nrow(full)) else as.numeric(full[[cd$offset]])
   list(full = full, keep = keep, y = as.numeric(yv[keep]), X = X_all[keep, , drop = FALSE],
        fes = fes, fe_all = fe_all, Dm = dummies(fes), n = sum(keep), Nf = nrow(full),
-       k = length(cd$fe), st = cd$st)
+       k = length(cd$fe), st = cd$st, rid = rid[keep], wt = wt[keep], off = off[keep])
 }
 
 bias_coef <- function(S, MX, w, v, z, L, which = "both") {
@@ -251,10 +286,12 @@ bias_coef <- function(S, MX, w, v, z, L, which = "both") {
   b
 }
 
-# APE ingredients at (beta, eta) on the retained rows (alpaca getAPEs.R:168-288)
+# APE ingredients at (beta, eta) on the retained rows (alpaca getAPEs.R:168-288). Prior weights enter
+# v, w, z only; Delta, Delta1, Delta2 and J use the unweighted derivatives (alpaca Q13).
 ape_point <- function(S, beta, eta, bc, L) {
-  y <- S$y; X <- S$X; p <- ncol(X); n <- S$n; Nf <- S$Nf; fes <- S$fes
-  mu <- plogis(eta); w <- mu.eta(eta); v <- y - mu; z <- d2(eta)
+  y <- S$y; X <- S$X; p <- ncol(X); n <- S$n; Nf <- S$Nf; fes <- S$fes; wt <- S$wt
+  mu <- plogis(eta); me <- mu.eta(eta); m2 <- d2(eta)
+  w <- wt * me; v <- wt * (y - mu); z <- wt * m2
   MX <- demean(X, w, S$Dm); H <- crossprod(MX * sqrt(w)); PX <- X - MX
   binary <- apply(X, 2, function(x) all(x %in% c(0, 1)))
   Delta <- Delta1 <- Delta2 <- matrix(NA_real_, n, p); J <- matrix(NA_real_, p, p)
@@ -266,8 +303,8 @@ ape_point <- function(S, beta, eta, bc, L) {
       J[, j] <- colSums(MX * Delta1[, j]) / Nf
       J[j, j] <- (sum(mu.eta(e1)) - sum(PX[, j] * Delta1[, j])) / Nf
     } else {
-      Delta[, j] <- beta[j] * w; Delta1[, j] <- beta[j] * z; Delta2[, j] <- beta[j] * d3(eta)
-      J[, j] <- colSums(MX * Delta1[, j]) / Nf; J[j, j] <- J[j, j] + sum(w) / Nf
+      Delta[, j] <- beta[j] * me; Delta1[, j] <- beta[j] * m2; Delta2[, j] <- beta[j] * d3(eta)
+      J[, j] <- colSums(MX * Delta1[, j]) / Nf; J[j, j] <- J[j, j] + sum(me) / Nf
     }
   }
   delta_unc <- colSums(Delta) / Nf
@@ -311,56 +348,81 @@ ape_vcov <- function(S, P, adj, sf, we, rows) {
 # ---------------------------------------------------------------- one case
 NPOP_GRID <- function(Nf) list(NULL, 2L * Nf)
 run_case <- function(cd, dat) {
-  rhs <- paste(paste(cd$x, collapse = " + "), "|", paste(cd$fe, collapse = " + "))
-  if (!is.null(cd$extra)) rhs <- paste(rhs, "|", paste(cd$extra, collapse = " + "))
-  fml <- as.formula(paste(cd$y, "~", rhs))
-  m <- feglm(fml, copy(dat), binomial(), control = CTL)
-  stopifnot(m$conv)
   S <- build_sample(dat, cd)
-  # same sample and row order as alpaca
-  stopifnot(S$n == m$nobs[["nobs"]], S$Nf == m$nobs[["nobs.full"]])
-  Xa <- model.matrix(m$formula, m$data, rhs = 1L)[, -1L, drop = FALSE]
-  stopifnot(all(Xa == S$X), all(m$data[[cd$y]] == S$y),
-            all(mapply(function(f, g) all(as.numeric(as.character(m$data[[f]])) == g), cd$fe, S$fes)))
   y <- S$y; X <- S$X; n <- S$n; Nf <- S$Nf; p <- ncol(X)
-  beta <- coef(m); eta <- m$eta
   binary <- apply(X, 2, function(x) all(x %in% c(0, 1)))
+  # fixest (cross-check and warm start of the exact joint Newton fit)
+  ffml <- as.formula(paste(cd$y, "~", paste(cd$x, collapse = " + "), "|", paste(cd$fe, collapse = " + ")))
+  fw <- if (is.null(cd$weights)) NULL else as.formula(paste("~", cd$weights))
+  fo <- if (is.null(cd$offset)) NULL else as.formula(paste("~", cd$offset))
+  fx <- fixest::feglm(ffml, data = as.data.frame(dat), family = "logit", weights = fw, offset = fo,
+                      glm.tol = 1e-12, fixef.tol = 1e-11)
+  stopifnot(fx$nobs == n)
+  lp <- rep(NA_real_, nrow(dat)); lp[fixest::obs(fx)] <- fx$linear.predictors
+  b0 <- coef(fx)[cd$x]; base <- S$off + as.vector(X %*% b0)
+  own <- fit_exact(S, b0, base + qr.fitted(qr(S$Dm), lp[S$rid] - base))
+  alp <- is.null(cd$offset)                          # alpaca has no offset
+  if (alp) {
+    rhs <- paste(paste(cd$x, collapse = " + "), "|", paste(cd$fe, collapse = " + "))
+    if (!is.null(cd$extra)) rhs <- paste(rhs, "|", paste(cd$extra, collapse = " + "))
+    m <- feglm(as.formula(paste(cd$y, "~", rhs)), copy(dat), binomial(), weights = cd$weights, control = CTL)
+    stopifnot(m$conv)
+    # same sample and row order as alpaca
+    stopifnot(S$n == m$nobs[["nobs"]], S$Nf == m$nobs[["nobs.full"]])
+    Xa <- model.matrix(m$formula, m$data, rhs = 1L)[, -1L, drop = FALSE]
+    stopifnot(all(Xa == S$X), all(m$data[[cd$y]] == S$y), all(m$weights == S$wt),
+              all(mapply(function(f, g) all(as.numeric(as.character(m$data[[f]])) == g), cd$fe, S$fes)))
+    beta <- coef(m); eta <- m$eta
+    # alpaca's exact-control fit is not always the MLE to 1e-10 (oneway: score 2.5e-7, coef 3.6e-9 off)
+    a_score <- max(abs(crossprod(X, S$wt * (y - plogis(eta)))))
+    cat(sprintf("  %s: alpaca beta-score max %.2g, rel diff own exact MLE vs alpaca %.2g\n", cd$name, a_score,
+                rel(own$beta, beta)))
+    chk("own_exact_fit_coef_vs_alpaca", rel(own$beta, beta), 1e-8)
+    chk("own_deviance_vs_alpaca", rel(deviance_(y, eta, S$wt), m$deviance), 1e-12)
+  } else {
+    m <- NULL; beta <- own$beta; eta <- own$eta
+  }
+  chk("fixest_coef_vs_own_exact_mle", rel(coef(fx)[cd$x], own$beta), 1e-8)
 
   # uncorrected fit: my MX vs alpaca's
   q <- ape_point(S, beta, eta, FALSE, 0L)
-  chk("MX_vs_alpaca", rel(q$MX, m$MX), 1e-9)
-  chk("H_vs_alpaca", rel(q$H, m$Hessian), 1e-10)
-  # fixest cross-check
-  ffml <- as.formula(paste(cd$y, "~", paste(cd$x, collapse = " + "), "|", paste(cd$fe, collapse = " + ")))
-  fx <- fixest::feglm(ffml, data = as.data.frame(dat), family = "logit", glm.tol = 1e-12, fixef.tol = 1e-11)
-  stopifnot(fx$nobs == n)
-  chk("fixest_coef_vs_alpaca", rel(coef(fx)[cd$x], beta), 1e-8)
+  if (alp) {
+    chk("MX_vs_alpaca", rel(q$MX, m$MX), 1e-9)
+    chk("H_vs_alpaca", rel(q$H, m$Hessian), 1e-10)
+    fit <- list(coef = vec(beta), hessian = rm_(m$Hessian), eta_sum = sum(m$eta), deviance = m$deviance)
+  } else {
+    chk("own_fit_score_max", max(abs(crossprod(X, q$v)), sapply(S$fes, function(f) max(abs(rowsum(q$v, f))))), 1e-10)
+    fit <- list(coef = vec(beta), hessian = rm_(q$H), eta_sum = sum(eta), deviance = deviance_(y, eta, S$wt))
+  }
 
   out <- list(name = cd$name, data = paste0("bias/", cd$file), structure = cd$st, y = cd$y,
               x = I(cd$x), fe = I(cd$fe), n = n, n_full = Nf, n_pop = 2L * Nf, binary = I(unname(binary)),
-              feglm = list(coef = vec(beta), hessian = rm_(m$Hessian), eta_sum = sum(m$eta),
-                           deviance = m$deviance),
-              fixest_coef = vec(coef(fx)[cd$x]))
+              feglm = fit, fixest_coef = vec(coef(fx)[cd$x]))
+  if (!is.null(cd$weights)) out$weights <- cd$weights
+  if (!is.null(cd$offset)) out$offset <- cd$offset
 
   apes <- list()
   add_apes <- function(obj, L, P, alp_obj) {
     for (np in NPOP_GRID(Nf)) for (sf in c("independence", "unrestricted")) for (we in c(FALSE, TRUE)) {
       adj <- if (is.null(np)) 0 else (np - Nf) / (np - 1)
       we_used <- if (obj == "bc") L > 0 else we
-      a <- getAPEs(alp_obj, n.pop = np, panel.structure = cd$st, sampling.fe = sf, weak.exo = we)
-      stopifnot(isTRUE(a$weak.exo == we_used))
+      a <- NULL
+      if (!is.null(alp_obj)) {
+        a <- getAPEs(alp_obj, n.pop = np, panel.structure = cd$st, sampling.fe = sf, weak.exo = we)
+        stopifnot(isTRUE(a$weak.exo == we_used))
+      }
       for (rows in c("retained", "all")) {
         V <- ape_vcov(S, P, adj, sf, we_used, rows)
         e <- list(object = obj, L = L, n_pop = if (is.null(np)) NA else np, sampling = sf,
                   weak_exo = we, weak_exo_used = we_used, rows = rows)
-        if (obj == "feglm" && rows == "retained") {
+        if (obj == "feglm" && rows == "retained" && !is.null(a)) {
           chk("ape_feglm_delta_reimpl_vs_alpaca", rel(P$delta, a$delta), 1e-10)
           chk("ape_feglm_vcov_reimpl_vs_alpaca", rel(V, a$vcov), 1e-10)
           e <- c(e, list(delta = vec(a$delta), vcov = rm_(a$vcov), bias_term = NULL, source = "alpaca"))
         } else {
           e <- c(e, list(delta = vec(P$delta), vcov = rm_(V),
                          bias_term = if (is.null(P$b)) NULL else vec(P$b), source = "reimpl"))
-          if (obj == "bc" && rows == "retained") {
+          if (obj == "bc" && rows == "retained" && !is.null(a)) {
             chk("ape_bc_alpaca_vs_exact_resolve_delta", rel(P$delta, a$delta), 1e-4)
             e <- c(e, list(alpaca_delta = vec(a$delta), alpaca_vcov = rm_(a$vcov)))
           }
@@ -373,22 +435,25 @@ run_case <- function(cd, dat) {
 
   bcl <- list()
   for (L in cd$Ls) {
-    bc <- biasCorr(m, L = L, panel.structure = cd$st)
     b <- bias_coef(S, q$MX, q$w, q$v, q$z, L)
     bt <- solve(q$H / n, -b); bcoef <- beta - bt
-    chk("bias_term_reimpl_vs_alpaca", rel(bt, bc$bias.term), 1e-10)
-    chk("coef_bc_reimpl_vs_alpaca", rel(bcoef, coef(bc)), 1e-10)
-    beta_c <- coef(bc)
-    off <- as.vector(X %*% beta_c)
-    eta_c <- fe_resolve(y, off, S$Dm, eta - as.vector(X %*% beta) + off)
+    if (alp) {
+      bc <- biasCorr(m, L = L, panel.structure = cd$st)
+      chk("bias_term_reimpl_vs_alpaca", rel(bt, bc$bias.term), 1e-10)
+      chk("coef_bc_reimpl_vs_alpaca", rel(bcoef, coef(bc)), 1e-10)
+      beta_c <- coef(bc); bt_out <- bc$bias.term; cu <- bc$coefficients.uncorr; src <- "alpaca"
+    } else {
+      bc <- NULL; beta_c <- bcoef; bt_out <- bt; cu <- beta; src <- "reimpl"
+    }
+    xb <- as.vector(X %*% beta_c)
+    eta_c <- fe_resolve(y, S$off + xb, S$Dm, eta - as.vector(X %*% beta) + xb, S$wt)
     P <- ape_point(S, beta_c, eta_c, TRUE, L)
-    res <- y - P$mu
-    fe_score <- max(sapply(S$fes, function(f) max(abs(rowsum(res, f)))))
+    fe_score <- max(sapply(S$fes, function(f) max(abs(rowsum(P$v, f)))))
     chk("fe_score_max_after_resolve", fe_score, 1e-10)
-    chk("H_c_alpaca_vs_exact_resolve", rel(P$H, bc$Hessian), 1e-4)
-    Hi <- solve(P$H); G <- P$MX * res
-    bcl[[length(bcl) + 1L]] <- list(L = L, which = "both", coef = vec(beta_c), bias_term = vec(bc$bias.term),
-      coef_uncorr = vec(bc$coefficients.uncorr), source = "alpaca", hessian_c = rm_(P$H),
+    if (alp) chk("H_c_alpaca_vs_exact_resolve", rel(P$H, bc$Hessian), 1e-4)
+    Hi <- solve(P$H); G <- P$MX * P$v
+    bcl[[length(bcl) + 1L]] <- list(L = L, which = "both", coef = vec(beta_c), bias_term = vec(bt_out),
+      coef_uncorr = vec(cu), source = src, hessian_c = rm_(P$H),
       vcov_hessian_c = rm_(Hi), vcov_sandwich_c = rm_(Hi %*% crossprod(G) %*% Hi),
       eta_c_sum = sum(eta_c), fe_score_max = fe_score)
     add_apes("bc", L, P, bc)
@@ -421,7 +486,11 @@ CASES <- list(
   list(name = "network3", file = "a_network.csv", dat = nw, y = "y", x = c("ylag", "x", "rta"),
        fe = c("exp_time", "imp_time", "pair"), st = "network", Ls = c(0L, 2L)),
   list(name = "network2", file = "a_network.csv", dat = nw, y = "y", x = c("x", "rta"),
-       fe = c("exp_time", "imp_time"), st = "network", Ls = c(0L, 2L)))
+       fe = c("exp_time", "imp_time"), st = "network", Ls = c(0L, 2L)),
+  list(name = "classic_w", file = "a_classic.csv", dat = dc, y = "y", x = c("x1", "x2", "d"), fe = c("i", "t"),
+       weights = "w", st = "classic", Ls = 0:1),
+  list(name = "classic_off", file = "a_classic.csv", dat = dc, y = "y", x = c("x1", "x2", "d"), fe = c("i", "t"),
+       offset = "off", st = "classic", Ls = 0:1))
 
 t0 <- proc.time()[["elapsed"]]
 res <- lapply(CASES, function(cd) { cat("case", cd$name, "\n"); run_case(cd, cd$dat) })

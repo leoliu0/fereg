@@ -23,15 +23,16 @@ fn opts(c: &J, l: usize, which: WhichBias) -> BiasOptions {
     BiasOptions { structure: structure(c), bandwidth: l, which, ..BiasOptions::default() }
 }
 
-/// Largest |sum_g (y - mu)| over every FE group of a fit (kept rows).
+/// Largest |sum_g w (y - mu)| over every FE group of a fit (kept rows).
 fn fe_score(case: &BCase, out: &fit::FitOutput) -> f64 {
     let resid = out.resid.as_ref().unwrap();
+    let wt = |i: usize| case.weights.as_ref().map_or(1.0, |w| case.csv.col(w)[i]);
     let mut worst = 0.0f64;
     for q in 0..case.fe.len() {
         let col = &case.factors[q];
         let mut sums: std::collections::BTreeMap<i64, f64> = Default::default();
         for (r, &i) in out.obs.iter().enumerate() {
-            *sums.entry(col[i as usize] as i64).or_default() += resid[r];
+            *sums.entry(col[i as usize] as i64).or_default() += wt(i as usize) * resid[r];
         }
         worst = sums.values().fold(worst, |m, v| m.max(v.abs()));
     }
