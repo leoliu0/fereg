@@ -235,8 +235,8 @@ Varlist: `y x… [offset] bcvar… touse out…` (`nbc` bias-correction variable
 Bias-correction variables (numeric; read at prepare's observations, where they must be nonmissing):
 - classic: the xtset panel variable, the xtset time variable (raw values), then for every partition
   r = 1…R of `multiple` one variable per letter of `perm` (panel first): logitfe's `pvar2`/`tvar2`,
-  the permuted ids drawn over the whole dataset by `_rf_bc_perm` (`set seed 13579`, moremata
-  `mm_sample()`, logitfe ado lines 3593-3632).
+  the permuted ids drawn over the whole dataset by `_rf_bc_perm` (`set seed 13579` and the algorithm
+  of moremata's `mm_sample()`, without moremata; logitfe ado lines 3593-3632).
 - network: one group code per absorbed term (any numeric code constant within the term's groups),
   then the xtset time variable when `lags` > 0.
 

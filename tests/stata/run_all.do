@@ -35,8 +35,8 @@ rf_need ivreg2.ado "ivreg2 4.1.12 "
 rf_need ranktest.ado "ranktest 2.0.04 "
 rf_need ppmlhdfe.ado "version 2.3.3 "
 rf_need logitfe.ado "logitfe v3.0.3 mgonza 24Feb2017"
-* moremata's mm_sample() (felogit's and logitfe's multiple()); a library added to the adopath in a
-* running session is found after -mata mlib index-
+* moremata's mm_sample() (logitfe's multiple(), the reference of test_logitfe; felogit does not need
+* it); a library added to the adopath in a running session is found after -mata mlib index-
 capture mata: mata which mm_sample()
 if (_rc) {
 	quietly mata: mata mlib index

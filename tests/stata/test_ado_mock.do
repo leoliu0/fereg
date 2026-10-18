@@ -580,31 +580,28 @@ stage_bc 2 2
 felogit y x1 x2, absorb(year id) jackknife
 expect_glm "bc=jackknife" "jk=ss2" "effects=ti" "nbc=2" "xnames=x1,x2"
 assert "`e(jackknife)'" == "ss2" & "`e(bctitle)'" == "Split-panel jackknife in both dimensions"
-capture mata: mata which mm_sample()
-if (!_rc) {
-	stage_bc 2 2
-	scalar __mock_bc_nfits = 12
-	set seed 99
-	local rs = c(rngstate)
-	felogit y x1 x2, absorb(id year) jackknife ss1 multiple(3) ibias(no)
-	assert c(rngstate) == "`rs'"
-	expect_glm "jk=ss1" "multiple=3" "perm=it" "which=time" "nbc=8"
-	assert "$rfmock_glm_nvars" == "12"
-	assert e(multiple) == 3 & "`e(split)'" == "both" & e(N_subpanels) == 12 & "`e(ibias)'" == "no"
-	assert "`e(bctitle3)'" == "3 multiple partitions in both the cross-section and the time dimension"
-	stage_bc 2 2
-	felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) i
-	expect_glm "multiple=2" "perm=i" "nbc=4"
-	assert "`e(split)'" == "individuals"
-	* partitions with no effect (logitfe: a note and the plain estimator): an error
-	stage_bc 2 2
-	log using "`lg'", text name(bc) replace
-	capture noisily felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) individuals tbias(no)
-	assert _rc == 198
-	log close bc
-	rf_log_has "`lg'" "multiple partitions have no effect: the subpanels"
-	assert r(found) == 1
-}
+stage_bc 2 2
+scalar __mock_bc_nfits = 12
+set seed 99
+local rs = c(rngstate)
+felogit y x1 x2, absorb(id year) jackknife ss1 multiple(3) ibias(no)
+assert c(rngstate) == "`rs'"
+expect_glm "jk=ss1" "multiple=3" "perm=it" "which=time" "nbc=8"
+assert "$rfmock_glm_nvars" == "12"
+assert e(multiple) == 3 & "`e(split)'" == "both" & e(N_subpanels) == 12 & "`e(ibias)'" == "no"
+assert "`e(bctitle3)'" == "3 multiple partitions in both the cross-section and the time dimension"
+stage_bc 2 2
+felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) i
+expect_glm "multiple=2" "perm=i" "nbc=4"
+assert "`e(split)'" == "individuals"
+* partitions with no effect (logitfe: a note and the plain estimator): an error
+stage_bc 2 2
+log using "`lg'", text name(bc) replace
+capture noisily felogit y x1 x2, absorb(id year) jackknife ss2 multiple(2) individuals tbias(no)
+assert _rc == 198
+log close bc
+rf_log_has "`lg'" "multiple partitions have no effect: the subpanels"
+assert r(found) == 1
 
 * network: group codes per absorbed term (missing absorbed values: dropped by prepare, so the
 * codes are nonmissing on the sample), the time variable with lags()

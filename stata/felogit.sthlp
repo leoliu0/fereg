@@ -200,7 +200,7 @@ variables share their ids, such as importer-exporter data). Every subpanel is a 
 before the drop of groups with a constant outcome and is refitted with {cmd:felogit}'s own sample rules.
 {opt multiple(R)} ({opt ss1} and {opt ss2}) averages the corrections of R random partitions; {opt individuals}
 or {opt time} randomizes only the order of the individuals or of the periods (default both). The partitions are
-{cmd:logitfe}'s and need {cmd:moremata} ({cmd:ssc install moremata}). Partitions that permute only a dimension
+{cmd:logitfe}'s (no other package is needed). Partitions that permute only a dimension
 the subpanels of the corrected bias do not split are an error ({it:multiple partitions have no effect}).
 
 {phang}
@@ -326,9 +326,10 @@ jackknife subpanel. The samples differ only in cascading cases.{p_end}
 {phang2}o {opt population(M)}: the factor is (M - N*)/(M - 1) with N* the number of observations before the drop of
 groups with a constant outcome (e(N_full)), as {cmd:logitfe}'s help defines it; {cmd:logitfe}'s code uses the
 number after the drop.{p_end}
-{phang2}o {opt multiple(R)} draws {cmd:logitfe}'s partitions ({cmd:set seed 13579} and {cmd:moremata}'s
-{cmd:mm_sample()}, in {cmd:logitfe}'s order), but leaves the random-number state of the session unchanged;
-{cmd:logitfe} leaves the seed at 13579 plus its draws. Time halves of a partition split the estimation sample's
+{phang2}o {opt multiple(R)} draws {cmd:logitfe}'s partitions ({cmd:set seed 13579} and the permutation algorithm
+of {cmd:moremata}'s {cmd:mm_sample()}, in {cmd:logitfe}'s order) without needing {cmd:moremata}, and leaves the
+random-number state of the session unchanged; {cmd:logitfe} leaves the seed at 13579 plus its draws. Time halves
+of a partition split the estimation sample's
 periods by their permuted order; {cmd:logitfe} splits the permuted ids of all periods of the dataset, which is
 the same when the sample contains every period.{p_end}
 {phang2}o {it:Options}: no option means no correction ({cmd:logitfe}'s default is {opt analytical}); {opt ape} alone

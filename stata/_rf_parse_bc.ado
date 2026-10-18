@@ -148,13 +148,6 @@ program _rf_parse_bc, sclass
 			exit 198
 		}
 	}
-	if (`multiple' > 0) {
-		capture mata: mata which mm_sample()
-		if (_rc) {
-			di as error "mm_panels() from -moremata- is required; type -ssc install moremata- to obtain it"
-			exit 499
-		}
-	}
 
 // ---------------------------------------------------------------------------
 // Model restrictions: no weights, the fe separation rule, regressors, absorbed terms

@@ -423,48 +423,42 @@ assert "`s(structure)'" == "network" & "`s(which)'" == "both" & "`s(ivar)'" == "
 assert "`s(title1)'" == "Type of included effects: exporter-time, importer-time and pair effects"
 bc_parse "ape network" "idcode#year ind_code#year"
 assert "`s(title1)'" == "Type of included effects: exporter-time and importer-time effects"
-capture mata: mata which mm_sample()
-if (_rc) {
-	bc_rc 499 "jackknife multiple(2)"
-	di as text "(moremata not found: multiple() acceptance and _rf_bc_perm not tested)"
+* multiple() needs no other package (felogit draws logitfe's partitions itself)
+bc_parse "jackknife ss1 multiple(3) time" "idcode year"
+assert "`s(multiple)'" == "3" & "`s(perm)'" == "t" & "`s(split)'" == "time"
+assert "`s(title3)'" == "3 multiple partitions in the time dimension"
+bc_parse "jackknife multiple(4)" "idcode year"
+assert "`s(perm)'" == "it" & "`s(split)'" == "both"
+assert "`s(title3)'" == "4 multiple partitions in both the cross-section and the time dimension"
+bc_parse "jackknife ss1 multiple(2) individuals time ibias(no)" "idcode year"
+assert "`s(perm)'" == "it" & "`s(which)'" == "time"
+bc_parse "jackknife ss2 multiple(2) individuals ibias(no)" "idcode year"
+assert "`s(perm)'" == "i" & "`s(title3)'" == "2 multiple partitions in the cross-section dimension"
+* partitions that permute only a dimension the subpanels do not split: an error (logitfe: a note)
+bc_rc 198 "jackknife ss2 multiple(3) individuals tbias(no)"
+bc_rc 198 "jackknife ss1 multiple(3) time ibias(no)"
+bc_rc 198 "jackknife ss1 multiple(3) time" "year"
+bc_rc 198 "jackknife ss2 multiple(3) individuals" "idcode"
+* _rf_bc_perm: one permutation of the distinct values per partition and dimension, the
+* session's RNG state unchanged
+set seed 271828
+local before = c(rngstate)
+_rf_bc_perm, ivar(idcode) tvar(year) multiple(2) perm(it) names(__p1 __t1 __p2 __t2)
+assert c(rngstate) == "`before'"
+foreach v in __p1 __p2 {
+	quietly tab idcode
+	local n = r(r)
+	quietly bysort idcode (`v'): assert `v' == `v'[1]
+	quietly bysort `v' (idcode): assert idcode == idcode[1]
+	quietly summarize `v'
+	assert r(min) == 1 & r(max) == `n'
 }
-else {
-	bc_parse "jackknife ss1 multiple(3) time" "idcode year"
-	assert "`s(multiple)'" == "3" & "`s(perm)'" == "t" & "`s(split)'" == "time"
-	assert "`s(title3)'" == "3 multiple partitions in the time dimension"
-	bc_parse "jackknife multiple(4)" "idcode year"
-	assert "`s(perm)'" == "it" & "`s(split)'" == "both"
-	assert "`s(title3)'" == "4 multiple partitions in both the cross-section and the time dimension"
-	bc_parse "jackknife ss1 multiple(2) individuals time ibias(no)" "idcode year"
-	assert "`s(perm)'" == "it" & "`s(which)'" == "time"
-	bc_parse "jackknife ss2 multiple(2) individuals ibias(no)" "idcode year"
-	assert "`s(perm)'" == "i" & "`s(title3)'" == "2 multiple partitions in the cross-section dimension"
-	* partitions that permute only a dimension the subpanels do not split: an error (logitfe: a note)
-	bc_rc 198 "jackknife ss2 multiple(3) individuals tbias(no)"
-	bc_rc 198 "jackknife ss1 multiple(3) time ibias(no)"
-	bc_rc 198 "jackknife ss1 multiple(3) time" "year"
-	bc_rc 198 "jackknife ss2 multiple(3) individuals" "idcode"
-	* _rf_bc_perm: one permutation of the distinct values per partition and dimension, the
-	* session's RNG state unchanged
-	set seed 271828
-	local before = c(rngstate)
-	_rf_bc_perm, ivar(idcode) tvar(year) multiple(2) perm(it) names(__p1 __t1 __p2 __t2)
-	assert c(rngstate) == "`before'"
-	foreach v in __p1 __p2 {
-		quietly tab idcode
-		local n = r(r)
-		quietly bysort idcode (`v'): assert `v' == `v'[1]
-		quietly bysort `v' (idcode): assert idcode == idcode[1]
-		quietly summarize `v'
-		assert r(min) == 1 & r(max) == `n'
-	}
-	quietly tab year
-	assert r(r) == 15
-	quietly summarize __t1
-	assert r(min) == 1 & r(max) == 15
-	assert __p1 != __p2 in 1
-	drop __p1 __t1 __p2 __t2
-}
+quietly tab year
+assert r(r) == 15
+quietly summarize __t1
+assert r(min) == 1 & r(max) == 15
+assert __p1 != __p2 in 1
+drop __p1 __t1 __p2 __t2
 di as text "ok  _rf_parse_bc"
 
 di as result "TEST_PARSE PASSED"

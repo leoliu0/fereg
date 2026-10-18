@@ -702,28 +702,35 @@ foreach m in "ss1" "ss2" "ss2 i" "ss2 t" "ss1 tbias(no) t" "ss1 ibias(no) i" "ss
 	fcmp mul`k' 1e-4 1e-4 0 : felogit `S', absorb(id year) jackknife `m' multiple(3) tol(1e-12)
 	assert c(rngstate) == "`rs'"
 }
-* the draws themselves: _rf_bc_perm vs logitfe's multiplepvar()/multipletvar()
+* the draws themselves: _rf_bc_perm (moremata's algorithm, without moremata) vs logitfe's
+* multiplepvar()/multipletvar(), also with a time variable of one value, where moremata draws no
+* random number (the second partition's panel draws show the random numbers used)
 capture program drop lfe_draws
 program lfe_draws
 	version 11.2, missing
+	args tv
 	set seed 13579
 	forval r = 1/2 {
 		sort id
 		mata: multiplepvar("id")
-		sort year
-		mata: multipletvar("year")
+		sort `tv'
+		mata: multipletvar("`tv'")
 		rename pvar2 lp`r'
 		rename tvar2 lt`r'
 	}
 end
 gen long obs = _n
-lfe_draws
-sort obs
-_rf_bc_perm, ivar(id) tvar(year) multiple(2) perm(it) names(fp1 ft1 fp2 ft2)
-forval r = 1/2 {
-	assert fp`r' == lp`r' & ft`r' == lt`r'
+gen byte one = 1
+foreach tv in year one {
+	lfe_draws `tv'
+	sort obs
+	_rf_bc_perm, ivar(id) tvar(`tv') multiple(2) perm(it) names(fp1 ft1 fp2 ft2)
+	forval r = 1/2 {
+		assert fp`r' == lp`r' & ft`r' == lt`r'
+	}
+	drop lp* lt* fp* ft*
 }
-drop obs lp* lt* fp* ft*
+drop obs one
 sort id year
 di as result "D1 static passed"
 
