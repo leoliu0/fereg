@@ -19,6 +19,8 @@ pub struct BCase {
     pub factor_names: Vec<String>,
     pub factors: Vec<Vec<f64>>,
     pub fe: Vec<FeTerm>,
+    pub weights: Option<String>,
+    pub offset: Option<String>,
 }
 
 impl BCase {
@@ -32,7 +34,21 @@ impl BCase {
             }
         }
         let factors = factor_names.iter().map(|f| csv.col(f).to_vec()).collect();
-        BCase { name: j.at("name").str().to_string(), csv, y: j.at("y").str().to_string(), x: j.at("x").strs(), factor_names, factors, fe }
+        let opt = |k: &str| match j.get(k) {
+            Some(J::Str(v)) => Some(v.clone()),
+            _ => None,
+        };
+        BCase {
+            name: j.at("name").str().to_string(),
+            csv,
+            y: j.at("y").str().to_string(),
+            x: j.at("x").strs(),
+            factor_names,
+            factors,
+            fe,
+            weights: opt("weights"),
+            offset: opt("offset"),
+        }
     }
 
     pub fn factor(&self, name: &str) -> usize {
@@ -47,6 +63,8 @@ impl BCase {
             factors: self.factors.iter().map(|v| FactorCol::F64(v)).collect(),
             factor_names: self.factor_names.clone(),
             fe: self.fe.clone(),
+            weights: self.weights.as_ref().map(|w| self.csv.col(w)),
+            offset: self.offset.as_ref().map(|o| self.csv.col(o)),
             ..Default::default()
         }
     }

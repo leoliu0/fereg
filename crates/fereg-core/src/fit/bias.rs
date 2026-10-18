@@ -15,7 +15,7 @@
 
 use super::glm::{self, Estimated};
 use super::input;
-use super::{CoefSource, FactorCol, FitInput, FitOutput, FitSpec, Flavor, Model, VcovKind};
+use super::{CoefSource, FactorCol, FitInput, FitOutput, FitSpec, Flavor, Model, VcovKind, WeightsType};
 use crate::absorber::FeCoefs;
 use crate::api::{Ctx, Family};
 use crate::bias::{self, BiasSpec, FeCodes, FullSample, JkPanel, JkSpec, LogitData, LogitfePanel, SubFit};
@@ -171,6 +171,9 @@ fn check(input: &FitInput, spec: &FitSpec, structure: Structure) -> Result<(), R
     if !input.endog.is_empty() {
         return invalid("bias correction is not available for IV models");
     }
+    if spec.weights_type == WeightsType::Fweights && input.weights.is_some() {
+        return invalid("bias correction and APEs do not support frequency weights");
+    }
     bias::check_structure(structure, input.fe.len())
 }
 
@@ -182,6 +185,17 @@ fn pre_rows(input: &FitInput, spec: &FitSpec, pool: &Pool) -> Result<Vec<u32>, R
 
 fn codes_on(input: &FitInput, factors: &[usize], rows: &[u32], pool: &Pool) -> Result<Codes, RfError> {
     input::interaction_kept_codes(&input.factors, factors, rows, pool)
+}
+
+/// Error when the factor `f` (the panel or time variable, `what`) is missing on one of `rows`.
+fn no_missing(input: &FitInput, f: usize, rows: &[u32], what: &str) -> Result<(), RfError> {
+    if f >= input.factors.len() {
+        return invalid("the panel or time variable references an invalid factor");
+    }
+    if rows.iter().any(|&i| input::factor_missing(&input.factors[f], i as usize)) {
+        return invalid(format!("the {what} variable has missing values in the estimation sample"));
+    }
+    Ok(())
 }
 
 /// Integer value of a factor column at row i (calendar time).
@@ -249,6 +263,8 @@ fn logitfe_ids(input: &FitInput, opts: &BiasOptions, kept: &[u32], pool: &Pool) 
     if pf >= input.factors.len() || tf >= input.factors.len() {
         return invalid("the panel or time variable references an invalid factor");
     }
+    no_missing(input, pf, kept, "panel")?;
+    no_missing(input, tf, kept, "time")?;
     let individual_effects = input.fe.iter().any(|t| t.factors == [pf]);
     let time_effects = input.fe.iter().any(|t| t.factors == [tf]);
     if input.fe.iter().any(|t| t.factors != [pf] && t.factors != [tf]) {
@@ -269,6 +285,15 @@ fn lf_panel(ids: &LfIds) -> LogitfePanel<'_> {
     }
 }
 
+/// The lag-group term of the request: the panel variable's term under the logitfe normalization
+/// (the terms may come in any order), FE1 / FE3 otherwise.
+fn lag_of(input: &FitInput, opts: &BiasOptions) -> Option<usize> {
+    match opts.normalization {
+        Normalization::Logitfe => opts.panel.and_then(|pf| input.fe.iter().position(|t| t.factors == [pf])),
+        Normalization::Alpaca => None,
+    }
+}
+
 /// The bias that exists in the model for the requested one.
 fn resolve_which(input: &FitInput, opts: &BiasOptions) -> Result<WhichBias, RfError> {
     let (ind, time) = match opts.normalization {
@@ -279,7 +304,10 @@ fn resolve_which(input: &FitInput, opts: &BiasOptions) -> Result<WhichBias, RfEr
         }
     };
     if opts.structure == Structure::Network {
-        return Ok(WhichBias::Both);
+        return match opts.which {
+            WhichBias::Both => Ok(WhichBias::Both),
+            _ => invalid("network structure: only the correction of both biases is available"),
+        };
     }
     match opts.which {
         WhichBias::Both if ind && time => Ok(WhichBias::Both),
@@ -307,13 +335,16 @@ fn jk_dims(input: &FitInput, opts: &BiasOptions, pre: &[u32], pool: &Pool) -> Re
     if opts.structure == Structure::Network {
         return Ok((None, None));
     }
-    let check_f = |f: usize| if f < input.factors.len() { Ok(f) } else { invalid("the panel or time variable references an invalid factor") };
+    let check_f = |f: usize, what: &str| no_missing(input, f, pre, what).map(|_| f);
     let (ind_f, per_f): (Option<Vec<usize>>, Option<Vec<usize>>) = match opts.normalization {
         Normalization::Alpaca => (
             Some(input.fe[0].factors.clone()),
-            if input.fe.len() == 2 { Some(input.fe[1].factors.clone()) } else { opts.time.map(check_f).transpose()?.map(|f| vec![f]) },
+            if input.fe.len() == 2 { Some(input.fe[1].factors.clone()) } else { opts.time.map(|f| check_f(f, "time")).transpose()?.map(|f| vec![f]) },
         ),
-        Normalization::Logitfe => (opts.panel.map(check_f).transpose()?.map(|f| vec![f]), opts.time.map(check_f).transpose()?.map(|f| vec![f])),
+        Normalization::Logitfe => (
+            opts.panel.map(|f| check_f(f, "panel")).transpose()?.map(|f| vec![f]),
+            opts.time.map(|f| check_f(f, "time")).transpose()?.map(|f| vec![f]),
+        ),
     };
     let ind = ind_f.map(|f| codes_on(input, &f, pre, pool)).transpose()?;
     let per = per_f.map(|f| codes_on(input, &f, pre, pool)).transpose()?;
@@ -401,6 +432,7 @@ fn correct(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, which: WhichBia
                 structure: opts.structure,
                 which,
                 bandwidth: opts.bandwidth,
+                lag_term: lag_of(input, opts),
                 order: None,
                 logitfe: lf.as_ref().map(lf_panel),
             };
@@ -530,7 +562,11 @@ impl<'a> SubFitter<'a> {
         let spec = FitSpec { vcov: VcovKind::Iid, keep_resid: true, keep_fixef: false, keep_state: false, ..spec.clone() };
         let in_full = pre.iter().map(|i| kept.binary_search(i).is_ok()).collect();
         let shortcut = spec.flavor == Flavor::Fixest;
-        let drop0 = (0..input.n).map(|i| input.drop.is_some_and(|d| d[i])).collect();
+        // Every row outside the N* rows stays dropped (also rows the full fit excluded only for a
+        // missing variance-matrix variable, which `base` no longer carries); subpanels drop the
+        // masked-out N* rows on top.
+        let mut drop0 = vec![true; input.n];
+        pre.iter().for_each(|&i| drop0[i as usize] = false);
         SubFitter { base, spec, xj, binary, pre, in_full, shortcut, full, drop0 }
     }
 
@@ -602,10 +638,12 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
         let mut notes = Vec::new();
         let adj = match opts.n_pop {
             None => 0.0,
+            Some(m) if m.is_nan() || m < 0.0 => return invalid("n_pop must be a non-negative number (or +Inf for an infinite population)"),
             Some(m) if m < n_full as f64 => {
                 notes.push("Size of the entire population is lower than the full sample size. Correction factor set to zero.".to_string());
                 0.0
             }
+            Some(m) if m.is_infinite() => 1.0,
             Some(m) => (m - n_full as f64) / (m - 1.0),
         };
         // Pre-drop rows: kept index and FE codes (sampling term), time order (logitfe).
@@ -621,8 +659,9 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
             _ => None,
         };
         let full_order: Option<Vec<i64>> = match opts_c {
-            Some(o) if o.normalization == Normalization::Logitfe && adj > 0.0 => {
+            Some(o) if o.normalization == Normalization::Logitfe && adj > 0.0 && !retained => {
                 let tf = o.time.expect("checked by logitfe_ids");
+                no_missing(input, tf, &pre, "time")?;
                 Some(pre.iter().map(|&i| int_value(&input.factors[tf], i as usize)).collect::<Result<_, _>>()?)
             }
             _ => None,
@@ -643,6 +682,7 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
                             structure: options.structure,
                             which: which.expect("corrected"),
                             bandwidth: options.bandwidth,
+                            lag_term: lag_of(input, options),
                             order: None,
                             logitfe: lf.as_ref().map(lf_panel),
                         };
@@ -664,7 +704,8 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
             fe: full_codes.iter().map(|c| FeCodes { codes: &c.codes, g: c.n as usize }).collect(),
             order: full_order.as_deref(),
         });
-        let aspec = bias::ApeSpec { structure, sampling: opts.sampling, weak_exo, adj, correction, full, want_vcov: true };
+        let lag_term = opts_c.and_then(|o| lag_of(input, o));
+        let aspec = bias::ApeSpec { structure, sampling: opts.sampling, weak_exo, lag_term, adj, correction, full, want_vcov: true };
         #[cfg(test)]
         let a = if retained {
             bias::apes_retained(&d, est.session.absorber.as_mut(), &coef, &eta, &aspec, ctx)?

@@ -25,7 +25,7 @@ use crate::absorber::{Absorber, SolveOpts};
 use crate::api::Ctx;
 use crate::error::RfError;
 use crate::gather;
-use crate::par::Pool;
+use crate::par::{self, Pool};
 
 mod analytical;
 mod ape;
@@ -140,9 +140,16 @@ pub struct BiasSpec<'a> {
     pub which: WhichBias,
     /// Bandwidth L of weakly exogenous regressors.
     pub bandwidth: usize,
+    /// Index into [`LogitData::fe`] of the lag-group term: the individuals (classic) or the
+    /// pairs (network). `None` = FE1 (classic), FE3 (network with three terms). The individual
+    /// bias of the [`Normalization::Alpaca`] normalization sums over this term, the time bias over
+    /// the other one; the spectral term and the APE weak-exogeneity covariance run within its
+    /// groups. Hosts whose absorbed terms may come in any order (Stata `absorb(year id)`) pass it.
+    pub lag_term: Option<usize>,
     /// [`Normalization::Alpaca`]: time key of every kept row ordering the rows inside the lag
-    /// groups (FE1 groups classic, FE3 network); ties keep row order. `None`: alpaca's order
-    /// (classic two-way: FE2 code; one-way: row order; network: (FE1 code, FE2 code)).
+    /// groups; ties keep row order. `None`: the codes of the other terms are taken as the time
+    /// order (classic two-way: the time term's codes; one-way: row order; network: (FE1, FE2) codes
+    /// of the pair's rows), so those codes must be numbered in time order.
     pub order: Option<&'a [i64]>,
     /// Required with [`Normalization::Logitfe`].
     pub logitfe: Option<LogitfePanel<'a>>,
@@ -210,12 +217,24 @@ pub(crate) fn check_structure(structure: Structure, k: usize) -> Result<(), RfEr
     }
 }
 
+/// `p` zeroed columns of `n` values (fallible: [`RfError::OutOfMemory`]).
+pub(crate) fn alloc_cols(p: usize, n: usize) -> Result<Vec<Vec<f64>>, RfError> {
+    (0..p).map(|_| par::alloc_vec(n, 0.0)).collect()
+}
+
+/// A zeroed vector of `n` values (fallible).
+pub(crate) fn zeros(n: usize) -> Result<Vec<f64>, RfError> {
+    par::alloc_vec(n, 0.0)
+}
+
 /// Kept-order columns residualized on the fixed effects under the weights `w` (kept order). The
 /// absorber is left with these weights.
 pub(crate) fn center(abs: &mut dyn Absorber, cols: &[&[f64]], w: &[f64], pool: &Pool, ctx: &Ctx) -> Result<Vec<Vec<f64>>, RfError> {
     let order = abs.row_order().to_vec();
-    let w_rows: Vec<f64> = order.iter().map(|&k| w[k as usize]).collect();
+    let mut w_rows = zeros(order.len())?;
+    w_rows.iter_mut().zip(&order).for_each(|(o, &k)| *o = w[k as usize]);
     abs.set_weights(Some(&w_rows), pool, ctx)?;
+    drop(w_rows);
     let r = cols.len();
     if r == 0 {
         return Ok(Vec::new());
@@ -224,7 +243,7 @@ pub(crate) fn center(abs: &mut dyn Absorber, cols: &[&[f64]], w: &[f64], pool: &
     let opts = SolveOpts { tol: CENTER_TOL, maxiter: CENTER_MAXITER, want_coefs: false };
     abs.residualize(&mut block, r, &opts, None, pool, ctx)?;
     let n = order.len();
-    let mut out = vec![vec![0.0; n]; r];
+    let mut out = alloc_cols(r, n)?;
     for (row, &k) in order.iter().enumerate() {
         for (j, o) in out.iter_mut().enumerate() {
             o[k as usize] = block[row * r + j];
@@ -326,24 +345,30 @@ pub(crate) fn ordered_groups(codes: &[u32], g: usize, key: Option<&dyn Fn(usize)
     (off, ids)
 }
 
-/// Time-order key of the lag groups under alpaca's rules, over rows with the given term codes:
-/// classic two-way: FE2 code; network with three terms: (FE1, FE2) codes; otherwise row order.
-pub(crate) fn default_key<'a>(structure: Structure, fe: &'a [FeCodes<'a>]) -> Option<Box<dyn Fn(usize) -> i64 + 'a>> {
-    match (structure, fe.len()) {
-        (Structure::Classic, 2) => Some(Box::new(move |r| i64::from(fe[1].codes[r]))),
-        (Structure::Network, 3) => {
-            let g2 = fe[1].g as i64;
-            Some(Box::new(move |r| i64::from(fe[0].codes[r]) * g2 + i64::from(fe[1].codes[r])))
+/// Time-order key inside the groups of the lag term `lag` under alpaca's rules: the codes of the
+/// other terms in term order (lexicographic); none (row order) for a one-way model.
+pub(crate) fn default_key<'a>(fe: &'a [FeCodes<'a>], lag: usize) -> Option<Box<dyn Fn(usize) -> i64 + 'a>> {
+    let others: Vec<usize> = (0..fe.len()).filter(|&q| q != lag).collect();
+    match others[..] {
+        [] => None,
+        [a] => Some(Box::new(move |r| i64::from(fe[a].codes[r]))),
+        [a, b] => {
+            let gb = fe[b].g as i64;
+            Some(Box::new(move |r| i64::from(fe[a].codes[r]) * gb + i64::from(fe[b].codes[r])))
         }
         _ => None,
     }
 }
 
-/// Index of the lag-group term (FE1 classic, FE3 network with three terms).
-pub(crate) fn lag_term(structure: Structure, k: usize) -> Option<usize> {
-    match (structure, k) {
-        (Structure::Classic, _) => Some(0),
-        (Structure::Network, 3) => Some(2),
-        _ => None,
+/// Index of the lag-group term: the designated one, else FE1 (classic) / FE3 (network with three
+/// terms); `None` for a two-way network (no pair term).
+pub(crate) fn lag_term(structure: Structure, k: usize, designated: Option<usize>) -> Result<Option<usize>, RfError> {
+    match (designated, structure, k) {
+        (Some(q), _, _) if q >= k => invalid("bias correction: the lag-group term index is out of range"),
+        (Some(_), Structure::Network, 2) => invalid("bias correction: a two-way network model has no pair term to group lags by"),
+        (Some(q), _, _) => Ok(Some(q)),
+        (None, Structure::Classic, _) => Ok(Some(0)),
+        (None, Structure::Network, 3) => Ok(Some(2)),
+        _ => Ok(None),
     }
 }
