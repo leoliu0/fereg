@@ -349,7 +349,7 @@ impl Session {
                 let fe = self.fe_rule_rows(&d.y, &seed, pool);
                 let nfe = fe.iter().filter(|v| **v).count();
                 if nfe > 0 {
-                    ctx.log(&format!("{{txt}}({nfe} observation{} separated by a fixed effect: all-zero outcomes within the group)", plural(nfe)));
+                    ctx.log(&format!("{{txt}}({nfe} observation{} separated by a fixed effect: all-zero outcomes in a group)", plural(nfe)));
                 }
                 for ((s, c), f) in seed.iter_mut().zip(cert.iter_mut()).zip(fe) {
                     if f {

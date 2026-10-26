@@ -154,4 +154,11 @@ estat ic
 assert el(r(S), 1, 4) == e(df_m) + 1 & reldif(el(r(S), 1, 3), e(ll)) < 1e-12
 estat vce
 rcof "noi estat bogus" == 321
+* bootstrap and jackknife prefixes: their e(bias) is a matrix and they post no e(b2), so the
+* replay shows no table of average partial effects (it failed with r(3200) in 0.4.1)
+bootstrap, reps(3) seed(1) nodots: felogit union age ttl_exp, absorb(idcode year)
+assert "`e(prefix)'" == "bootstrap" & "`e(cmd)'" == "felogit"
+felogit
+jackknife, cluster(idcode) nodots: felogit union age ttl_exp if idcode <= 300, absorb(idcode year)
+assert "`e(prefix)'" == "jackknife"
 di as result "test_logit passed"

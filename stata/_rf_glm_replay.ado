@@ -21,8 +21,10 @@ program _rf_glm_replay, rclass
 	if ("`header'" == "") _rf_glm_header
 	if ("`table'" == "") _coef_table, `options' `eform' `or'
 	return add // r(level), r(table), ...
-	* felogit with a bias correction or APEs: logitfe's table of average partial effects
-	if ("`table'" == "" & "`e(cmd)'" == "felogit" & "`e(bias)'" != "") {
+	* felogit with a bias correction or APEs: logitfe's table of average partial effects (not
+	* after a prefix such as bootstrap, whose e(bias) is a matrix and which posts no e(b2))
+	if ("`table'" == "" & "`e(cmd)'" == "felogit" & "`e(prefix)'" == "" & ///
+		inlist("`e(bias)'", "analytical", "jackknife", "none")) {
 		ApeTable, `options'
 		return add
 	}

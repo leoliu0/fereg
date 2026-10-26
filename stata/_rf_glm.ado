@@ -431,7 +431,7 @@ program _rf_glm, eclass
 			}
 			if (`num_fesep0' > 0) {
 				local ns = strtrim(string(`num_fesep0', "%20.0f"))
-				di as text "(dropped `ns' observations with all-zero or all-one outcomes within a fixed-effect group)"
+				di as text "{p 0 1 2}(dropped `ns' observations with all-zero or all-one outcomes within a fixed-effect group){p_end}"
 			}
 		}
 	}
