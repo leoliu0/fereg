@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: parse felogit's bias-correction and APE options (logitfe 3.0.3 names)
+*! version 0.5.0  fereg: parse felogit's bias-correction and APE options (logitfe 3.0.3 names)
 *
 * Usage (from _rf_glm.ado, after _rf_parse_absorb):
 *   _rf_parse_bc, family(logit|poisson) [analytical jackknife ape ss1 ss2 js sj jj double

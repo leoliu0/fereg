@@ -3,7 +3,7 @@
 The ado files in `stata/` drive the plugin through `plugin call`. This file is the contract
 between them; change both sides together.
 
-Version: `fereg_core::VERSION` (`0.4.1`). Every ado sets `local rf_version 0.4.1`, and
+Version: `fereg_core::VERSION` (`0.5.0`). Every ado sets `local rf_version 0.5.0`, and
 `_rf_load` (no arguments) compares it with `cmd=version`.
 
 ## Calling convention

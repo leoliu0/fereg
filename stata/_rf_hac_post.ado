@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: ivreghdfe 1.1.4's variance descriptions (e(vce), e(hacsubtitleV), kernel e())
+*! version 0.5.0  fereg: ivreghdfe 1.1.4's variance descriptions (e(vce), e(hacsubtitleV), kernel e())
 * Usage (after -ereturn post-):
 *   _rf_hac_post, hac(0|1) [kernel() tvar() ivar() robust(0|1) clustvar() clusters() kiefer(0|1)
 *                 psd() bwchoice() nopost]

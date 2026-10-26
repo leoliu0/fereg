@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.1}{...}
+{* *! version 0.5.0}{...}
 {vieweralsosee "[R] logit" "help logit"}{...}
 {vieweralsosee "fereg" "help fereg"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}

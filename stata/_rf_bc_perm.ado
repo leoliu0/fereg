@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: random partitions of felogit's jackknife multiple(), as logitfe 3.0.3 draws them
+*! version 0.5.0  fereg: random partitions of felogit's jackknife multiple(), as logitfe 3.0.3 draws them
 *
 * Usage: _rf_bc_perm, ivar(varname) tvar(varname) multiple(#) perm(i|t|it) names(newvarlist)
 *

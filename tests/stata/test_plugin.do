@@ -48,7 +48,7 @@ end
 
 * ---------------------------------------------------------------- version
 plugin call _rf_plugin, version
-assert "`_rf_version'" == "0.4.1"
+assert "`_rf_version'" == "0.5.0"
 di as txt "version: `_rf_version'"
 
 * ---------------------------------------------------------------- selftest

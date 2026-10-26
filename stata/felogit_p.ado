@@ -1,4 +1,4 @@
-*! version 0.4.1  felogit: predict
+*! version 0.5.0  felogit: predict
 program define felogit_p
 	version 16
 	_assert "`e(cmd)'" == "felogit"

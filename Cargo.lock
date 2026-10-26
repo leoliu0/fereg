@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "fereg-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "approx-chol",
  "faer",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "fereg-py"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "faer",
  "fereg-core",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "fereg-stata"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cc",
  "faer",

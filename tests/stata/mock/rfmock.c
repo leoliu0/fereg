@@ -56,7 +56,7 @@ static int copy_mat(const char *src, const char *dst) {
 }
 STDLL stata_call(int argc, char *argv[]) {
   if (argc < 1) return 198;
-  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.4.1"); return 0; }
+  if (!strcmp(argv[0], "version")) { SF_macro_save("__rf_version", "0.5.0"); return 0; }
   if (!strcmp(argv[0], "prepare")) {
     record("rfmock_prepare", argc, argv);
     int tv = SF_nvars(); double n = 0; ST_double t, z; char s[2048];

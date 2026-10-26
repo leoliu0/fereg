@@ -126,13 +126,13 @@ plotting and DiD helpers. `Felogit.bias_corr()` and `Felogit.get_apes()` follow 
 
 ```r
 # Linux, or any R >= 4.2 with Rust (cargo, rustc >= 1.85) installed:
-install.packages("https://github.com/leoliu0/fereg/releases/download/v0.4.1/fereg_0.4.1.tar.gz",
+install.packages("https://github.com/leoliu0/fereg/releases/download/v0.5.0/fereg_0.5.0.tar.gz",
                  repos = NULL, type = "source")
 ```
 
-Binaries for R 4.6 on macOS (`fereg_0.4.1_R4.6_macos-arm64.tgz`,
-`fereg_0.4.1_R4.6_macos-x86_64.tgz`) and Windows (`fereg_0.4.1.zip`) are on the
-[release page](https://github.com/leoliu0/fereg/releases/tag/v0.4.1); download one and run
+Binaries for R 4.6 on macOS (`fereg_0.5.0_R4.6_macos-arm64.tgz`,
+`fereg_0.5.0_R4.6_macos-x86_64.tgz`) and Windows (`fereg_0.5.0.zip`) are on the
+[release page](https://github.com/leoliu0/fereg/releases/tag/v0.5.0); download one and run
 `install.packages("<path to file>", repos = NULL, type = "binary")`.
 
 ```r

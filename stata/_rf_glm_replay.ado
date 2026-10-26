@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: display (or quiet r(table)) of feppml and felogit results
+*! version 0.5.0  fereg: display (or quiet r(table)) of feppml and felogit results
 program _rf_glm_replay, rclass
 	version 16
 	syntax [, EForm IRr OR noHEader noTABle noFOOTnote *]
