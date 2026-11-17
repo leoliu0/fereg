@@ -504,10 +504,24 @@ fn multiway_meat_with(
 }
 
 /// Kept-order values -> row order (`out[k] = v[row_order[k]]`).
-pub(crate) fn to_row_order<T: Copy + Send + Sync + Default>(v: &[T], row_order: &[u32], pool: &Pool) -> Result<Vec<T>, RfError> {
-    let mut out = par::alloc_vec(row_order.len(), T::default())?;
-    pool.install(|| out.par_iter_mut().zip(row_order.par_iter()).for_each(|(o, &k)| *o = v[k as usize]));
-    Ok(out)
+pub(crate) fn to_row_order<T: Copy + Send + Sync>(v: &[T], row_order: &[u32], pool: &Pool) -> Result<Vec<T>, RfError> {
+    let n = row_order.len();
+    let mut out = par::alloc_uninit::<T>(n)?;
+    if n <= CHUNK || pool.threads() <= 1 {
+        for (o, &k) in out.iter_mut().zip(row_order) {
+            o.write(v[k as usize]);
+        }
+    } else {
+        pool.install(|| {
+            out.par_chunks_mut(CHUNK).zip(row_order.par_chunks(CHUNK)).for_each(|(oc, rc)| {
+                for (o, &k) in oc.iter_mut().zip(rc) {
+                    o.write(v[k as usize]);
+                }
+            })
+        });
+    }
+    // SAFETY: every slot of `0..n` was written from `row_order`.
+    Ok(unsafe { par::assume_init(out) })
 }
 
 /// k-subsets of 0..q in lexicographic order (reghdfe `reghdfe_choose_n_k` enumerates the same set

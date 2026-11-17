@@ -10,6 +10,8 @@
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
+#[cfg(target_arch = "x86_64")]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use rayon::prelude::*;
 
@@ -149,6 +151,12 @@ pub fn map_chunks<T: Send>(
     f: impl Fn(usize, Range<usize>) -> T + Sync,
 ) -> Vec<T> {
     let nc = n_chunks(n, chunk);
+    if nc == 0 {
+        return Vec::new();
+    }
+    if nc == 1 || pool.threads() <= 1 {
+        return (0..nc).map(|c| f(c, chunk_range(c, n, chunk))).collect();
+    }
     pool.install(|| (0..nc).into_par_iter().map(|c| f(c, chunk_range(c, n, chunk))).collect())
 }
 
@@ -161,6 +169,27 @@ pub fn sum_chunks(
     k: usize,
     f: impl Fn(Range<usize>, &mut [f64]) + Sync,
 ) -> Vec<f64> {
+    let nc = n_chunks(n, chunk);
+    if nc == 0 || k == 0 {
+        return vec![0.0; k];
+    }
+    if nc == 1 {
+        let mut out = vec![0.0; k];
+        f(0..n, &mut out);
+        return out;
+    }
+    if pool.threads() <= 1 {
+        let mut out = vec![0.0; k];
+        let mut acc = vec![0.0; k];
+        for c in 0..nc {
+            acc.fill(0.0);
+            f(chunk_range(c, n, chunk), &mut acc);
+            for (o, &v) in out.iter_mut().zip(&acc) {
+                *o += v;
+            }
+        }
+        return out;
+    }
     let parts = map_chunks(pool, n, chunk, |_, range| {
         let mut acc = vec![0.0; k];
         f(range, &mut acc);
@@ -183,13 +212,40 @@ pub fn alloc_vec<T: Clone>(n: usize, value: T) -> Result<Vec<T>, RfError> {
     Ok(v)
 }
 
+/// Cached runtime check for AVX2 + FMA on x86-64 (`false` elsewhere). Constant across all threads
+/// of a process, so dispatching on it preserves bitwise thread-count invariance and keeps the
+/// binary portable to baseline `x86-64-v2` hosts.
+#[inline(always)]
+pub(crate) fn has_avx2_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static FLAG: AtomicU8 = AtomicU8::new(0);
+        match FLAG.load(Ordering::Relaxed) {
+            2 => true,
+            1 => false,
+            _ => {
+                let ok = std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma");
+                FLAG.store(if ok { 2 } else { 1 }, Ordering::Relaxed);
+                ok
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Maximum compile-time column width specialized by [`dispatch_width!`].
+pub(crate) const MAX_DISPATCH_WIDTH: usize = 12;
+
 /// Width of a kernel instance: the const `R`, or the runtime `r` when `R = 0`.
 #[inline(always)]
 pub(crate) fn width<const R: usize>(r: usize) -> usize {
     if R == 0 { r } else { R }
 }
 
-/// Calls `f::<R, B>(args)` with `R` = `$r` as a constant (1..=8; 0 = runtime width, see
+/// Calls `f::<R, B>(args)` with `R` = `$r` as a constant (1..=12; 0 = runtime width, see
 /// [`width`]) and the const bool `B` = `$b`, so per-row loops over the columns are unrolled and
 /// a flag-dependent branch (e.g. unit weights, where w*v = v exactly) disappears.
 macro_rules! dispatch_width {
@@ -211,6 +267,14 @@ macro_rules! dispatch_width {
             (7, false) => $f::<7, false>($($a),*),
             (8, true) => $f::<8, true>($($a),*),
             (8, false) => $f::<8, false>($($a),*),
+            (9, true) => $f::<9, true>($($a),*),
+            (9, false) => $f::<9, false>($($a),*),
+            (10, true) => $f::<10, true>($($a),*),
+            (10, false) => $f::<10, false>($($a),*),
+            (11, true) => $f::<11, true>($($a),*),
+            (11, false) => $f::<11, false>($($a),*),
+            (12, true) => $f::<12, true>($($a),*),
+            (12, false) => $f::<12, false>($($a),*),
             (_, true) => $f::<0, true>($($a),*),
             (_, false) => $f::<0, false>($($a),*),
         }
@@ -242,7 +306,7 @@ pub unsafe fn assume_init<T>(v: Vec<MaybeUninit<T>>) -> Vec<T> {
 /// [`alloc_vec`] filled in parallel chunks instead of serially on the calling thread.
 pub fn alloc_par<T: Copy + Send + Sync>(n: usize, value: T, pool: &Pool) -> Result<Vec<T>, RfError> {
     let mut v = alloc_uninit(n)?;
-    if n <= CHUNK {
+    if n <= CHUNK || pool.threads() <= 1 {
         v.fill(MaybeUninit::new(value));
     } else {
         pool.install(|| v.par_chunks_mut(CHUNK).for_each(|c| c.fill(MaybeUninit::new(value))));
@@ -258,21 +322,34 @@ pub fn copy_into(buf: Option<Vec<f64>>, src: &[f64], pool: &Pool) -> Result<Vec<
         Some(b) if b.len() == src.len() => b,
         _ => {
             let mut v = alloc_uninit(src.len())?;
-            pool.install(|| v.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| {
-                for (o, &x) in o.iter_mut().zip(s) {
+            if src.len() <= CHUNK || pool.threads() <= 1 {
+                for (o, &x) in v.iter_mut().zip(src) {
                     *o = MaybeUninit::new(x);
                 }
-            }));
-            // SAFETY: the zip covers every element (same length as `src`).
+            } else {
+                pool.install(|| v.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| {
+                    for (o, &x) in o.iter_mut().zip(s) {
+                        *o = MaybeUninit::new(x);
+                    }
+                }));
+            }
+            // SAFETY: the loop/zip covers every element (same length as `src`).
             return Ok(unsafe { assume_init(v) });
         }
     };
-    pool.install(|| out.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| o.copy_from_slice(s)));
+    if src.len() <= CHUNK || pool.threads() <= 1 {
+        out.copy_from_slice(src);
+    } else {
+        pool.install(|| out.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(o, s)| o.copy_from_slice(s)));
+    }
     Ok(out)
 }
 
 /// Every value is finite and strictly positive (valid observation weights).
 pub fn all_positive(v: &[f64], pool: &Pool) -> bool {
+    if v.len() <= CHUNK || pool.threads() <= 1 {
+        return v.iter().all(|x| x.is_finite() && *x > 0.0);
+    }
     pool.install(|| v.par_chunks(CHUNK).all(|c| c.iter().all(|x| x.is_finite() && *x > 0.0)))
 }
 

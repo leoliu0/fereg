@@ -31,6 +31,7 @@ struct Data {
     /// y, x1..x10.
     cols: Vec<Vec<f64>>,
     yp: Vec<f64>,
+    yb: Vec<f64>,
 }
 
 fn generate(n: usize) -> Data {
@@ -52,7 +53,14 @@ fn generate(n: usize) -> Data {
         })
         .collect::<Vec<Vec<f64>>>();
     let yp = cols[1].par_iter().map(|x| (0.3 * x - 0.5).exp().round()).collect();
-    Data { indiv, year, firm, cols, yp }
+    let yb = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let p = 1.0 / (1.0 + (-(0.5 * cols[1][i] - 0.3 * cols[2][i])).exp());
+            if SplitMix64::stream(seed + 9999, i as u64).next_f64() < p { 1.0 } else { 0.0 }
+        })
+        .collect();
+    Data { indiv, year, firm, cols, yp, yb }
 }
 
 fn session_path(d: &Data, k: usize, ctx: &Ctx) -> Vec<f64> {
@@ -200,6 +208,46 @@ fn fixef_times(d: &Data, nfe: usize, reps: usize, ctx: &Ctx) -> [f64; 6] {
     ]
 }
 
+fn bias_times(d: &Data, k: usize, reps: usize, ctx: &Ctx) -> (f64, f64, u64) {
+    let input = FitInput {
+        n: d.indiv.len(),
+        y: &d.yb,
+        x: d.cols[1..=k].iter().map(Vec::as_slice).collect(),
+        factors: vec![FactorCol::F64(&d.indiv), FactorCol::F64(&d.year)],
+        factor_names: vec!["indiv".into(), "year".into()],
+        fe: (0..2).map(|q| FeTerm { factors: vec![q], intercept: true, slopes: vec![] }).collect(),
+        ..Default::default()
+    };
+    let spec = FitSpec { model: fit::Model::Logit, keep_fixef: false, keep_state: false, ..FitSpec::default() };
+    let bopts = fit::BiasOptions { bandwidth: 1, ..Default::default() };
+    let aopts = fit::ApeOptions::default();
+    let (mut tb, mut ta) = (Vec::new(), Vec::new());
+    let mut hash = 0u64;
+    for _ in 0..reps {
+        let t0 = Instant::now();
+        let bf = fit::bias_corr(&input, &spec, &bopts, ctx).expect("bias_corr");
+        tb.push(t0.elapsed().as_secs_f64());
+        let t1 = Instant::now();
+        let ap = fit::apes(
+            &input,
+            &spec,
+            fit::ApeAt::Corrected { options: &bopts, coef: &bf.fit.coef, ape_jackknife: None },
+            &aopts,
+            ctx,
+        )
+        .expect("apes");
+        ta.push(t1.elapsed().as_secs_f64());
+        hash = bf
+            .fit
+            .coef
+            .iter()
+            .chain(&ap.delta)
+            .chain(&ap.vcov)
+            .fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ v.to_bits()).wrapping_mul(0x0100_0000_01b3));
+    }
+    (med(&mut tb), med(&mut ta), hash)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
@@ -219,6 +267,13 @@ fn main() {
         }
     }
     println!("n = {n}, threads = {threads}, median of {reps} runs (seconds)");
+    if args.iter().any(|a| a == "--bias-only") {
+        for k in [1usize, 5] {
+            let (tb, ta, hash) = bias_times(&d, k, reps, &ctx);
+            println!("bias k={k:<2}  bias_corr={tb:.4}s  apes={ta:.4}s  total={:.4}s  bits={hash:016x}", tb + ta);
+        }
+        return;
+    }
     if !args.iter().any(|a| a == "--fixef-only") {
         println!("{:>11} {:>12} {:>12} {:>7}", "model", "Session", "fit", "ratio");
         for k in [1usize, 10] {

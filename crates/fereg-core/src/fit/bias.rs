@@ -13,6 +13,8 @@
 //! missing values and zero weights (before singleton, perfect-fit and separation drops). The
 //! jackknife subpanels are masks over those N* rows.
 
+use rayon::prelude::*;
+
 use super::glm::{self, Estimated};
 use super::input;
 use super::{CoefSource, FactorCol, FitInput, FitOutput, FitSpec, Flavor, Model, VcovKind, WeightsType};
@@ -24,7 +26,7 @@ use crate::error::RfError;
 use crate::factor::Codes;
 use crate::glm::family;
 use crate::session::Term;
-use crate::par::{self, Pool};
+use crate::par::{self, CHUNK, Pool};
 
 /// Options of [`bias_corr`] (alpaca `biasCorr`).
 #[derive(Clone, Debug, PartialEq)]
@@ -223,17 +225,22 @@ struct Kept {
     xj: Vec<usize>,
 }
 
-fn kept_columns(input: &FitInput, est: &Estimated) -> Result<Kept, RfError> {
+fn kept_columns(input: &FitInput, est: &Estimated, pool: &Pool) -> Result<Kept, RfError> {
     if est.ones || est.intercept {
         return Err(RfError::Internal("bias correction: unexpected intercept with fixed effects".into()));
     }
     let kept = &est.session.kept_index;
-    let at = |v: &[f64]| kept.iter().map(|&i| v[i as usize]).collect::<Vec<f64>>();
+    let at = |v: &[f64]| -> Result<Vec<f64>, RfError> { crate::vcov::to_row_order(v, kept, pool) };
     let xj: Vec<usize> = (0..est.nsent).filter(|&j| est.parts.status[j] == 0).collect();
     if xj.is_empty() {
         return invalid("bias correction needs at least one regressor");
     }
-    Ok(Kept { y: at(input.y), x: xj.iter().map(|&j| at(input.x[j])).collect(), offset: input.offset.map(at), xj })
+    Ok(Kept {
+        y: at(input.y)?,
+        x: xj.iter().map(|&j| at(input.x[j])).collect::<Result<_, _>>()?,
+        offset: input.offset.map(at).transpose()?,
+        xj,
+    })
 }
 
 fn logit_data<'a>(k: &'a Kept, terms: &'a [Term], weights: Option<&'a [f64]>, n_full: usize) -> LogitData<'a> {
@@ -414,7 +421,7 @@ pub fn bias_corr(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, ctx: &Ctx
 
 #[allow(clippy::too_many_arguments)]
 fn correct(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, which: WhichBias, pre: &[u32], est: &mut Estimated, ctx: &Ctx, pool: &Pool) -> Result<BiasReport, RfError> {
-    let kc = kept_columns(input, est)?;
+    let kc = kept_columns(input, est, pool)?;
     let coef0: Vec<f64> = kc.xj.iter().map(|&j| est.parts.coef[j]).collect();
     let eta0 = est.parts.eta.clone();
     let deviance_uncorr = est.parts.deviance;
@@ -437,7 +444,7 @@ fn correct(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, which: WhichBia
                 logitfe: lf.as_ref().map(lf_panel),
             };
             let bw = bias::plan_bandwidth(&d, &bspec)?;
-            let r = bias::analytical(&d, est.session.absorber.as_mut(), &coef0, &eta0, &bspec, ctx)?;
+            let r = bias::analytical_in(&d, est.session.absorber.as_mut(), &coef0, &eta0, &bspec, pool, ctx)?;
             notes.extend(r.notes);
             (r.coef, r.eta, r.fe_coefs, bw, None, None, 0, r.iterations)
         }
@@ -450,7 +457,7 @@ fn correct(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, which: WhichBia
             }
             let binary: Vec<bool> = kc.x.iter().map(|x| x.iter().all(|&v| v == 0.0 || v == 1.0)).collect();
             let xs: Vec<&[f64]> = kc.x.iter().map(Vec::as_slice).collect();
-            let ape0 = bias::ape_point(&xs, &binary, &coef0, &eta0, n_full as f64);
+            let ape0 = bias::ape_point_in(&xs, &binary, &coef0, &eta0, n_full as f64, pool);
             let (ind, per) = jk_dims(input, opts, pre, pool)?;
             let dbl = (jo.variant == Variant::Double && which == WhichBias::Both).then(|| double_ids(input, pre)).transpose()?;
             let panel = JkPanel {
@@ -466,8 +473,8 @@ fn correct(input: &FitInput, spec: &FitSpec, opts: &BiasOptions, which: WhichBia
             let out = bias::jackknife(&panel, &jspec, &full, |_, keep, fctx| closure.fit(keep, fctx), ctx)?;
             notes.extend(out.notes);
             let d = logit_data(&kc, &est.session.terms, est.session.weights.as_deref(), n_full);
-            let start = bias::shifted_eta(&d, &eta0, &coef0, &out.coef);
-            let r = bias::resolve_fe(&d, est.session.absorber.as_mut(), &out.coef, &start, ctx)?;
+            let start = bias::shifted_eta(&d, &eta0, &coef0, &out.coef, pool);
+            let r = bias::resolve_in(&d, est.session.absorber.as_mut(), &out.coef, &start, pool, ctx)?;
             (out.coef, r.eta, r.fe_coefs, 0, Some(out.ape), Some(ape0), out.n_fits, r.iterations)
         }
     };
@@ -501,30 +508,99 @@ fn rewrite(est: &mut Estimated, kc: &Kept, coef: &[f64], eta: Vec<f64>, fe_coefs
     if session.terms.iter().any(|t| t.save) {
         parts.fe = crate::fe_recovery::saved_fe(session.absorber.as_ref(), &session.terms, fe_coefs, 0.0);
     }
-    let wt = |r: usize| session.weights.as_ref().map_or(1.0, |w| w[r]);
-    let mut mu = vec![0.0; n];
-    let mut w = vec![0.0; n];
-    let mut wr = vec![0.0; n];
-    let mut fe_sum = vec![0.0; n];
-    let mut dev = 0.0;
-    for r in 0..n {
-        let m = family::mean(Family::Logit, eta[r]);
-        mu[r] = m;
-        w[r] = wt(r) * m * (1.0 - m);
-        wr[r] = (kc.y[r] - m) / (m * (1.0 - m));
-        let xb: f64 = kc.x.iter().zip(coef).map(|(x, c)| x[r] * c).sum();
-        fe_sum[r] = eta[r] - kc.offset.as_ref().map_or(0.0, |o| o[r]) - xb;
-        dev -= 2.0 * wt(r) * family::logit_ll(kc.y[r], eta[r]);
-    }
+    let w_obs = session.weights.as_deref();
+    let mut mu_un = par::alloc_uninit::<f64>(n)?;
+    let mut w_un = par::alloc_uninit::<f64>(n)?;
+    let mut wr_un = par::alloc_uninit::<f64>(n)?;
+    let dev_parts: Vec<f64> = if n <= CHUNK {
+        let mut d_acc = 0.0;
+        for r in 0..n {
+            let er = eta[r];
+            let m = family::mean(Family::Logit, er);
+            let wr = w_obs.map_or(1.0, |w| w[r]);
+            mu_un[r].write(m);
+            w_un[r].write(wr * m * (1.0 - m));
+            wr_un[r].write((kc.y[r] - m) / (m * (1.0 - m)));
+            d_acc -= 2.0 * wr * family::logit_ll(kc.y[r], er);
+        }
+        vec![d_acc]
+    } else if pool.threads() <= 1 {
+        mu_un
+            .chunks_mut(CHUNK)
+            .zip(w_un.chunks_mut(CHUNK))
+            .zip(wr_un.chunks_mut(CHUNK))
+            .enumerate()
+            .map(|(ci, ((mc, wc), wrc))| {
+                let base = ci * CHUNK;
+                let mut d_acc = 0.0;
+                for (j, ((mo, wo), wro)) in mc.iter_mut().zip(wc).zip(wrc).enumerate() {
+                    let r = base + j;
+                    let er = eta[r];
+                    let m = family::mean(Family::Logit, er);
+                    let wr = w_obs.map_or(1.0, |w| w[r]);
+                    mo.write(m);
+                    wo.write(wr * m * (1.0 - m));
+                    wro.write((kc.y[r] - m) / (m * (1.0 - m)));
+                    d_acc -= 2.0 * wr * family::logit_ll(kc.y[r], er);
+                }
+                d_acc
+            })
+            .collect()
+    } else {
+        pool.install(|| {
+            mu_un
+                .par_chunks_mut(CHUNK)
+                .zip(w_un.par_chunks_mut(CHUNK))
+                .zip(wr_un.par_chunks_mut(CHUNK))
+                .enumerate()
+                .map(|(ci, ((mc, wc), wrc))| {
+                    let base = ci * CHUNK;
+                    let mut d_acc = 0.0;
+                    for (j, ((mo, wo), wro)) in mc.iter_mut().zip(wc).zip(wrc).enumerate() {
+                        let r = base + j;
+                        let er = eta[r];
+                        let m = family::mean(Family::Logit, er);
+                        let wr = w_obs.map_or(1.0, |w| w[r]);
+                        mo.write(m);
+                        wo.write(wr * m * (1.0 - m));
+                        wro.write((kc.y[r] - m) / (m * (1.0 - m)));
+                        d_acc -= 2.0 * wr * family::logit_ll(kc.y[r], er);
+                    }
+                    d_acc
+                })
+                .collect()
+        })
+    };
+    let dev = dev_parts.into_iter().fold(0.0, |a, b| a + b);
+    // SAFETY: every slot of `0..n` in `mu_un`, `w_un`, `wr_un` was written above.
+    let (mu, w, wr) = unsafe { (par::assume_init(mu_un), par::assume_init(w_un), par::assume_init(wr_un)) };
     let xs: Vec<&[f64]> = kc.x.iter().map(Vec::as_slice).collect();
     let mx = bias::center(session.absorber.as_mut(), &xs, &w, pool, ctx)?;
     let k = mx.len();
-    let mut xt = par::alloc_vec(n * k, 0.0)?;
-    for r in 0..n {
-        for j in 0..k {
-            xt[r * k + j] = mx[j][r];
+    let mut xt_un = par::alloc_uninit::<f64>(n * k)?;
+    if k > 0 {
+        if n <= CHUNK || pool.threads() <= 1 {
+            for (r, row) in xt_un.chunks_exact_mut(k).enumerate() {
+                for (j, o) in row.iter_mut().enumerate() {
+                    o.write(mx[j][r]);
+                }
+            }
+        } else {
+            pool.install(|| {
+                xt_un.par_chunks_mut(CHUNK * k).enumerate().for_each(|(ci, xc)| {
+                    let base = ci * CHUNK;
+                    for (i, row) in xc.chunks_exact_mut(k).enumerate() {
+                        let r = base + i;
+                        for (j, o) in row.iter_mut().enumerate() {
+                            o.write(mx[j][r]);
+                        }
+                    }
+                })
+            });
         }
     }
+    // SAFETY: every slot of `0..n*k` was written above.
+    let xt = unsafe { par::assume_init(xt_un) };
     for (&j, &c) in kc.xj.iter().zip(coef) {
         parts.coef[j] = c;
     }
@@ -534,7 +610,7 @@ fn rewrite(est: &mut Estimated, kc: &Kept, coef: &[f64], eta: Vec<f64>, fe_coefs
     parts.k = k;
     parts.xt = xt;
     parts.working_resid = wr;
-    parts.fe_sum = fe_sum;
+    parts.fe_sum = Vec::new();
     parts.deviance = dev;
     Ok(())
 }
@@ -632,7 +708,7 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
         let n_full = pre.len();
         let sample = input::build(input, spec, ctx, pool)?;
         let mut est = glm::estimate(input, spec, sample, ctx, pool)?;
-        let kc = kept_columns(input, &est)?;
+        let kc = kept_columns(input, &est, pool)?;
         let coef0: Vec<f64> = kc.xj.iter().map(|&j| est.parts.coef[j]).collect();
         let eta0 = est.parts.eta.clone();
         let mut notes = Vec::new();
@@ -648,7 +724,19 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
         };
         // Pre-drop rows: kept index and FE codes (sampling term), time order (logitfe).
         let kept = &est.session.kept_index;
-        let full_kept: Vec<u32> = pre.iter().map(|i| kept.binary_search(i).map_or(u32::MAX, |p| p as u32)).collect();
+        let full_kept: Vec<u32> = if pre.len() <= CHUNK || pool.threads() <= 1 {
+            let mut fk = Vec::with_capacity(pre.len());
+            let mut p = 0usize;
+            for &i in &pre {
+                while p < kept.len() && kept[p] < i {
+                    p += 1;
+                }
+                fk.push(if p < kept.len() && kept[p] == i { p as u32 } else { u32::MAX });
+            }
+            fk
+        } else {
+            pool.install(|| pre.par_iter().with_min_len(CHUNK).map(|i| kept.binary_search(i).map_or(u32::MAX, |p| p as u32)).collect())
+        };
         let full_codes: Vec<Codes> = if adj > 0.0 && !retained { input.fe.iter().map(|t| codes_on(input, &t.factors, &pre, pool)).collect::<Result<_, _>>()? } else { Vec::new() };
         let opts_c = match at {
             ApeAt::Corrected { options, .. } => Some(options),
@@ -673,8 +761,8 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
                 if coef.len() != coef0.len() {
                     return invalid("APEs: the corrected coefficients do not match the model's regressors");
                 }
-                let start = bias::shifted_eta(&d, &eta0, &coef0, coef);
-                let r = bias::resolve_fe(&d, est.session.absorber.as_mut(), coef, &start, ctx)?;
+                let start = bias::shifted_eta(&d, &eta0, &coef0, coef, pool);
+                let r = bias::resolve_in(&d, est.session.absorber.as_mut(), coef, &start, pool, ctx)?;
                 match &options.method {
                     BiasMethod::Analytical => {
                         let bspec = BiasSpec {
@@ -706,17 +794,7 @@ fn apes_impl(input: &FitInput, spec: &FitSpec, at: ApeAt, opts: &ApeOptions, ret
         });
         let lag_term = opts_c.and_then(|o| lag_of(input, o));
         let aspec = bias::ApeSpec { structure, sampling: opts.sampling, weak_exo, lag_term, adj, correction, full, want_vcov: true };
-        #[cfg(test)]
-        let a = if retained {
-            bias::apes_retained(&d, est.session.absorber.as_mut(), &coef, &eta, &aspec, ctx)?
-        } else {
-            bias::apes(&d, est.session.absorber.as_mut(), &coef, &eta, &aspec, ctx)?
-        };
-        #[cfg(not(test))]
-        let a = {
-            let _ = retained;
-            bias::apes(&d, est.session.absorber.as_mut(), &coef, &eta, &aspec, ctx)?
-        };
+        let a = bias::apes_in_pool(&d, est.session.absorber.as_mut(), &coef, &eta, &aspec, retained, pool, ctx)?;
         Ok(ApeOutput {
             coef_source: kc.xj.iter().map(|&j| CoefSource::X(j)).collect(),
             delta: jk_delta.unwrap_or(a.delta),

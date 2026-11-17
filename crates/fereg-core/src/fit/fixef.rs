@@ -50,28 +50,113 @@ impl Scatter {
     }
 }
 
-/// Rows of every level, ascending within a level (CSR: level `l` owns `rows[off[l]..off[l+1]]`).
-/// Few levels (g x chunks <= n): per-chunk histograms, each chunk scattering its rows in order
-/// into its own range of every level. Many levels: an atomic counting sort (little contention)
-/// and a per-level sort. Neither depends on the thread count.
-fn level_rows(codes: &[u32], g: usize, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
+/// Rows of every level, ascending within a level.
+enum LevelRows {
+    /// Non-decreasing codes: level `l` owns the contiguous range `off[l]..off[l+1]` directly.
+    Contiguous(Vec<u32>),
+    /// General CSR: level `l` owns `rows[off[l]..off[l+1]]`.
+    Indexed { off: Vec<u32>, rows: Vec<u32> },
+}
+
+impl LevelRows {
+    #[inline]
+    fn for_each(&self, l: usize, mut f: impl FnMut(u32)) {
+        match self {
+            LevelRows::Contiguous(off) => {
+                for i in off[l]..off[l + 1] {
+                    f(i);
+                }
+            }
+            LevelRows::Indexed { off, rows } => {
+                for &i in &rows[off[l] as usize..off[l + 1] as usize] {
+                    f(i);
+                }
+            }
+        }
+    }
+}
+
+/// Builds [`LevelRows`] in parallel. Sorted codes scan transition boundaries in a single pass
+/// without allocating a row-index array; few-level codes use per-chunk histograms; many-level
+/// codes reuse `structure::scatter_by_code` (radix/subchunk counting sort, no atomics or sorts).
+/// None of the paths depend on the thread count.
+fn level_rows(codes: &[u32], g: usize, pool: &Pool) -> Result<LevelRows, RfError> {
     let n = codes.len();
-    if pool.install(|| codes.par_windows(2).all(|w| w[0] <= w[1])) {
-        let off = pool.install(|| (0..=g).into_par_iter().map(|l| codes.partition_point(|&v| (v as usize) < l) as u32).collect());
-        return (off, pool.install(|| (0..n as u32).into_par_iter().collect()));
+    let is_sorted = if n <= CHUNK || pool.threads() <= 1 {
+        codes.windows(2).all(|w| w[0] <= w[1])
+    } else {
+        pool.install(|| codes.par_chunks(CHUNK).enumerate().all(|(ci, ch)| ch.windows(2).all(|w| w[0] <= w[1]) && (ci == 0 || codes[ci * CHUNK - 1] <= ch[0])))
+    };
+    if is_sorted {
+        let mut off = vec![0u32; g + 1];
+        if n == 0 {
+            return Ok(LevelRows::Contiguous(off));
+        }
+        let out = Scatter(off.as_mut_ptr());
+        if n <= CHUNK || pool.threads() <= 1 {
+            for l in 0..=codes[0] as usize {
+                off[l] = 0;
+            }
+            for i in 1..n {
+                let (prev, cur) = (codes[i - 1] as usize, codes[i] as usize);
+                if prev < cur {
+                    for l in prev + 1..=cur {
+                        off[l] = i as u32;
+                    }
+                }
+            }
+        } else {
+            for l in 0..=codes[0] as usize {
+                off[l] = 0;
+            }
+            pool.install(|| {
+                codes.par_chunks(CHUNK).enumerate().for_each(|(ci, ch)| {
+                    let base = ci * CHUNK;
+                    for (k, &v) in ch.iter().enumerate() {
+                        let i = base + k;
+                        if i == 0 {
+                            continue;
+                        }
+                        let (prev, cur) = (codes[i - 1] as usize, v as usize);
+                        if prev < cur {
+                            for l in prev + 1..=cur {
+                                // SAFETY: `codes` is non-decreasing, so `(prev+1)..=cur` is
+                                // disjoint across all transition indices `i`.
+                                unsafe { out.write(l, i as u32) };
+                            }
+                        }
+                    }
+                })
+            });
+        }
+        for slot in &mut off[codes[n - 1] as usize + 1..=g] {
+            *slot = n as u32;
+        }
+        return Ok(LevelRows::Contiguous(off));
     }
     let nch = n.div_ceil(CHUNK);
     if g.saturating_mul(nch) <= n {
-        let mut starts: Vec<Vec<u32>> = pool.install(|| {
+        let mut starts: Vec<Vec<u32>> = if n <= CHUNK || pool.threads() <= 1 {
             codes
-                .par_chunks(CHUNK)
+                .chunks(CHUNK)
                 .map(|c| {
                     let mut h = vec![0u32; g];
                     c.iter().for_each(|&v| h[v as usize] += 1);
                     h
                 })
                 .collect()
-        });
+        } else {
+            pool.install(|| {
+                codes
+                    .par_chunks(CHUNK)
+                    .map(|c| {
+                        let mut h = vec![0u32; g];
+                        c.iter().for_each(|&v| h[v as usize] += 1);
+                        h
+                    })
+                    .collect()
+            })
+        };
         // Exclusive prefix over (level, chunk): chunk c's rows of level l start at starts[c][l].
         let mut off = Vec::with_capacity(g + 1);
         let mut pos = 0u32;
@@ -84,53 +169,31 @@ fn level_rows(codes: &[u32], g: usize, pool: &Pool) -> (Vec<u32>, Vec<u32>) {
             }
         }
         off.push(pos);
-        let mut rows = vec![0u32; n];
-        let out = Scatter(rows.as_mut_ptr());
-        pool.install(|| {
-            codes.par_chunks(CHUNK).zip(starts.par_iter_mut()).enumerate().for_each(|(c, (chunk, cursor))| {
+        let mut rows = crate::par::alloc_uninit::<u32>(n)?;
+        let out = Scatter(rows.as_mut_ptr().cast::<u32>());
+        if n <= CHUNK || pool.threads() <= 1 {
+            for (c, (chunk, cursor)) in codes.chunks(CHUNK).zip(starts.iter_mut()).enumerate() {
                 for (k, &v) in chunk.iter().enumerate() {
-                    // SAFETY: the ranges of the chunks within each level are disjoint and inside `rows`.
                     unsafe { out.write(cursor[v as usize] as usize, (c * CHUNK + k) as u32) };
                     cursor[v as usize] += 1;
                 }
-            })
-        });
-        return (off, rows);
-    }
-    let counts: Vec<AtomicU32> = (0..g).map(|_| AtomicU32::new(0)).collect();
-    pool.install(|| {
-        codes.par_chunks(CHUNK).for_each(|c| {
-            for &v in c {
-                counts[v as usize].fetch_add(1, Ordering::Relaxed);
             }
-        })
-    });
-    let mut off = Vec::with_capacity(g + 1);
-    off.push(0u32);
-    for c in &counts {
-        off.push(off[off.len() - 1] + c.load(Ordering::Relaxed));
+        } else {
+            pool.install(|| {
+                codes.par_chunks(CHUNK).zip(starts.par_iter_mut()).enumerate().for_each(|(c, (chunk, cursor))| {
+                    for (k, &v) in chunk.iter().enumerate() {
+                        // SAFETY: the ranges of the chunks within each level are disjoint and inside `rows`.
+                        unsafe { out.write(cursor[v as usize] as usize, (c * CHUNK + k) as u32) };
+                        cursor[v as usize] += 1;
+                    }
+                })
+            });
+        }
+        // SAFETY: every destination index `0..n` was written once.
+        return Ok(LevelRows::Indexed { off, rows: unsafe { crate::par::assume_init(rows) } });
     }
-    let cursor: Vec<AtomicU32> = off[..g].iter().map(|&o| AtomicU32::new(o)).collect();
-    let mut rows = vec![0u32; n];
-    let out = Scatter(rows.as_mut_ptr());
-    pool.install(|| {
-        codes.par_chunks(CHUNK).enumerate().for_each(|(c, chunk)| {
-            for (k, &v) in chunk.iter().enumerate() {
-                let p = cursor[v as usize].fetch_add(1, Ordering::Relaxed);
-                // SAFETY: every position is handed out once by the atomic cursors.
-                unsafe { out.write(p as usize, (c * CHUNK + k) as u32) };
-            }
-        })
-    });
-    let mut segs: Vec<&mut [u32]> = Vec::with_capacity(g);
-    let mut rest: &mut [u32] = &mut rows;
-    for l in 0..g {
-        let (head, tail) = rest.split_at_mut((off[l + 1] - off[l]) as usize);
-        segs.push(head);
-        rest = tail;
-    }
-    pool.install(|| segs.par_iter_mut().for_each(|s| s.sort_unstable()));
-    (off, rows)
+    let (off, rows) = crate::structure::scatter_by_code(codes, g, pool)?;
+    Ok(LevelRows::Indexed { off, rows })
 }
 
 /// A set of row indices with O(log_64 n) insert and minimum: a bitset per level, each word of a
@@ -204,6 +267,16 @@ impl MinSet {
 
 /// First row of every level (u32::MAX for levels without rows), in parallel.
 fn first_rows(codes: &[u32], g: usize, pool: &Pool) -> Vec<u32> {
+    if codes.len() <= CHUNK || pool.threads() <= 1 {
+        let mut first = vec![u32::MAX; g];
+        for (i, &v) in codes.iter().enumerate() {
+            let slot = &mut first[v as usize];
+            if *slot == u32::MAX {
+                *slot = i as u32;
+            }
+        }
+        return first;
+    }
     let first: Vec<AtomicU32> = (0..g).map(|_| AtomicU32::new(u32::MAX)).collect();
     pool.install(|| {
         codes.par_chunks(CHUNK).enumerate().for_each(|(c, chunk)| {
@@ -238,23 +311,77 @@ fn first_rows(codes: &[u32], g: usize, pool: &Pool) -> Vec<u32> {
 /// built in parallel. The state of a row is two bytes: the number of its determined terms and
 /// their XOR, which names the last undetermined one (q <= 255). For two terms this is one
 /// reference in the second term per connected component.
-fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Pool) -> (Vec<usize>, Vec<Vec<f64>>) {
+fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum_at: Option<&(dyn Fn(usize) -> f64 + Sync)>, pool: &Pool) -> Result<(Vec<usize>, Vec<Vec<f64>>), RfError> {
     let q = codes.len();
     let mut refs = vec![0usize; q];
-    let mut values: Vec<Vec<f64>> = sizes.iter().map(|&g| vec![0.0; if sum.is_some() { g } else { 0 }]).collect();
+    let mut values: Vec<Vec<f64>> = sizes.iter().map(|&g| vec![0.0; if sum_at.is_some() { g } else { 0 }]).collect();
     if q == 0 {
-        return (refs, values);
+        return Ok((refs, values));
     }
     let n = codes[0].len();
     if q == 1 {
-        if let Some(s) = sum {
+        if let Some(sum_fn) = sum_at {
             let first = first_rows(codes[0], sizes[0], pool);
-            values[0].iter_mut().zip(&first).filter(|(_, f)| **f != u32::MAX).for_each(|(v, &f)| *v = s[f as usize]);
+            values[0].iter_mut().zip(&first).filter(|(_, f)| **f != u32::MAX).for_each(|(v, &f)| *v = sum_fn(f as usize));
         }
-        return (refs, values);
+        return Ok((refs, values));
     }
     assert!(q <= 255, "at most 255 fixed-effect terms");
-    let lists: Vec<(Vec<u32>, Vec<u32>)> = pool.install(|| codes.par_iter().zip(sizes).map(|(c, &g)| level_rows(c, g, pool)).collect());
+    let lists: Vec<LevelRows> = if pool.threads() <= 1 {
+        codes.iter().zip(sizes).map(|(c, &g)| level_rows(c, g, pool)).collect::<Result<_, _>>()?
+    } else {
+        pool.install(|| codes.par_iter().zip(sizes).map(|(c, &g)| level_rows(c, g, pool)).collect::<Result<_, _>>())?
+    };
+    if q == 2 {
+        // Two-term fast path: connected components close completely, so `st` (2*n bytes) and
+        // `MinSet` are unnecessary.
+        let (c0, c1) = (codes[0], codes[1]);
+        let mut done0 = vec![false; sizes[0]];
+        let mut done1 = vec![false; sizes[1]];
+        let mut queue: Vec<u32> = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < n {
+            let l1_init = c1[cursor] as usize;
+            if done0[c0[cursor] as usize] {
+                cursor += 1;
+                continue;
+            }
+            refs[1] += 1;
+            done1[l1_init] = true;
+            lists[1].for_each(l1_init, |r| {
+                if !done0[c0[r as usize] as usize] {
+                    queue.push(r);
+                }
+            });
+            while let Some(r32) = queue.pop() {
+                let r = r32 as usize;
+                let (a, b) = (c0[r] as usize, c1[r] as usize);
+                if !done0[a] {
+                    if let Some(sum_fn) = sum_at {
+                        values[0][a] = sum_fn(r) - values[1][b];
+                    }
+                    done0[a] = true;
+                    lists[0].for_each(a, |r2| {
+                        if !done1[c1[r2 as usize] as usize] {
+                            queue.push(r2);
+                        }
+                    });
+                } else if !done1[b] {
+                    if let Some(sum_fn) = sum_at {
+                        values[1][b] = sum_fn(r) - values[0][a];
+                    }
+                    done1[b] = true;
+                    lists[1].for_each(b, |r2| {
+                        if !done0[c0[r2 as usize] as usize] {
+                            queue.push(r2);
+                        }
+                    });
+                }
+            }
+            cursor += 1;
+        }
+        return Ok((refs, values));
+    }
     // Low byte: number of determined terms; high byte: XOR of their indices.
     let mut st = vec![0u16; n];
     let xor_all = (0..q as u16).fold(0, |a, t| a ^ t);
@@ -267,8 +394,7 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
     // Marks level l of term t determined: each of its rows gains one determined term.
     let mark = |t: usize, l: usize, st: &mut [u16], done: &mut [Vec<bool>], waiting: &mut [MinSet], queue: &mut Vec<u32>| {
         done[t][l] = true;
-        let (off, rows) = &lists[t];
-        for &i in &rows[off[l] as usize..off[l + 1] as usize] {
+        lists[t].for_each(l, |i| {
             let s = &mut st[i as usize];
             *s = (*s + 1) ^ ((t as u16) << 8);
             let r = *s & 0xff;
@@ -277,7 +403,7 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
             } else if r == last {
                 queue.push(i);
             }
-        }
+        });
     };
     let mut cursor = 0usize;
     loop {
@@ -287,7 +413,7 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
             }
             (cursor < n).then_some(cursor)
         });
-        let Some(i) = pick else { return (refs, values) };
+        let Some(i) = pick else { return Ok((refs, values)) };
         let mut first = true;
         for t in 0..q {
             let l = codes[t][i] as usize;
@@ -309,9 +435,9 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
             }
             let t = ((st[i] >> 8) ^ xor_all) as usize;
             let l = codes[t][i] as usize;
-            if let Some(s) = sum {
+            if let Some(sum_fn) = sum_at {
                 let others: f64 = (0..q).filter(|&u| u != t).map(|u| values[u][codes[u][i] as usize]).sum();
-                values[t][l] = s[i] - others;
+                values[t][l] = sum_fn(i) - others;
             }
             mark(t, l, &mut st, &mut done, &mut waiting, &mut queue);
         }
@@ -320,7 +446,7 @@ fn get_fe_gnl(codes: &[&[u32]], sizes: &[usize], sum: Option<&[f64]>, pool: &Poo
 
 /// Number of levels per term that fixest sets to 0 as references (see [`get_fe_gnl`]).
 pub(crate) fn references(codes: &[&[u32]], sizes: &[usize], pool: &Pool) -> Vec<usize> {
-    get_fe_gnl(codes, sizes, None, pool).0
+    get_fe_gnl(codes, sizes, None, pool).expect("reference count").0
 }
 
 /// fixest `cpp_constant_dum`: levels whose slope variable is constant (term with intercept) or
@@ -352,6 +478,38 @@ fn find(parent: &mut [u32], mut a: u32) -> u32 {
     a
 }
 
+/// Lock-free union-find root with path halving (`parent[x] <= x` invariant).
+#[inline]
+fn find_atomic(parent: &[AtomicU32], mut a: u32) -> u32 {
+    loop {
+        let p = parent[a as usize].load(Ordering::Relaxed);
+        if p == a {
+            return a;
+        }
+        let gp = parent[p as usize].load(Ordering::Relaxed);
+        if gp != p {
+            parent[a as usize].store(gp, Ordering::Relaxed);
+        }
+        a = gp;
+    }
+}
+
+#[inline]
+fn union_atomic(parent: &[AtomicU32], a: u32, b: u32) {
+    if parent[a as usize].load(Ordering::Relaxed) == parent[b as usize].load(Ordering::Relaxed) {
+        return;
+    }
+    let (mut ra, mut rb) = (find_atomic(parent, a), find_atomic(parent, b));
+    while ra != rb {
+        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+        if parent[hi as usize].compare_exchange_weak(hi, lo, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            return;
+        }
+        ra = find_atomic(parent, lo);
+        rb = find_atomic(parent, hi);
+    }
+}
+
 /// pyfixest's normalization of intercept terms `vals` (the first free, every other term's first
 /// level pinned at 0, as its `C(f1) + C(f2) + ...` dummies without intercept) with the remaining
 /// indeterminacy resolved by minimum norm, as its `lsqr` solve does. The indeterminacy is taken
@@ -359,12 +517,13 @@ fn find(parent: &mut [u32], mut a: u32) -> u32 {
 /// of each connected component c of the (first term, term t) level graph: each is in the null
 /// space of the dummies (every row has both levels in c or neither), so the fit is unchanged,
 /// and they span it for two terms and for the usual designs with more (e.g. worker, firm, year).
-fn min_norm(codes: &[&[u32]], sizes: &[usize], vals: &mut [Vec<f64>]) {
+fn min_norm(codes: &[&[u32]], sizes: &[usize], vals: &mut [Vec<f64>], pool: &Pool) {
     let q = codes.len();
     if q < 2 {
         return;
     }
     let g1 = sizes[0];
+    let n = codes[0].len();
     // Per term t >= 1: component of every first-term level and of every term-t level, and the
     // index of each component's unknown shift (`None`: the pinned component).
     let mut c1: Vec<Vec<usize>> = Vec::with_capacity(q - 1);
@@ -372,16 +531,31 @@ fn min_norm(codes: &[&[u32]], sizes: &[usize], vals: &mut [Vec<f64>]) {
     let mut var: Vec<Vec<Option<usize>>> = Vec::with_capacity(q - 1);
     let mut nvar = 0usize;
     for t in 1..q {
-        let mut parent: Vec<u32> = (0..(g1 + sizes[t]) as u32).collect();
-        for (&a, &b) in codes[0].iter().zip(codes[t]) {
-            let (ra, rb) = (find(&mut parent, a), find(&mut parent, (g1 + b as usize) as u32));
-            if ra != rb {
-                parent[rb as usize] = ra;
+        let nv = g1 + sizes[t];
+        let mut parent: Vec<u32> = if n <= CHUNK || pool.threads() <= 1 {
+            let mut p: Vec<u32> = (0..nv as u32).collect();
+            for (&a, &b) in codes[0].iter().zip(codes[t]) {
+                let (ra, rb) = (find(&mut p, a), find(&mut p, g1 as u32 + b));
+                if ra != rb {
+                    let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                    p[hi as usize] = lo;
+                }
             }
-        }
-        let mut ids = vec![usize::MAX; g1 + sizes[t]];
+            p
+        } else {
+            let p: Vec<AtomicU32> = (0..nv as u32).map(AtomicU32::new).collect();
+            pool.install(|| {
+                codes[0].par_chunks(CHUNK).zip(codes[t].par_chunks(CHUNK)).for_each(|(ca, cb)| {
+                    for (&a, &b) in ca.iter().zip(cb) {
+                        union_atomic(&p, a, g1 as u32 + b);
+                    }
+                })
+            });
+            p.into_iter().map(AtomicU32::into_inner).collect()
+        };
+        let mut ids = vec![usize::MAX; nv];
         let mut nc = 0;
-        let comp: Vec<usize> = (0..g1 + sizes[t])
+        let comp: Vec<usize> = (0..nv)
             .map(|v| {
                 let root = find(&mut parent, v as u32) as usize;
                 if ids[root] == usize::MAX {
@@ -491,7 +665,7 @@ fn normalize(
     mut slots: Vec<Vec<f64>>,
     norm: FixefNorm,
     pool: &Pool,
-) -> (Vec<Vec<f64>>, Vec<usize>) {
+) -> Result<(Vec<Vec<f64>>, Vec<usize>), RfError> {
     // Slot index of every intercept term.
     let mut slot = 0;
     let mut icpt: Vec<(usize, usize)> = Vec::new();
@@ -507,11 +681,8 @@ fn normalize(
     if icpt.len() >= 2 {
         match norm {
             FixefNorm::Fixest => {
-                let n = ic[0].len();
-                let sum: Vec<f64> = pool.install(|| {
-                    (0..n).into_par_iter().with_min_len(CHUNK).map(|i| icpt.iter().zip(&ic).map(|(&(_, s), c)| slots[s][c[i] as usize]).sum()).collect()
-                });
-                let (r, vals) = get_fe_gnl(&ic, &is, Some(&sum), pool);
+                let sum_fn = |i: usize| -> f64 { icpt.iter().zip(&ic).map(|(&(_, s), c)| slots[s][c[i] as usize]).sum() };
+                let (r, vals) = get_fe_gnl(&ic, &is, Some(&sum_fn), pool)?;
                 refs = r;
                 for (&(_, s), v) in icpt.iter().zip(vals) {
                     slots[s] = v;
@@ -519,7 +690,7 @@ fn normalize(
             }
             FixefNorm::MinNorm => {
                 let mut vals: Vec<Vec<f64>> = icpt.iter().map(|&(_, s)| std::mem::take(&mut slots[s])).collect();
-                min_norm(&ic, &is, &mut vals);
+                min_norm(&ic, &is, &mut vals, pool);
                 for (&(_, s), v) in icpt.iter().zip(vals) {
                     slots[s] = v;
                 }
@@ -527,7 +698,7 @@ fn normalize(
             }
         }
     }
-    (slots, refs)
+    Ok((slots, refs))
 }
 
 /// [`FixefValues`] of every term slot under `norm`. `terms` hold the codes over the reported
@@ -541,7 +712,7 @@ pub(crate) fn fixef_values(terms: &[StateFe], obs: &[u32], fe: &FeLevels, norm: 
         None => {
             let codes: Vec<&[u32]> = terms.iter().map(|t| t.codes.as_slice()).collect();
             let sizes: Vec<usize> = terms.iter().map(|t| t.levels).collect();
-            normalize(&codes, &sizes, &intercept, &nslopes, fe.slots.clone(), norm, pool)
+            normalize(&codes, &sizes, &intercept, &nslopes, fe.slots.clone(), norm, pool)?
         }
         Some(sub) => {
             // The solved codes are the reported ones restricted to the solved rows and renumbered
@@ -552,7 +723,7 @@ pub(crate) fn fixef_values(terms: &[StateFe], obs: &[u32], fe: &FeLevels, norm: 
                 .collect::<Result<_, _>>()?;
             let codes: Vec<&[u32]> = solved.iter().map(|c| c.codes.as_slice()).collect();
             let sizes: Vec<usize> = solved.iter().map(|c| c.n as usize).collect();
-            let (vals, refs) = normalize(&codes, &sizes, &intercept, &nslopes, fe.slots.clone(), norm, pool);
+            let (vals, refs) = normalize(&codes, &sizes, &intercept, &nslopes, fe.slots.clone(), norm, pool)?;
             // Solved level -> reported level, per term.
             let level_of: Vec<Vec<u32>> = terms
                 .iter()
@@ -628,7 +799,17 @@ mod tests {
             let mut want_rows: Vec<u32> = (0..n as u32).collect();
             want_rows.sort_by_key(|&i| codes[i as usize]);
             for threads in [1, 4] {
-                let got = with_pool(threads, |pool| level_rows(&codes, g, pool)).unwrap();
+                let got = with_pool(threads, |pool| {
+                    let lr = level_rows(&codes, g, pool).unwrap();
+                    match lr {
+                        LevelRows::Contiguous(off) => {
+                            let rows = (0..n as u32).collect();
+                            (off, rows)
+                        }
+                        LevelRows::Indexed { off, rows } => (off, rows),
+                    }
+                })
+                .unwrap();
                 assert_eq!(got, (want_off.clone(), want_rows.clone()), "g = {g}, threads = {threads}");
             }
         }
@@ -754,7 +935,7 @@ mod tests {
         let mut v = vec![vec![1.0, 2.0, 5.0], vec![0.5, 1.0, -1.0]];
         let sum = |v: &[Vec<f64>], i: usize| v[0][a[i] as usize] + v[1][b[i] as usize];
         let before: Vec<f64> = (0..4).map(|i| sum(&v, i)).collect();
-        min_norm(&[&a, &b], &[3, 3], &mut v);
+        with_pool(2, |pool| min_norm(&[&a, &b], &[3, 3], &mut v, pool)).unwrap();
         assert_eq!(v[1][0], 0.0);
         for (i, s) in before.iter().enumerate() {
             assert!((sum(&v, i) - s).abs() < 1e-12);

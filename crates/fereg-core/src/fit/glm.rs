@@ -13,7 +13,7 @@ use super::ols::{cor_part, sq_cor, y_stats};
 use super::state::{State, StateFe, term_refs};
 use super::vcov::{self, ClusterInfo, FeInfo, Jackknife, Model as VModel};
 use super::{CoefSource, FitInput, FitOutput, FitSpec, FitStats, Flavor, Model, TestStat, VcovData, VcovKind, WeightsType, dist};
-use crate::api::{AbsorbTerm, Ctx, DofOptions, Family, GlmCollinear, GlmConvention, GlmOptions, GlmParts, Guess, Layout, Separation, Spec, Vce, WeightKind};
+use crate::api::{AbsorbTerm, Ctx, DofOptions, Family, GlmCollinear, GlmOptions, GlmParts, Guess, Layout, Separation, Spec, Vce, WeightKind};
 use crate::error::RfError;
 use crate::factor::{self, Codes};
 use crate::glm::family::MU_MIN;
@@ -108,64 +108,86 @@ pub(crate) fn pyfixest_relu(input: &FitInput, spec: &FitSpec, term_codes: &[Code
 
 /// ln C(m, k) for integers 0 <= k <= m.
 fn ln_choose(m: f64, k: f64) -> f64 {
-    dist::ln_gamma(m + 1.0) - dist::ln_gamma(k + 1.0) - dist::ln_gamma(m - k + 1.0)
+    dist::ln_gamma_plus1(m) - dist::ln_gamma_plus1(k) - dist::ln_gamma_plus1(m - k)
 }
 
-/// fixest's log-likelihood and that of its null (constant-only) model.
-/// Poisson: sum w(y*eta - mu - ln Gamma(y+1)); null `sy*ln(sy/N) - sy - sum ln Gamma(y+1)` with sy = sum wy, N = sum w
-/// and the factorial term unweighted (femlm.R `get_model_null`); the offset is ignored there.
-/// Logit: `binomial()$aic` with the weights as trial counts, sum ln dbinom(round(w*y), round(w), mu);
-/// null `sy*ln p + (N - sy)*ln(1 - p)` with p = sy/N.
-fn loglik(y: &[f64], kept: &[u32], eta: &[f64], mu: &[f64], w: Option<&[f64]>, family: Family, pool: &Pool) -> (f64, f64) {
-    let a = par::sum_chunks(pool, kept.len(), CHUNK, 4, |range, acc| {
-        for i in range {
+/// Single chunked pass computing `(ll, ll_null, null_deviance, ssr, cor_parts)` with identical
+/// per-chunk summation order to separate passes.
+#[allow(clippy::too_many_arguments)]
+fn fit_stats_pass(
+    y: &[f64],
+    kept: &[u32],
+    eta: &[f64],
+    mu: &[f64],
+    w: Option<&[f64]>,
+    ybar: f64,
+    family: Family,
+    pool: &Pool,
+) -> (f64, f64, f64, f64, Vec<[f64; 6]>) {
+    struct Chunk {
+        ll: [f64; 4],
+        null_dev: f64,
+        ssr: f64,
+        cor: [f64; 6],
+    }
+    let ln_ybar = if family != Family::Poisson { ybar.ln() } else { 0.0 };
+    let ln_1m_ybar = if family != Family::Poisson { (1.0 - ybar).ln() } else { 0.0 };
+    let parts = par::map_chunks(pool, kept.len(), CHUNK, |_, range| {
+        let mut ll = [0.0; 4];
+        let mut null_dev = 0.0;
+        let mut ssr = 0.0;
+        for i in range.clone() {
             let yi = y[kept[i] as usize];
             let wi = w.map_or(1.0, |w| w[i]);
+            let mui = mu[i];
             match family {
                 Family::Poisson => {
-                    let lg = dist::ln_gamma(yi + 1.0);
-                    acc[0] += wi * (yi * eta[i] - mu[i] - lg);
-                    acc[1] += lg;
+                    let lg = dist::ln_gamma_plus1(yi);
+                    ll[0] += wi * (yi * eta[i] - mui - lg);
+                    ll[1] += lg;
+                    null_dev += wi * 2.0 * (if yi > 0.0 { yi * (yi / ybar).ln() } else { 0.0 } - (yi - ybar));
                 }
                 _ => {
                     let (m, k) = (wi.round(), (wi * yi).round());
                     if m > 0.0 {
                         let mut l = ln_choose(m, k);
                         if k > 0.0 {
-                            l += k * mu[i].ln();
+                            l += k * mui.ln();
                         }
                         if m > k {
-                            l += (m - k) * (1.0 - mu[i]).ln();
+                            l += (m - k) * (1.0 - mui).ln();
                         }
-                        acc[0] += l;
+                        ll[0] += l;
                     }
+                    null_dev += wi * -2.0 * if yi > 0.0 { ln_ybar } else { ln_1m_ybar };
                 }
             }
-            acc[2] += wi * yi;
-            acc[3] += wi;
+            ll[2] += wi * yi;
+            ll[3] += wi;
+            let diff = yi - mui;
+            ssr += wi * diff * diff;
         }
+        let cor = cor_part(range.map(|i| (y[kept[i] as usize], mu[i])));
+        Chunk { ll, null_dev, ssr, cor }
     });
+    let mut a = [0.0; 4];
+    let mut null_dev = 0.0;
+    let mut ssr = 0.0;
+    let mut cor_parts = Vec::with_capacity(parts.len());
+    for p in parts {
+        for j in 0..4 {
+            a[j] += p.ll[j];
+        }
+        null_dev += p.null_dev;
+        ssr += p.ssr;
+        cor_parts.push(p.cor);
+    }
     let (sy, n) = (a[2], a[3]);
     let ll_null = match family {
         Family::Poisson => sy * (sy / n).ln() - sy - a[1],
         _ => sy * (sy / n).ln() + (n - sy) * (1.0 - sy / n).ln(),
     };
-    (a[0], ll_null)
-}
-
-/// Deviance of the constant-only model without offset (Poisson: mu_0 = ybar_w; logit: p = ybar_w).
-fn null_deviance(y: &[f64], kept: &[u32], w: Option<&[f64]>, ybar: f64, family: Family, pool: &Pool) -> f64 {
-    par::sum_chunks(pool, kept.len(), CHUNK, 1, |range, acc| {
-        for i in range {
-            let yi = y[kept[i] as usize];
-            let wi = w.map_or(1.0, |w| w[i]);
-            acc[0] += wi
-                * match family {
-                    Family::Poisson => 2.0 * (if yi > 0.0 { yi * (yi / ybar).ln() } else { 0.0 } - (yi - ybar)),
-                    _ => -2.0 * if yi > 0.0 { ybar.ln() } else { (1.0 - ybar).ln() },
-                };
-        }
-    })[0]
+    (a[0], ll_null, null_dev, ssr, cor_parts)
 }
 
 /// Values per level of every saved slot (per observation, kept order) of the session's terms.
@@ -390,7 +412,7 @@ pub(crate) fn estimate(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &C
             Flavor::Pyfixest => GlmCollinear::Pyfixest { tol: spec.collin_tol },
         },
     };
-    let (_, parts) = session.glm_parts(rows, &Layout::ols(nsent), offset, &s, &g, GlmConvention::Fixest, ctx)?;
+    let parts = session.glm_fit_parts(rows, &Layout::ols(nsent), offset, &s, &g, pool, ctx)?;
 
     // Sample after the GLM-internal (relu / mu) drops and the singleton / perfect-fit passes
     // they trigger.
@@ -462,25 +484,41 @@ pub(crate) fn output(input: &FitInput, spec: &FitSpec, est: Estimated, ctx: &Ctx
     // raw [1, x] (x = x~ + xbar_w), as fixest's unresidualized design.
     let kk = parts.k;
     let r = 1 + k;
-    let mut block = par::alloc_vec(n * r, 0.0)?;
-    {
+    let block = {
+        let mut block = par::alloc_uninit::<f64>(n * r)?;
         let raw = !has_fe;
         // Without FE terms no ones column is sent: sent regressor j is x[j].
         let xs: Vec<&[f64]> = if raw { (0..nsent).filter(|&j| parts.status[j] == 0).map(|j| input.x[j]).collect() } else { Vec::new() };
-        pool.install(|| {
-            block.par_chunks_mut(r).enumerate().for_each(|(i, row)| {
-                row[0] = rep.working_resid[i];
-                if raw {
-                    row[1] = 1.0;
-                    for (v, x) in row[2..].iter_mut().zip(&xs) {
-                        *v = x[kept_index[i] as usize];
-                    }
-                } else {
-                    row[1..].copy_from_slice(&rep.xt[i * kk..(i + 1) * kk]);
+        let fill_row = |i: usize, row: &mut [std::mem::MaybeUninit<f64>]| {
+            row[0].write(rep.working_resid[i]);
+            if raw {
+                row[1].write(1.0);
+                for (v, x) in row[2..].iter_mut().zip(&xs) {
+                    v.write(x[kept_index[i] as usize]);
                 }
-            })
-        });
-    }
+            } else {
+                for (v, &src) in row[1..].iter_mut().zip(&rep.xt[i * kk..(i + 1) * kk]) {
+                    v.write(src);
+                }
+            }
+        };
+        if n <= CHUNK || pool.threads() <= 1 {
+            for (i, row) in block.chunks_exact_mut(r).enumerate() {
+                fill_row(i, row);
+            }
+        } else {
+            pool.install(|| {
+                block.par_chunks_mut(CHUNK * r).enumerate().for_each(|(ci, bc)| {
+                    let base = ci * CHUNK;
+                    for (j, row) in bc.chunks_exact_mut(r).enumerate() {
+                        fill_row(base + j, row);
+                    }
+                })
+            });
+        }
+        // SAFETY: every slot of `0..n*r` (`1 + k` entries per row, `kk == k` when `has_fe`) was written above.
+        unsafe { par::assume_init(block) }
+    };
     let (gram, _) = stats::gram(&block, r, Some(&rep.w), pool);
     let sub: Vec<f64> = (1..r).flat_map(|a| (1..r).map(move |b| (a, b))).map(|(a, b)| gram[a * r + b]).collect();
     let (singular, bread) = chol_collin(&sub, k, f64::MIN_POSITIVE);
@@ -489,7 +527,24 @@ pub(crate) fn output(input: &FitInput, spec: &FitSpec, est: Estimated, ctx: &Ctx
     }
     let design: Vec<Vec<f64>> = (0..k).map(|j| super::design::unit(r, 1 + j)).collect();
     let resid_combo = super::design::unit(r, 0);
-    let row_order: Vec<u32> = (0..n as u32).collect();
+    let need_order = spec.keep_state || !matches!(spec.vcov, VcovKind::Iid | VcovKind::Hetero);
+    let row_order: Vec<u32> = if !need_order {
+        Vec::new()
+    } else if n <= CHUNK || pool.threads() <= 1 {
+        (0..n as u32).collect()
+    } else {
+        let mut ro = par::alloc_uninit::<u32>(n)?;
+        pool.install(|| {
+            ro.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, rc)| {
+                let base = (ci * CHUNK) as u32;
+                for (j, slot) in rc.iter_mut().enumerate() {
+                    slot.write(base + j as u32);
+                }
+            })
+        });
+        // SAFETY: every slot of `0..n` was written above.
+        unsafe { par::assume_init(ro) }
+    };
     // Levels per term in the degrees of freedom: pyfixest's `feglm` counts those present before
     // its `fe` separation check (its `fepois` recounts them).
     let mut before = levels_before_separation.filter(|_| family == Family::Logit).map(Vec::into_iter);
@@ -587,14 +642,7 @@ pub(crate) fn output(input: &FitInput, spec: &FitSpec, est: Estimated, ctx: &Ctx
 
     // Fit statistics.
     let y = input.y;
-    let (ll, ll_null) = loglik(y, kept_index, &rep.eta, &rep.mu, w_obs, family, pool);
-    let null_dev = null_deviance(y, kept_index, w_obs, ybar, family, pool);
-    let ssr = par::sum_chunks(pool, n, CHUNK, 1, |range, acc| {
-        for i in range {
-            acc[0] += w_obs.map_or(1.0, |w| w[i]) * (y[kept_index[i] as usize] - rep.mu[i]).powi(2);
-        }
-    })[0];
-    let cor_parts = par::map_chunks(pool, n, CHUNK, |_, range| cor_part(range.map(|i| (y[kept_index[i] as usize], rep.mu[i]))));
+    let (ll, ll_null, null_dev, ssr, cor_parts) = fit_stats_pass(y, kept_index, &rep.eta, &rep.mu, w_obs, ybar, family, pool);
     let wn = if w_obs.is_some() { sumw } else { n as f64 };
     let only_intercept = np == 1 && intercept && k == 1;
     let (pseudo_r2, apr2) = if only_intercept { (f64::NAN, f64::NAN) } else { (1.0 - ll / ll_null, 1.0 - (ll - np as f64 + 1.0) / ll_null) };

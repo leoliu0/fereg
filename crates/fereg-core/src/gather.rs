@@ -5,15 +5,32 @@ use std::mem::MaybeUninit;
 use rayon::prelude::*;
 
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool, alloc_uninit, alloc_vec, assume_init};
+use crate::par::{CHUNK, Pool, alloc_uninit, assume_init};
 
 /// At least half of consecutive entries of `order` differ by <= 8.
 pub fn is_local(order: &[u32]) -> bool {
-    if order.len() < 2 {
+    is_local_in_pool(order, None)
+}
+
+fn is_local_in_pool(order: &[u32], pool: Option<&Pool>) -> bool {
+    let n = order.len();
+    if n < 2 {
         return true;
     }
-    let near = order.windows(2).filter(|w| w[1].abs_diff(w[0]) <= 8).count();
-    2 * near >= order.len() - 1
+    let near: usize = match pool {
+        Some(p) if n > CHUNK && p.threads() > 1 => p.install(|| {
+            (0..(n - 1).div_ceil(CHUNK))
+                .into_par_iter()
+                .map(|c| {
+                    let lo = c * CHUNK;
+                    let hi = (lo + CHUNK).min(n - 1);
+                    order[lo..=hi].windows(2).filter(|w| w[1].abs_diff(w[0]) <= 8).count()
+                })
+                .sum()
+        }),
+        _ => order.windows(2).filter(|w| w[1].abs_diff(w[0]) <= 8).count(),
+    };
+    2 * near >= n - 1
 }
 
 /// `out[k*R + j] = cols[j][order[k]]`. When `order` is local the columns are read directly;
@@ -21,36 +38,23 @@ pub fn is_local(order: &[u32]) -> bool {
 /// then permuted (one random read of R contiguous values per row).
 pub fn gather_rows(order: &[u32], cols: &[&[f64]], pool: &Pool) -> Result<Vec<f64>, RfError> {
     let r = cols.len();
-    if r > 1 && !is_local(order) {
-        let mut kept = alloc_vec(order.len() * r, 0.0)?;
-        pool.install(|| {
-            kept.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
-                let base = c * CHUNK;
-                for (k, row) in block.chunks_exact_mut(r).enumerate() {
-                    for (j, v) in row.iter_mut().enumerate() {
-                        *v = cols[j][base + k];
-                    }
-                }
-            })
-        });
+    if r == 0 {
+        return Ok(Vec::new());
+    }
+    if r > 1 && !is_local_in_pool(order, Some(pool)) {
+        let kept = fill_rows(order.len(), r, pool, |k, row| {
+            for (j, v) in row.iter_mut().enumerate() {
+                v.write(cols[j][k]);
+            }
+        })?;
         return permute_rows(order, &kept, r, pool);
     }
-    let mut out = alloc_vec(order.len() * r, 0.0)?;
-    if r == 0 {
-        return Ok(out);
-    }
-    pool.install(|| {
-        out.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
-            let base = c * CHUNK;
-            for (k, row) in block.chunks_exact_mut(r).enumerate() {
-                let src = order[base + k] as usize;
-                for (j, v) in row.iter_mut().enumerate() {
-                    *v = cols[j][src];
-                }
-            }
-        })
-    });
-    Ok(out)
+    fill_rows(order.len(), r, pool, |k, row| {
+        let src = order[k] as usize;
+        for (j, v) in row.iter_mut().enumerate() {
+            v.write(cols[j][src]);
+        }
+    })
 }
 
 /// A column of [`gather_input`].
@@ -80,19 +84,14 @@ impl Col<'_> {
 pub fn gather_input(order: &[u32], kept: Option<&[u32]>, cols: &[Col], pool: &Pool) -> Result<Vec<f64>, RfError> {
     let r = cols.len();
     let src = |k: usize| kept.map_or(k, |kept| kept[k] as usize);
-    if r > 1 && !is_local(order) {
+    if r > 1 && !is_local_in_pool(order, Some(pool)) {
         let rows = fill_rows(order.len(), r, pool, |k, row| {
             let i = src(k);
             row.iter_mut().zip(cols).for_each(|(v, c)| {
                 v.write(c.at(i));
             });
         })?;
-        return fill_rows(order.len(), r, pool, |k, row| {
-            let s = order[k] as usize * r;
-            row.iter_mut().zip(&rows[s..s + r]).for_each(|(v, x)| {
-                v.write(*x);
-            });
-        });
+        return permute_rows(order, &rows, r, pool);
     }
     fill_rows(order.len(), r, pool, |k, row| {
         let i = src(order[k] as usize);
@@ -105,37 +104,35 @@ pub fn gather_input(order: &[u32], kept: Option<&[u32]>, cols: &[Col], pool: &Po
 /// An n x r row-major block whose row k is written by `fill(k, row)` (every value; parallel over
 /// fixed chunks, without a zeroing pass).
 fn fill_rows(n: usize, r: usize, pool: &Pool, fill: impl Fn(usize, &mut [MaybeUninit<f64>]) + Sync) -> Result<Vec<f64>, RfError> {
-    if r == 0 {
+    if r == 0 || n == 0 {
         return Ok(Vec::new());
     }
     let mut out = alloc_uninit::<f64>(n * r)?;
-    pool.install(|| {
-        out.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
-            for (k, row) in block.chunks_exact_mut(r).enumerate() {
-                fill(c * CHUNK + k, row);
-            }
-        })
-    });
+    if n <= CHUNK || pool.threads() <= 1 {
+        for (k, row) in out.chunks_exact_mut(r).enumerate() {
+            fill(k, row);
+        }
+    } else {
+        pool.install(|| {
+            out.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
+                for (k, row) in block.chunks_exact_mut(r).enumerate() {
+                    fill(c * CHUNK + k, row);
+                }
+            })
+        });
+    }
     // SAFETY: `fill` wrote every value of every row.
     Ok(unsafe { assume_init(out) })
 }
 
 /// Row permutation of a row-major block: `out[k] = rows[order[k]]` (R values per row).
 pub fn permute_rows(order: &[u32], rows: &[f64], r: usize, pool: &Pool) -> Result<Vec<f64>, RfError> {
-    let mut out = alloc_vec(order.len() * r, 0.0)?;
-    if r == 0 {
-        return Ok(out);
-    }
-    pool.install(|| {
-        out.par_chunks_mut(CHUNK * r).enumerate().for_each(|(c, block)| {
-            let base = c * CHUNK;
-            for (k, row) in block.chunks_exact_mut(r).enumerate() {
-                let src = order[base + k] as usize * r;
-                row.copy_from_slice(&rows[src..src + r]);
-            }
-        })
-    });
-    Ok(out)
+    fill_rows(order.len(), r, pool, |k, row| {
+        let src = order[k] as usize * r;
+        for (v, &x) in row.iter_mut().zip(&rows[src..src + r]) {
+            v.write(x);
+        }
+    })
 }
 
 /// Inverse of a row-order permutation: `inv[order[k]] = k`.

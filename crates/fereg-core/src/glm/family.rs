@@ -1,6 +1,8 @@
 //! GLM families: inverse link, IRLS weight and working response, deviance and log-likelihood
 //! pieces for Poisson (log link) and logit.
 
+use std::sync::OnceLock;
+
 use crate::api::Family;
 
 /// Mata `epsilon(1)`.
@@ -105,6 +107,20 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
         a += c / (x + i as f64);
     }
     0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+/// `ln_gamma(y + 1.0)` with an L1-resident table for integers `0 <= y <= 256` (exact bit match
+/// with [`ln_gamma`]).
+#[inline]
+pub(crate) fn ln_gamma_plus1(y: f64) -> f64 {
+    static TABLE: OnceLock<[f64; 257]> = OnceLock::new();
+    if (0.0..=256.0).contains(&y) {
+        let k = y as usize;
+        if k as f64 == y {
+            return TABLE.get_or_init(|| std::array::from_fn(|i| ln_gamma(i as f64 + 1.0)))[k];
+        }
+    }
+    ln_gamma(y + 1.0)
 }
 
 #[cfg(test)]

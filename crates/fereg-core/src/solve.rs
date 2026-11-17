@@ -16,10 +16,15 @@ use crate::absorber::{Absorber, FeCoefs, SolveInfo, SolveOpts, fe1_index};
 use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
-use crate::operator::{JointCells, Ops, Rhs, Scratch, SegAgg, WeightState, weight_state};
-use crate::par::{self, CHUNK, Pool, alloc_vec, sum_chunks};
+use crate::operator::{JointCells, Ops, Rhs, Scratch, SegAgg, WeightState, refresh_weights, weight_state};
+use crate::par::{self, CHUNK, Pool, sum_chunks};
 use crate::precond::dense::{self, Dense, SmallWork};
-use crate::precond::{BlockPrecond, Joint, Precond, approx_chol::ApproxChol, jacobi, sparse_chol::SparseChol};
+use crate::precond::{
+    BlockPrecond, Joint, Precond,
+    approx_chol::ApproxChol,
+    jacobi,
+    sparse_chol::{AnalyzeResult, SparseChol},
+};
 use crate::session::Term;
 use crate::slopes::SlopeSolver;
 use crate::structure::{self, Structure};
@@ -224,21 +229,40 @@ const STALE_GAIN: f64 = 0.3;
 /// predicts. Gradual IRLS changes stay far below it between refactorizations.
 const MAX_SMALL_DRIFT: f64 = 1e6;
 
-/// max_i(b_i / a_i) / min_i(b_i / a_i) over the rows (`None` = all ones).
+/// max_i(b_i / a_i) / min_i(b_i / a_i) over the rows (`None` = all ones), chunked.
 fn ratio_range(a: Option<&[f64]>, b: Option<&[f64]>, pool: &Pool) -> f64 {
     let n = a.or(b).map_or(0, <[f64]>::len);
     if n == 0 {
         return 1.0;
     }
-    let (lo, hi) = pool.install(|| {
-        (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let q = b.map_or(1.0, |b| b[i]) / a.map_or(1.0, |a| a[i]);
-                (q, q)
-            })
-            .reduce(|| (f64::INFINITY, 0.0), |x, y| (x.0.min(y.0), x.1.max(y.1)))
+    let parts = par::map_chunks(pool, n, CHUNK, |_, range| {
+        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                for (&av, &bv) in a[range.clone()].iter().zip(&b[range]) {
+                    let q = bv / av;
+                    lo = lo.min(q);
+                    hi = hi.max(q);
+                }
+            }
+            (None, Some(b)) => {
+                for &bv in &b[range] {
+                    lo = lo.min(bv);
+                    hi = hi.max(bv);
+                }
+            }
+            (Some(a), None) => {
+                for &av in &a[range] {
+                    let q = 1.0 / av;
+                    lo = lo.min(q);
+                    hi = hi.max(q);
+                }
+            }
+            (None, None) => return (1.0, 1.0),
+        }
+        (lo, hi)
     });
+    let (lo, hi) = parts.into_iter().fold((f64::INFINITY, 0.0f64), |x, y| (x.0.min(y.0), x.1.max(y.1)));
     hi / lo
 }
 
@@ -383,15 +407,22 @@ impl FeSolver {
         ctx.check()?;
         let w_rows = match weights {
             Some(w) => {
-                let mut v = alloc_vec(n, 0.0)?;
-                pool.install(|| {
-                    v.par_chunks_mut(CHUNK).zip(st.pi.par_chunks(CHUNK)).for_each(|(o, p)| {
-                        for (o, &k) in o.iter_mut().zip(p) {
-                            *o = w[k as usize];
-                        }
-                    })
-                });
-                Some(v)
+                let mut v = par::alloc_uninit::<f64>(n)?;
+                if n <= CHUNK || pool.threads() <= 1 {
+                    for (o, &k) in v.iter_mut().zip(&st.pi) {
+                        o.write(w[k as usize]);
+                    }
+                } else {
+                    pool.install(|| {
+                        v.par_chunks_mut(CHUNK).zip(st.pi.par_chunks(CHUNK)).for_each(|(o, p)| {
+                            for (o, &k) in o.iter_mut().zip(p) {
+                                o.write(w[k as usize]);
+                            }
+                        })
+                    });
+                }
+                // SAFETY: every slot of `0..n` was written above.
+                Some(unsafe { par::assume_init(v) })
             }
             None => None,
         };
@@ -715,12 +746,36 @@ fn build_joint(ops: &Ops, cfg: &SolverConfig, js: &mut JointState, without: f64,
         ctx.check()?;
         // Small coordinates (dense-ish rows, coupled to almost everything) are eliminated last.
         let small_kept = keep.partition_point(|&k| (k as usize) < ops.st.m_small);
-        let analyzed = SparseChol::analyze_last(&csr, small_kept, pool);
+        let stats0 = js.stats;
+        let analyzed = SparseChol::analyze_last_budget(
+            &csr,
+            small_kept,
+            MAX_JOINT_LEN,
+            |len_lb, flops_lb| {
+                let mut lb = stats0;
+                lb.len_val = Some(len_lb);
+                lb.flops = Some(flops_lb);
+                affordable(&lb, Stage::Factor)
+            },
+            pool,
+        );
         drop(csr);
         times[4] = split(&mut lap);
-        let Some((mut f, vals)) = analyzed else {
-            js.failed = true;
-            break 'stages "symbolic analysis failed";
+        let (mut f, vals) = match analyzed {
+            AnalyzeResult::Ok(f, vals) => (f, vals),
+            AnalyzeResult::OverBudget { len_lb, flops_lb } => {
+                if len_lb > MAX_JOINT_LEN {
+                    js.stats.len_val = Some(len_lb);
+                    js.stats.flops = Some(flops_lb);
+                    js.failed = true;
+                    break 'stages "over the fill budget";
+                }
+                break 'stages "rejected (cost)";
+            }
+            AnalyzeResult::Failed => {
+                js.failed = true;
+                break 'stages "symbolic analysis failed";
+            }
         };
         js.stats.len_val = Some(f.len_val());
         js.stats.flops = Some(f.flops());
@@ -900,6 +955,11 @@ impl CgSystem for System<'_> {
         if self.pre.joint.is_some() || !joint_allowed(self.cfg, self.joint) || !self.ops.st.has_large() {
             return Ok(None);
         }
+        // Fast-converging problems (`rho < 0.5` and `< 20` projected iterations) finish PCG faster
+        // than assembling and ordering the joint Laplacian (`Probe` is thread-count invariant).
+        if self.cfg.joint == JointPolicy::Auto && p.rho_hat < 0.5 && p.remaining < 20.0 {
+            return Ok(None);
+        }
         let st = self.ops.st;
         let without = p.remaining * (matvec_cost(st, self.w) + block_precond_cost(st, self.pre, self.w));
         let why = format!("k={} rho={:.3} remaining={:.0}", p.k, p.rho_hat, p.remaining);
@@ -948,17 +1008,127 @@ impl Absorber for FeSolver {
     }
 
     fn set_weights(&mut self, w: Option<&[f64]>, pool: &Pool, ctx: &Ctx) -> Result<(), RfError> {
-        if w.is_some_and(|v| v.len() != self.st.n || !par::all_positive(v, pool)) {
-            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+        if let Some(v) = w {
+            if v.len() != self.st.n {
+                return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+            }
+            ctx.check()?;
+            let mut t = Instant::now();
+            let want_drift = self.pre.small.is_some();
+            // Fuse validation (`all_positive`), small-factor drift (`ratio_range`), and copying `v`
+            // into `w_rows` into a single chunked pass over the rows, then reuse `self.ws` buffers.
+            let prev = self.ws.w_rows.take();
+            let dst = match prev {
+                Some(mut b) if b.len() == v.len() => {
+                    if v.len() <= CHUNK || pool.threads() <= 1 {
+                        let mut ok = true;
+                        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+                        for (o, &nv) in b.iter_mut().zip(v) {
+                            ok &= nv.is_finite() && nv > 0.0;
+                            if want_drift {
+                                let q = nv / *o;
+                                lo = lo.min(q);
+                                hi = hi.max(q);
+                            }
+                            *o = nv;
+                        }
+                        if !ok {
+                            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+                        }
+                        if want_drift && !v.is_empty() {
+                            self.small_drift *= hi / lo;
+                        }
+                    } else {
+                        let res: Vec<(bool, f64, f64)> = pool.install(|| {
+                            b.par_chunks_mut(CHUNK)
+                                .zip(v.par_chunks(CHUNK))
+                                .map(|(oc, vc)| {
+                                    let mut ok = true;
+                                    let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+                                    for (o, &nv) in oc.iter_mut().zip(vc) {
+                                        ok &= nv.is_finite() && nv > 0.0;
+                                        if want_drift {
+                                            let q = nv / *o;
+                                            lo = lo.min(q);
+                                            hi = hi.max(q);
+                                        }
+                                        *o = nv;
+                                    }
+                                    (ok, lo, hi)
+                                })
+                                .collect()
+                        });
+                        if res.iter().any(|r| !r.0) {
+                            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+                        }
+                        if want_drift && !v.is_empty() {
+                            let (lo, hi) = res.iter().fold((f64::INFINITY, 0.0f64), |a, x| (a.0.min(x.1), a.1.max(x.2)));
+                            self.small_drift *= hi / lo;
+                        }
+                    }
+                    b
+                }
+                _ => {
+                    let mut u = par::alloc_uninit::<f64>(v.len())?;
+                    if v.len() <= CHUNK || pool.threads() <= 1 {
+                        let mut ok = true;
+                        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+                        for (o, &nv) in u.iter_mut().zip(v) {
+                            ok &= nv.is_finite() && nv > 0.0;
+                            if want_drift {
+                                lo = lo.min(nv);
+                                hi = hi.max(nv);
+                            }
+                            o.write(nv);
+                        }
+                        if !ok {
+                            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+                        }
+                        if want_drift && !v.is_empty() {
+                            self.small_drift *= hi / lo;
+                        }
+                    } else {
+                        let res: Vec<(bool, f64, f64)> = pool.install(|| {
+                            u.par_chunks_mut(CHUNK)
+                                .zip(v.par_chunks(CHUNK))
+                                .map(|(oc, vc)| {
+                                    let mut ok = true;
+                                    let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+                                    for (o, &nv) in oc.iter_mut().zip(vc) {
+                                        ok &= nv.is_finite() && nv > 0.0;
+                                        if want_drift {
+                                            lo = lo.min(nv);
+                                            hi = hi.max(nv);
+                                        }
+                                        o.write(nv);
+                                    }
+                                    (ok, lo, hi)
+                                })
+                                .collect()
+                        });
+                        if res.iter().any(|r| !r.0) {
+                            return Err(RfError::InvalidInput("weights must be positive and finite".into()));
+                        }
+                        if want_drift && !v.is_empty() {
+                            let (lo, hi) = res.iter().fold((f64::INFINITY, 0.0f64), |a, x| (a.0.min(x.1), a.1.max(x.2)));
+                            self.small_drift *= hi / lo;
+                        }
+                    }
+                    // SAFETY: every slot of `0..v.len()` was written above.
+                    unsafe { par::assume_init(u) }
+                }
+            };
+            refresh_weights(&self.st, &mut self.ws, Some(dst), pool)?;
+            log_phase(ctx, &mut t, "set_weights");
+        } else {
+            ctx.check()?;
+            let mut t = Instant::now();
+            if self.pre.small.is_some() {
+                self.small_drift *= ratio_range(self.ws.w_rows.as_deref(), None, pool);
+            }
+            refresh_weights(&self.st, &mut self.ws, None, pool)?;
+            log_phase(ctx, &mut t, "set_weights");
         }
-        ctx.check()?;
-        let mut t = Instant::now();
-        if self.pre.small.is_some() {
-            self.small_drift *= ratio_range(self.ws.w_rows.as_deref(), w, pool);
-        }
-        let w_rows = w.map(|v| par::copy_into(self.ws.w_rows.take(), v, pool)).transpose()?;
-        self.ws = weight_state(&self.st, w_rows, pool)?;
-        log_phase(ctx, &mut t, "set_weights");
         self.joint.agg = None;
         self.basic_fresh = false;
         self.small_fresh = false;
@@ -1045,10 +1215,12 @@ impl Absorber for FeSolver {
             .collect();
         let b1sq = self.wsum_b1sq(&b1, r, pool);
         let ss1: Vec<f64> = (0..r).map(|j| wsq[j] - b1sq[j]).collect();
-        let mut x = match warm {
-            Some(wc) => wc.data[..m * r].to_vec(),
-            None => alloc_vec(m * r, 0.0)?,
-        };
+        let coefs_len = if o.want_coefs { (m + g1) * r } else { m * r };
+        let mut coefs_buf = par::alloc_par(coefs_len, 0.0, pool)?;
+        if let Some(wc) = warm {
+            coefs_buf[..m * r].copy_from_slice(&wc.data[..m * r]);
+        }
+        let x = &mut coefs_buf[..m * r];
         for j in 0..r {
             if ss0[j] == 0.0 {
                 for i in 0..m {
@@ -1078,7 +1250,7 @@ impl Absorber for FeSolver {
                 small_fresh,
                 small_known: self.small_work,
             };
-            let out = cg::pcg(&mut sys, &rhs, &mut x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
+            let out = cg::pcg(&mut sys, &rhs, x, r, &ss1, &ss0, o.tol, o.maxiter, pool, ctx)?;
             iterations = out.iterations.max(1);
             self.last_iters = Some(iterations);
             exact = out.exact || ss0.iter().all(|&s| s == 0.0);
@@ -1130,14 +1302,11 @@ impl Absorber for FeSolver {
         }
         log_phase(ctx, &mut t, "pcg");
         ctx.check()?;
-        let mut alpha = if o.want_coefs { Some(alloc_vec(g1 * r, 0.0)?) } else { None };
-        Ops { st: &self.st, ws: &self.ws }.residualize_rows(z, r, &x, &b1, alpha.as_deref_mut(), pool);
+        let (x_slice, alpha_slice) = coefs_buf.split_at_mut(m * r);
+        let alpha_opt = if o.want_coefs { Some(alpha_slice) } else { None };
+        Ops { st: &self.st, ws: &self.ws }.residualize_rows(z, r, x_slice, &b1, alpha_opt, pool);
         log_phase(ctx, &mut t, "residualize pass");
-        let coefs = alpha.map(|a| {
-            let mut data = x;
-            data.extend_from_slice(&a);
-            FeCoefs { p: m + g1, r, data }
-        });
+        let coefs = o.want_coefs.then_some(FeCoefs { p: m + g1, r, data: coefs_buf });
         Ok(SolveInfo { iterations, escalated: escalated_now, coefs, exact })
     }
 

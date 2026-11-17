@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 use crate::api::Ctx;
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool, sum_chunks};
+use crate::par::{CHUNK, MAX_DISPATCH_WIDTH, Pool, alloc_par, dispatch_width, has_avx2_fma, sum_chunks, width};
 
 /// Window length d of the stopping rule.
 pub const WINDOW: usize = 5;
@@ -79,15 +79,50 @@ pub struct CgOutcome {
 
 /// Per-column dot products of two m x w row-major blocks.
 pub fn dots(a: &[f64], b: &[f64], w: usize, pool: &Pool) -> Vec<f64> {
-    let m = a.len() / w.max(1);
-    sum_chunks(pool, m, CHUNK, w, |range, acc| {
-        for i in range {
-            let (ra, rb) = (&a[i * w..(i + 1) * w], &b[i * w..(i + 1) * w]);
+    if w == 0 || a.is_empty() {
+        return vec![0.0; w];
+    }
+    let m = a.len() / w;
+    sum_chunks(pool, m, CHUNK, w, |range, acc| dispatch_width!(w, false, dots_chunk(a, b, w, range, acc)))
+}
+
+fn dots_chunk<const W: usize, const _B: bool>(a: &[f64], b: &[f64], w: usize, range: std::ops::Range<usize>, acc: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { dots_chunk_avx2::<W>(a, b, w, range, acc) };
+        return;
+    }
+    dots_chunk_inner::<W>(a, b, w, range, acc);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dots_chunk_avx2<const W: usize>(a: &[f64], b: &[f64], w: usize, range: std::ops::Range<usize>, acc: &mut [f64]) {
+    dots_chunk_inner::<W>(a, b, w, range, acc);
+}
+
+#[inline(always)]
+fn dots_chunk_inner<const W: usize>(a: &[f64], b: &[f64], w: usize, range: std::ops::Range<usize>, acc: &mut [f64]) {
+    let w = width::<W>(w);
+    let (sa, sb) = (&a[range.start * w..range.end * w], &b[range.start * w..range.end * w]);
+    if W > 0 && W <= MAX_DISPATCH_WIDTH {
+        let mut s = [0.0f64; MAX_DISPATCH_WIDTH];
+        for (ra, rb) in sa.chunks_exact(w).zip(sb.chunks_exact(w)) {
+            for j in 0..w {
+                s[j] += ra[j] * rb[j];
+            }
+        }
+        for j in 0..w {
+            acc[j] += s[j];
+        }
+    } else {
+        for (ra, rb) in sa.chunks_exact(w).zip(sb.chunks_exact(w)) {
             for j in 0..w {
                 acc[j] += ra[j] * rb[j];
             }
         }
-    })
+    }
 }
 
 /// Solves S x = rhs for the w columns of `rhs` (m x w); `x` holds the start (warm or zero).
@@ -107,10 +142,10 @@ pub fn pcg(
     ctx: &Ctx,
 ) -> Result<CgOutcome, RfError> {
     let n = rhs.len();
-    let mut r = vec![0.0; n];
-    let mut z = vec![0.0; n];
-    let mut p = vec![0.0; n];
-    let mut q = vec![0.0; n];
+    let mut r = alloc_par(n, 0.0, pool)?;
+    let mut z = alloc_par(n, 0.0, pool)?;
+    let mut p = alloc_par(n, 0.0, pool)?;
+    let mut q = alloc_par(n, 0.0, pool)?;
     let mut active: Vec<bool> = ss0.iter().map(|&s| s > 0.0).collect();
     let mut iterations = 0usize;
     let mut escalated = false;
@@ -120,34 +155,48 @@ pub fn pcg(
 
     'restart: loop {
         // r = rhs - S x, z = M^-1 r, p = z, rho = r'z.
-        let x_nonzero = x.iter().any(|v| *v != 0.0);
+        let x_nonzero = if n <= CHUNK || pool.threads() <= 1 {
+            x.iter().any(|v| *v != 0.0)
+        } else {
+            pool.install(|| x.par_chunks(CHUNK).any(|c| c.iter().any(|v| *v != 0.0)))
+        };
         if x_nonzero {
             sys.matvec(x, &mut q, pool)?;
             par_zip3(&mut r, rhs, &q, pool, |r, a, b| *r = a - b);
         } else {
-            r.copy_from_slice(rhs);
+            copy_slice(&mut r, rhs, pool);
         }
         ctx.check()?;
         sys.precond(&r, &mut z, pool);
         if sys.exact() {
             // x* = x + M^-1 (rhs - S x) for the active columns (the others stay frozen).
             let act = &active;
-            pool.install(|| {
-                x.par_chunks_mut(CHUNK * w).zip(z.par_chunks(CHUNK * w)).for_each(|(xc, zc)| {
-                    for (xr, zr) in xc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
-                        for j in 0..w {
-                            if act[j] {
-                                xr[j] += zr[j];
-                            }
+            if n <= CHUNK * w || pool.threads() <= 1 {
+                for (xr, zr) in x.chunks_exact_mut(w).zip(z.chunks_exact(w)) {
+                    for j in 0..w {
+                        if act[j] {
+                            xr[j] += zr[j];
                         }
                     }
-                })
-            });
+                }
+            } else {
+                pool.install(|| {
+                    x.par_chunks_mut(CHUNK * w).zip(z.par_chunks(CHUNK * w)).for_each(|(xc, zc)| {
+                        for (xr, zr) in xc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
+                            for j in 0..w {
+                                if act[j] {
+                                    xr[j] += zr[j];
+                                }
+                            }
+                        }
+                    })
+                });
+            }
             iterations += 1;
             exact = true;
             break 'restart;
         }
-        p.copy_from_slice(&z);
+        copy_slice(&mut p, &z, pool);
         let mut rho = dots(&r, &z, w, pool);
         for j in 0..w {
             if !(rho[j] > 0.0) {
@@ -179,14 +228,14 @@ pub fn pcg(
                     }
                 }
             }
-            // x += gamma p, r -= gamma q (active columns only; gamma = 0 elsewhere).
-            update_xr(x, &mut r, &p, &q, &gamma, w, pool);
+            // Fused x += gamma p, r -= gamma q, xb = x'rhs, xr = x'r over fixed CHUNK ranges
+            // (exact same chunk sums as separate `dots(x, rhs)` and `dots(x, &r)`).
+            let xdots = update_xr_dots(x, &mut r, &p, &q, rhs, &gamma, w, pool);
+            let (xb, xr) = xdots.split_at(w);
             sys.precond(&r, &mut z, pool);
             let rho_new = dots(&r, &z, w, pool);
             iterations += 1;
             k += 1;
-            let xb = dots(x, rhs, w, pool);
-            let xr = dots(x, &r, w, pool);
             for j in 0..w {
                 if !active[j] {
                     continue;
@@ -242,7 +291,21 @@ pub fn pcg(
     Ok(CgOutcome { iterations, escalated, exact })
 }
 
+fn copy_slice(dst: &mut [f64], src: &[f64], pool: &Pool) {
+    if dst.len() <= CHUNK || pool.threads() <= 1 {
+        dst.copy_from_slice(src);
+    } else {
+        pool.install(|| dst.par_chunks_mut(CHUNK).zip(src.par_chunks(CHUNK)).for_each(|(d, s)| d.copy_from_slice(s)));
+    }
+}
+
 fn par_zip3(out: &mut [f64], a: &[f64], b: &[f64], pool: &Pool, f: impl Fn(&mut f64, f64, f64) + Sync) {
+    if out.len() <= CHUNK || pool.threads() <= 1 {
+        for ((o, a), b) in out.iter_mut().zip(a).zip(b) {
+            f(o, *a, *b);
+        }
+        return;
+    }
     pool.install(|| {
         out.par_chunks_mut(CHUNK).zip(a.par_chunks(CHUNK)).zip(b.par_chunks(CHUNK)).for_each(|((o, a), b)| {
             for ((o, a), b) in o.iter_mut().zip(a).zip(b) {
@@ -253,11 +316,22 @@ fn par_zip3(out: &mut [f64], a: &[f64], b: &[f64], pool: &Pool, f: impl Fn(&mut 
 }
 
 fn mask_inactive(p: &mut [f64], active: &[bool], w: usize, pool: &Pool) {
-    if active.iter().all(|a| *a) {
+    if active.iter().all(|a| *a) || w == 0 {
+        return;
+    }
+    let rows = w * 1024;
+    if p.len() <= rows || pool.threads() <= 1 {
+        for row in p.chunks_exact_mut(w) {
+            for (v, a) in row.iter_mut().zip(active) {
+                if !a {
+                    *v = 0.0;
+                }
+            }
+        }
         return;
     }
     pool.install(|| {
-        p.par_chunks_mut(w * 1024).for_each(|ch| {
+        p.par_chunks_mut(rows).for_each(|ch| {
             for row in ch.chunks_exact_mut(w) {
                 for (v, a) in row.iter_mut().zip(active) {
                     if !a {
@@ -269,31 +343,176 @@ fn mask_inactive(p: &mut [f64], active: &[bool], w: usize, pool: &Pool) {
     });
 }
 
-fn update_xr(x: &mut [f64], r: &mut [f64], p: &[f64], q: &[f64], gamma: &[f64], w: usize, pool: &Pool) {
-    let rows = w * 1024;
-    pool.install(|| {
-        x.par_chunks_mut(rows).zip(r.par_chunks_mut(rows)).zip(p.par_chunks(rows).zip(q.par_chunks(rows))).for_each(
-            |((xc, rc), (pc, qc))| {
-                for (((xr, rr), pr), qr) in xc.chunks_exact_mut(w).zip(rc.chunks_exact_mut(w)).zip(pc.chunks_exact(w)).zip(qc.chunks_exact(w)) {
-                    for j in 0..w {
-                        xr[j] += gamma[j] * pr[j];
-                        rr[j] -= gamma[j] * qr[j];
-                    }
-                }
-            },
-        )
+/// Updates `x += gamma * p` and `r -= gamma * q` in place over chunks of [`CHUNK`] rows, and
+/// returns `[x'rhs (w), x'r (w)]` reduced in chunk order.
+#[allow(clippy::too_many_arguments)]
+fn update_xr_dots(x: &mut [f64], r: &mut [f64], p: &[f64], q: &[f64], rhs: &[f64], gamma: &[f64], w: usize, pool: &Pool) -> Vec<f64> {
+    if w == 0 || x.is_empty() {
+        return vec![0.0; 2 * w];
+    }
+    dispatch_width!(w, false, update_xr_dots_w(x, r, p, q, rhs, gamma, w, pool))
+}
+
+#[inline(always)]
+fn update_xr_chunk_inner<const W: usize>(xc: &mut [f64], rc: &mut [f64], pc: &[f64], qc: &[f64], bc: &[f64], gamma: &[f64], w: usize) -> Vec<f64> {
+    let mut out = vec![0.0; 2 * w];
+    if W > 0 && W <= MAX_DISPATCH_WIDTH {
+        let mut xb = [0.0f64; MAX_DISPATCH_WIDTH];
+        let mut xr = [0.0f64; MAX_DISPATCH_WIDTH];
+        let mut g = [0.0f64; MAX_DISPATCH_WIDTH];
+        g[..w].copy_from_slice(&gamma[..w]);
+        for ((((xrow, rrow), prow), qrow), brow) in
+            xc.chunks_exact_mut(w).zip(rc.chunks_exact_mut(w)).zip(pc.chunks_exact(w)).zip(qc.chunks_exact(w)).zip(bc.chunks_exact(w))
+        {
+            for j in 0..w {
+                let xv = xrow[j] + g[j] * prow[j];
+                let rv = rrow[j] - g[j] * qrow[j];
+                xrow[j] = xv;
+                rrow[j] = rv;
+                xb[j] += xv * brow[j];
+                xr[j] += xv * rv;
+            }
+        }
+        out[..w].copy_from_slice(&xb[..w]);
+        out[w..2 * w].copy_from_slice(&xr[..w]);
+    } else {
+        let (xb, xr) = out.split_at_mut(w);
+        for ((((xrow, rrow), prow), qrow), brow) in
+            xc.chunks_exact_mut(w).zip(rc.chunks_exact_mut(w)).zip(pc.chunks_exact(w)).zip(qc.chunks_exact(w)).zip(bc.chunks_exact(w))
+        {
+            for j in 0..w {
+                let xv = xrow[j] + gamma[j] * prow[j];
+                let rv = rrow[j] - gamma[j] * qrow[j];
+                xrow[j] = xv;
+                rrow[j] = rv;
+                xb[j] += xv * brow[j];
+                xr[j] += xv * rv;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn update_xr_chunk_avx2<const W: usize>(xc: &mut [f64], rc: &mut [f64], pc: &[f64], qc: &[f64], bc: &[f64], gamma: &[f64], w: usize) -> Vec<f64> {
+    update_xr_chunk_inner::<W>(xc, rc, pc, qc, bc, gamma, w)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_xr_dots_w<const W: usize, const _B: bool>(
+    x: &mut [f64],
+    r: &mut [f64],
+    p: &[f64],
+    q: &[f64],
+    rhs: &[f64],
+    gamma: &[f64],
+    w: usize,
+    pool: &Pool,
+) -> Vec<f64> {
+    let w = width::<W>(w);
+    let step = CHUNK * w;
+    let avx2 = has_avx2_fma();
+    let chunk_fn = |xc: &mut [f64], rc: &mut [f64], pc: &[f64], qc: &[f64], bc: &[f64]| -> Vec<f64> {
+        #[cfg(target_arch = "x86_64")]
+        if avx2 {
+            // SAFETY: `avx2` checked AVX2 and FMA support.
+            return unsafe { update_xr_chunk_avx2::<W>(xc, rc, pc, qc, bc, gamma, w) };
+        }
+        let _ = avx2;
+        update_xr_chunk_inner::<W>(xc, rc, pc, qc, bc, gamma, w)
+    };
+    if x.len() <= step {
+        return chunk_fn(x, r, p, q, rhs);
+    }
+    if pool.threads() <= 1 {
+        let mut tot = vec![0.0; 2 * w];
+        for ((((xc, rc), pc), qc), bc) in
+            x.chunks_mut(step).zip(r.chunks_mut(step)).zip(p.chunks(step)).zip(q.chunks(step)).zip(rhs.chunks(step))
+        {
+            let part = chunk_fn(xc, rc, pc, qc, bc);
+            for (t, v) in tot.iter_mut().zip(part) {
+                *t += v;
+            }
+        }
+        return tot;
+    }
+    let parts: Vec<Vec<f64>> = pool.install(|| {
+        x.par_chunks_mut(step)
+            .zip(r.par_chunks_mut(step))
+            .zip(p.par_chunks(step).zip(q.par_chunks(step)).zip(rhs.par_chunks(step)))
+            .map(|((xc, rc), ((pc, qc), bc))| chunk_fn(xc, rc, pc, qc, bc))
+            .collect()
     });
+    let mut tot = vec![0.0; 2 * w];
+    for part in parts {
+        for (t, v) in tot.iter_mut().zip(part) {
+            *t += v;
+        }
+    }
+    tot
 }
 
 fn update_p(p: &mut [f64], z: &[f64], beta: &[f64], active: &[bool], w: usize, pool: &Pool) {
-    let rows = w * 1024;
-    pool.install(|| {
-        p.par_chunks_mut(rows).zip(z.par_chunks(rows)).for_each(|(pc, zc)| {
+    if w == 0 || p.is_empty() {
+        return;
+    }
+    let all_active = active.iter().all(|a| *a);
+    dispatch_width!(w, all_active, update_p_w(p, z, beta, active, w, pool));
+}
+
+#[inline(always)]
+fn update_p_body<const W: usize, const ALL_ACTIVE: bool>(pc: &mut [f64], zc: &[f64], beta: &[f64], active: &[bool], w: usize) {
+    if ALL_ACTIVE {
+        if W > 0 && W <= MAX_DISPATCH_WIDTH {
+            let mut b = [0.0f64; MAX_DISPATCH_WIDTH];
+            b[..w].copy_from_slice(&beta[..w]);
             for (pr, zr) in pc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
                 for j in 0..w {
-                    pr[j] = if active[j] { zr[j] + beta[j] * pr[j] } else { 0.0 };
+                    pr[j] = zr[j] + b[j] * pr[j];
                 }
             }
-        })
+        } else {
+            for (pr, zr) in pc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
+                for j in 0..w {
+                    pr[j] = zr[j] + beta[j] * pr[j];
+                }
+            }
+        }
+    } else {
+        for (pr, zr) in pc.chunks_exact_mut(w).zip(zc.chunks_exact(w)) {
+            for j in 0..w {
+                pr[j] = if active[j] { zr[j] + beta[j] * pr[j] } else { 0.0 };
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn update_p_body_avx2<const W: usize, const ALL_ACTIVE: bool>(pc: &mut [f64], zc: &[f64], beta: &[f64], active: &[bool], w: usize) {
+    update_p_body::<W, ALL_ACTIVE>(pc, zc, beta, active, w);
+}
+
+fn update_p_w<const W: usize, const ALL_ACTIVE: bool>(p: &mut [f64], z: &[f64], beta: &[f64], active: &[bool], w: usize, pool: &Pool) {
+    let w = width::<W>(w);
+    let rows = w * 1024;
+    let avx2 = has_avx2_fma();
+    let body = |pc: &mut [f64], zc: &[f64]| {
+        #[cfg(target_arch = "x86_64")]
+        if avx2 {
+            // SAFETY: `avx2` checked AVX2 and FMA support.
+            unsafe { update_p_body_avx2::<W, ALL_ACTIVE>(pc, zc, beta, active, w) };
+            return;
+        }
+        let _ = avx2;
+        update_p_body::<W, ALL_ACTIVE>(pc, zc, beta, active, w);
+    };
+    if p.len() <= rows || pool.threads() <= 1 {
+        body(p, z);
+        return;
+    }
+    pool.install(|| {
+        p.par_chunks_mut(rows).zip(z.par_chunks(rows)).for_each(|(pc, zc)| body(pc, zc))
     });
 }

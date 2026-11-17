@@ -84,9 +84,22 @@ impl Weights {
         let wv = match (kind, &raw) {
             (WeightKind::Aweight | WeightKind::Pweight, Some(w)) => {
                 let f = n_obs as f64 / sumw;
-                let mut v = par::alloc_vec(w.len(), 0.0)?;
-                pool.install(|| v.par_iter_mut().zip(w.par_iter()).for_each(|(o, x)| *o = x * f));
-                Some(v)
+                let mut v = par::alloc_uninit::<f64>(w.len())?;
+                if w.len() <= CHUNK || pool.threads() <= 1 {
+                    for (o, &x) in v.iter_mut().zip(w) {
+                        o.write(x * f);
+                    }
+                } else {
+                    pool.install(|| {
+                        v.par_chunks_mut(CHUNK).zip(w.par_chunks(CHUNK)).for_each(|(oc, wc)| {
+                            for (o, &x) in oc.iter_mut().zip(wc) {
+                                o.write(x * f);
+                            }
+                        })
+                    });
+                }
+                // SAFETY: every slot of `v` was written above.
+                Some(unsafe { par::assume_init(v) })
             }
             (WeightKind::Fweight, Some(w)) => Some(w.clone()),
             _ => None,
@@ -285,9 +298,23 @@ impl Session {
             e
         };
         let e: Option<Vec<f64>> = if need_e {
-            let mut e = par::alloc_vec(n, 0.0)?;
-            pool.install(|| e.par_iter_mut().enumerate().for_each(|(i, v)| *v = resid_of(i)));
-            Some(e)
+            let mut e = par::alloc_uninit::<f64>(n)?;
+            if n <= CHUNK || pool.threads() <= 1 {
+                for (i, v) in e.iter_mut().enumerate() {
+                    v.write(resid_of(i));
+                }
+            } else {
+                pool.install(|| {
+                    e.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, ec)| {
+                        let base = ci * CHUNK;
+                        for (j, v) in ec.iter_mut().enumerate() {
+                            v.write(resid_of(base + j));
+                        }
+                    })
+                });
+            }
+            // SAFETY: every slot of `0..n` was written above.
+            Some(unsafe { par::assume_init(e) })
         } else {
             None
         };

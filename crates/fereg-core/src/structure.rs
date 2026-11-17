@@ -231,10 +231,35 @@ fn choose_elimination(terms: &[Term], pool: &Pool) -> Result<(Option<usize>, Opt
     // E of the default is at most (Q - 1)*sum_s n_s^2 (n_s: observations of level s): when that
     // is already small the reduced system is cheap whatever the choice (individual-level
     // panels), so the pair counts are skipped.
-    let mut size = vec![0u64; terms[f0].g];
-    for &c in &terms[f0].codes {
-        size[c as usize] += 1;
-    }
+    let codes0 = &terms[f0].codes;
+    let g0 = terms[f0].g;
+    let size: Vec<u64> = if codes0.len() <= CHUNK || pool.threads() <= 1 || g0 * codes0.len().div_ceil(CHUNK) > 4 * codes0.len() {
+        let mut s = vec![0u64; g0];
+        for &c in codes0 {
+            s[c as usize] += 1;
+        }
+        s
+    } else {
+        let parts: Vec<Vec<u32>> = pool.install(|| {
+            codes0
+                .par_chunks(CHUNK)
+                .map(|ch| {
+                    let mut h = vec![0u32; g0];
+                    for &c in ch {
+                        h[c as usize] += 1;
+                    }
+                    h
+                })
+                .collect()
+        });
+        let mut s = vec![0u64; g0];
+        for h in &parts {
+            for (o, &v) in s.iter_mut().zip(h) {
+                *o += u64::from(v);
+            }
+        }
+        s
+    };
     let bound = (terms.len() as u64 - 1) * size.iter().map(|n| n * n).sum::<u64>();
     if bound <= ELIM_CHEAP_PER_OBS * terms[f0].codes.len() as u64 {
         return Ok((default, None));

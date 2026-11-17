@@ -1,15 +1,17 @@
 //! Analytical bias correction of the coefficients (design sec. 3) and the exact re-estimation of
 //! the fixed effects at given coefficients (sec. 3.3).
 
+use rayon::prelude::*;
+
 use super::{
-    BiasSpec, FeCodes, LogitData, Normalization, Structure, WhichBias, alloc_cols, center, check_data, check_structure, zeros, chol_solve, default_key, derivs,
-    invalid, lag_term, ordered_groups, wcross, CENTER_MAXITER, CENTER_TOL,
+    BiasSpec, FeCodes, LogitData, Normalization, Structure, WhichBias, center, check_data, check_structure, chol_solve, default_key, derivs, groups, invalid,
+    lag_term, ordered_groups, wcross, zeros, CENTER_MAXITER, CENTER_TOL,
 };
 use crate::absorber::{Absorber, FeCoefs, SolveOpts};
 use crate::api::Ctx;
 use crate::error::RfError;
 use crate::glm::family::{self, logit_ll};
-use crate::par::{self, Pool};
+use crate::par::{self, CHUNK, Pool};
 
 /// Result of [`analytical`].
 #[derive(Clone, Debug)]
@@ -148,56 +150,91 @@ pub(crate) fn plan_bandwidth(d: &LogitData, spec: &BiasSpec) -> Result<usize, Rf
     Ok(plan(d, spec)?.bandwidth)
 }
 
-/// sum_g (sum_{r in g} A_r)/(sum_{r in g} w_r) over the groups of `f` (p-vector), in group order.
-fn group_ratio(a: &[Vec<f64>], w: &[f64], f: &FeCodes) -> Vec<f64> {
+/// sum_g (sum_{r in g} A_r)/(sum_{r in g} w_r) over the groups of `f` (p-vector), deterministic.
+fn group_ratio(a: &[Vec<f64>], w: &[f64], f: &FeCodes, pool: &Pool) -> Result<Vec<f64>, RfError> {
     let p = a.len();
-    let mut num = vec![0.0; f.g * p];
-    let mut den = vec![0.0; f.g];
-    for (r, &c) in f.codes.iter().enumerate() {
-        let c = c as usize;
-        den[c] += w[r];
-        for j in 0..p {
-            num[c * p + j] += a[j][r];
-        }
-    }
-    let mut out = vec![0.0; p];
-    for c in 0..f.g {
-        if den[c] > 0.0 {
-            for j in 0..p {
-                out[j] += num[c * p + j] / den[c];
-            }
-        }
-    }
-    out
-}
-
-/// alpaca's spectral sum: sum_g [sum_{l=1..L} sum_{t=l..T_g-1} A_{g[t]} v_{g[t-l]} T_g/(T_g-l)] / sum_g w.
-fn spectral(a: &[Vec<f64>], v: &[f64], w: &[f64], l: usize, off: &[usize], ids: &[u32]) -> Vec<f64> {
-    let p = a.len();
-    let mut out = vec![0.0; p];
-    let mut num = vec![0.0; p];
-    for q in 0..off.len() - 1 {
-        let g = &ids[off[q]..off[q + 1]];
-        let tg = g.len();
-        num.iter_mut().for_each(|x| *x = 0.0);
-        for lag in 1..=l {
-            if tg <= lag {
-                continue;
-            }
-            let f = tg as f64 / (tg - lag) as f64;
-            for t in lag..tg {
-                let (r, s) = (g[t] as usize, g[t - lag] as usize);
+    let n = f.codes.len();
+    if f.g.saturating_mul(p + 1) <= 4096 {
+        let stride = p + 1;
+        let sums = par::sum_chunks(pool, n, CHUNK, f.g * stride, |range, acc| {
+            for r in range {
+                let base = f.codes[r] as usize * stride;
+                acc[base] += w[r];
                 for j in 0..p {
-                    num[j] += a[j][r] * v[s] * f;
+                    acc[base + 1 + j] += a[j][r];
+                }
+            }
+        });
+        let mut out = vec![0.0; p];
+        for c in 0..f.g {
+            let base = c * stride;
+            let den = sums[base];
+            if den > 0.0 {
+                for j in 0..p {
+                    out[j] += sums[base + 1 + j] / den;
                 }
             }
         }
-        let sw: f64 = g.iter().map(|&r| w[r as usize]).sum();
-        for j in 0..p {
-            out[j] += num[j] / sw;
-        }
+        return Ok(out);
     }
-    out
+    let (off, ids) = groups(f.codes, f.g, pool)?;
+    Ok(par::sum_chunks(pool, f.g, 256, p, |range, out| {
+        let mut num = vec![0.0; p];
+        for c in range {
+            let rows = &ids[off[c]..off[c + 1]];
+            if rows.is_empty() {
+                continue;
+            }
+            let mut den = 0.0;
+            num.fill(0.0);
+            for &r in rows {
+                let r = r as usize;
+                den += w[r];
+                for j in 0..p {
+                    num[j] += a[j][r];
+                }
+            }
+            if den > 0.0 {
+                for j in 0..p {
+                    out[j] += num[j] / den;
+                }
+            }
+        }
+    }))
+}
+
+/// alpaca's spectral sum: sum_g [sum_{l=1..L} sum_{t=l..T_g-1} A_{g[t]} v_{g[t-l]} T_g/(T_g-l)] / sum_g w.
+fn spectral(a: &[Vec<f64>], v: &[f64], w: &[f64], l: usize, off: &[usize], ids: &[u32], pool: &Pool) -> Vec<f64> {
+    let p = a.len();
+    let ng = off.len().saturating_sub(1);
+    par::sum_chunks(pool, ng, 256, p, |range, out| {
+        let mut num = vec![0.0; p];
+        for q in range {
+            let g = &ids[off[q]..off[q + 1]];
+            let tg = g.len();
+            if tg == 0 {
+                continue;
+            }
+            num.fill(0.0);
+            for lag in 1..=l {
+                if tg <= lag {
+                    continue;
+                }
+                let f = tg as f64 / (tg - lag) as f64;
+                for t in lag..tg {
+                    let (r, s) = (g[t] as usize, g[t - lag] as usize);
+                    let vsf = v[s] * f;
+                    for j in 0..p {
+                        num[j] += a[j][r] * vsf;
+                    }
+                }
+            }
+            let sw: f64 = g.iter().map(|&r| w[r as usize]).sum();
+            for j in 0..p {
+                out[j] += num[j] / sw;
+            }
+        }
+    })
 }
 
 /// The bias sum shared by the coefficients and the APEs:
@@ -208,26 +245,36 @@ fn spectral(a: &[Vec<f64>], v: &[f64], w: &[f64], l: usize, off: &[usize], ids: 
 /// Coefficients: A = MX z, Bl = MX w, sign +1 (b of beta_c = beta + (H/n)^-1 b). APEs: A = Delta2 + P Psi z,
 /// Bl = M Psi w, sign -1 (delta_c = delta - b).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn bias_sum(d: &LogitData, spec: &BiasSpec, plan: &Plan, a: &[Vec<f64>], bl: &[Vec<f64>], w: &[f64], v: &[f64], sign: f64) -> Result<Vec<f64>, RfError> {
+pub(crate) fn bias_sum(
+    d: &LogitData,
+    spec: &BiasSpec,
+    plan: &Plan,
+    a: &[Vec<f64>],
+    bl: &[Vec<f64>],
+    w: &[f64],
+    v: &[f64],
+    sign: f64,
+    pool: &Pool,
+) -> Result<Vec<f64>, RfError> {
     let n = d.y.len();
     let p = a.len();
     let mut b = vec![0.0; p];
     match spec.normalization {
         Normalization::Alpaca => {
             for &q in &plan.stat {
-                let s = group_ratio(a, w, &d.fe[q]);
+                let s = group_ratio(a, w, &d.fe[q], pool)?;
                 b.iter_mut().zip(s).for_each(|(b, s)| *b += s / (2.0 * n as f64));
             }
             if let Some(q) = plan.spec {
                 let f = &d.fe[q];
                 let (off, ids) = match spec.order {
-                    Some(o) => ordered_groups(f.codes, f.g, Some(&|r| o[r])),
+                    Some(o) => ordered_groups(f.codes, f.g, Some(&|r| o[r]), pool)?,
                     None => {
                         let key = default_key(&d.fe, q);
-                        ordered_groups(f.codes, f.g, key.as_deref())
+                        ordered_groups(f.codes, f.g, key.as_deref(), pool)?
                     }
                 };
-                let s = spectral(bl, v, w, plan.bandwidth, &off, &ids);
+                let s = spectral(bl, v, w, plan.bandwidth, &off, &ids, pool);
                 b.iter_mut().zip(s).for_each(|(b, s)| *b += sign * s / n as f64);
             }
         }
@@ -235,65 +282,80 @@ pub(crate) fn bias_sum(d: &LogitData, spec: &BiasSpec, plan: &Plan, a: &[Vec<f64
             let pn = spec.logitfe.expect("checked by plan");
             if plan.ib {
                 let l = plan.bandwidth;
-                let (off, ids) = ordered_groups(pn.individual, pn.n_individuals, Some(&|r| pn.period[r]));
-                let mut acc = vec![0.0; p];
-                let mut count = 0usize;
-                let mut stat = vec![0.0; p];
-                let mut lagsum = vec![0.0; p];
-                let mut term = vec![0.0; p];
-                for i in 0..pn.n_individuals {
-                    let g = &ids[off[i]..off[i + 1]];
-                    if g.is_empty() {
-                        continue;
-                    }
-                    for t in 1..g.len() {
-                        if pn.period[g[t] as usize] == pn.period[g[t - 1] as usize] {
-                            return invalid("bias correction: repeated (individual, period) pair in the sample");
+                let (off, ids) = ordered_groups(pn.individual, pn.n_individuals, Some(&|r| pn.period[r]), pool)?;
+                struct IndChunk {
+                    dup: bool,
+                    count: usize,
+                    acc: Vec<f64>,
+                }
+                let chunks = par::map_chunks(pool, pn.n_individuals, 256, |_, range| {
+                    let mut acc = vec![0.0; p];
+                    let mut count = 0usize;
+                    let mut stat = vec![0.0; p];
+                    let mut lagsum = vec![0.0; p];
+                    let mut term = vec![0.0; p];
+                    for i in range {
+                        let g = &ids[off[i]..off[i + 1]];
+                        if g.is_empty() {
+                            continue;
                         }
-                    }
-                    let ti = g.len() as f64;
-                    let sw: f64 = g.iter().map(|&r| w[r as usize]).sum();
-                    stat.iter_mut().for_each(|x| *x = 0.0);
-                    for &r in g {
-                        for j in 0..p {
-                            stat[j] += a[j][r as usize];
-                        }
-                    }
-                    for j in 0..p {
-                        term[j] = 0.5 * stat[j] / sw / ti;
-                    }
-                    let mut complete = true;
-                    for lag in 1..=l as i64 {
-                        lagsum.iter_mut().for_each(|x| *x = 0.0);
-                        let mut tn = 0usize;
-                        // Rows sorted by period: the row of period t - lag, if present, is found by
-                        // a merge-like scan.
-                        let mut s = 0usize;
-                        for &r in g {
-                            let want = pn.period[r as usize] - lag;
-                            while s < g.len() && pn.period[g[s] as usize] < want {
-                                s += 1;
+                        for t in 1..g.len() {
+                            if pn.period[g[t] as usize] == pn.period[g[t - 1] as usize] {
+                                return IndChunk { dup: true, count: 0, acc };
                             }
-                            if s < g.len() && pn.period[g[s] as usize] == want {
-                                tn += 1;
-                                let vs = v[g[s] as usize];
-                                for j in 0..p {
-                                    lagsum[j] += vs * bl[j][r as usize];
+                        }
+                        let ti = g.len() as f64;
+                        let sw: f64 = g.iter().map(|&r| w[r as usize]).sum();
+                        stat.fill(0.0);
+                        for &r in g {
+                            for j in 0..p {
+                                stat[j] += a[j][r as usize];
+                            }
+                        }
+                        for j in 0..p {
+                            term[j] = 0.5 * stat[j] / sw / ti;
+                        }
+                        let mut complete = true;
+                        for lag in 1..=l as i64 {
+                            lagsum.fill(0.0);
+                            let mut tn = 0usize;
+                            let mut s = 0usize;
+                            for &r in g {
+                                let want = pn.period[r as usize] - lag;
+                                while s < g.len() && pn.period[g[s] as usize] < want {
+                                    s += 1;
+                                }
+                                if s < g.len() && pn.period[g[s] as usize] == want {
+                                    tn += 1;
+                                    let vs = v[g[s] as usize];
+                                    for j in 0..p {
+                                        lagsum[j] += vs * bl[j][r as usize];
+                                    }
                                 }
                             }
+                            if tn == 0 {
+                                complete = false;
+                                break;
+                            }
+                            for j in 0..p {
+                                term[j] += sign * lagsum[j] / sw / tn as f64;
+                            }
                         }
-                        if tn == 0 {
-                            complete = false;
-                            break;
-                        }
-                        for j in 0..p {
-                            term[j] += sign * lagsum[j] / sw / tn as f64;
+                        if complete {
+                            count += 1;
+                            acc.iter_mut().zip(&term).for_each(|(a, t)| *a += t);
                         }
                     }
-                    if complete {
-                        count += 1;
-                        acc.iter_mut().zip(&term).for_each(|(a, t)| *a += t);
+                    IndChunk { dup: false, count, acc }
+                });
+                let mut acc = vec![0.0; p];
+                let mut count = 0usize;
+                for ch in chunks {
+                    if ch.dup {
+                        return invalid("bias correction: repeated (individual, period) pair in the sample");
                     }
+                    count += ch.count;
+                    acc.iter_mut().zip(&ch.acc).for_each(|(a, x)| *a += x);
                 }
                 if count == 0 {
                     return invalid("bias correction: no individual has every lag in the sample");
@@ -305,7 +367,7 @@ pub(crate) fn bias_sum(d: &LogitData, spec: &BiasSpec, plan: &Plan, a: &[Vec<f64
                 let mut seen = vec![false; pn.n_individuals];
                 pn.individual.iter().for_each(|&c| seen[c as usize] = true);
                 let ng = seen.iter().filter(|s| **s).count() as f64;
-                let s = group_ratio(a, w, &FeCodes { codes: &codes, g: nt });
+                let s = group_ratio(a, w, &FeCodes { codes: &codes, g: nt }, pool)?;
                 b.iter_mut().zip(s).for_each(|(b, s)| *b += 0.5 * s / nt as f64 / ng);
             }
         }
@@ -327,13 +389,40 @@ pub(crate) fn dense_rank(v: &[i64]) -> (Vec<u32>, usize) {
 pub fn analytical(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], eta: &[f64], spec: &BiasSpec, ctx: &Ctx) -> Result<Corrected, RfError> {
     let n = check_data(d, abs, coef, eta)?;
     let plan = plan(d, spec)?;
-    par::with_pool(par::threads_for(ctx.threads, n), |pool| {
-        let (bias_term, b) = coef_bias(d, abs, eta, spec, &plan, pool, ctx)?;
-        let coef_c: Vec<f64> = coef.iter().zip(&bias_term).map(|(c, t)| c - t).collect();
-        let start = shifted_eta(d, eta, coef, &coef_c);
-        let r = resolve_in(d, abs, &coef_c, &start, pool, ctx)?;
-        Ok(Corrected { coef: coef_c, bias_term, b, eta: r.eta, fe_coefs: r.fe_coefs, iterations: r.iterations, notes: plan.notes })
-    })?
+    par::with_pool(par::threads_for(ctx.threads, n), |pool| analytical_inner(d, abs, coef, eta, spec, plan, pool, ctx))?
+}
+
+/// [`analytical`] running on an existing [`Pool`].
+pub(crate) fn analytical_in(
+    d: &LogitData,
+    abs: &mut dyn Absorber,
+    coef: &[f64],
+    eta: &[f64],
+    spec: &BiasSpec,
+    pool: &Pool,
+    ctx: &Ctx,
+) -> Result<Corrected, RfError> {
+    check_data(d, abs, coef, eta)?;
+    let plan = plan(d, spec)?;
+    analytical_inner(d, abs, coef, eta, spec, plan, pool, ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analytical_inner(
+    d: &LogitData,
+    abs: &mut dyn Absorber,
+    coef: &[f64],
+    eta: &[f64],
+    spec: &BiasSpec,
+    plan: Plan,
+    pool: &Pool,
+    ctx: &Ctx,
+) -> Result<Corrected, RfError> {
+    let (bias_term, b) = coef_bias(d, abs, eta, spec, &plan, pool, ctx)?;
+    let coef_c: Vec<f64> = coef.iter().zip(&bias_term).map(|(c, t)| c - t).collect();
+    let start = shifted_eta(d, eta, coef, &coef_c, pool);
+    let r = resolve_in(d, abs, &coef_c, &start, pool, ctx)?;
+    Ok(Corrected { coef: coef_c, bias_term, b, eta: r.eta, fe_coefs: r.fe_coefs, iterations: r.iterations, notes: plan.notes })
 }
 
 /// (bias_term, b) at the point.
@@ -341,29 +430,68 @@ fn coef_bias(d: &LogitData, abs: &mut dyn Absorber, eta: &[f64], spec: &BiasSpec
     let n = d.y.len();
     let p = d.x.len();
     let wt = |r: usize| d.weights.map_or(1.0, |w| w[r]);
-    let mut w = zeros(n)?;
-    let mut v = zeros(n)?;
-    let mut z = zeros(n)?;
-    for r in 0..n {
-        let (m, d1, d2, _) = derivs(eta[r]);
-        w[r] = wt(r) * d1;
-        v[r] = wt(r) * (d.y[r] - m);
-        z[r] = wt(r) * d2;
+    let mut w = par::alloc_uninit::<f64>(n)?;
+    let mut v = par::alloc_uninit::<f64>(n)?;
+    let mut z = par::alloc_uninit::<f64>(n)?;
+    if n <= CHUNK || pool.threads() <= 1 {
+        for r in 0..n {
+            let (m, d1, d2, _) = derivs(eta[r]);
+            let wr = wt(r);
+            w[r].write(wr * d1);
+            v[r].write(wr * (d.y[r] - m));
+            z[r].write(wr * d2);
+        }
+    } else {
+        pool.install(|| {
+            w.par_chunks_mut(CHUNK)
+                .zip(v.par_chunks_mut(CHUNK))
+                .zip(z.par_chunks_mut(CHUNK))
+                .enumerate()
+                .for_each(|(ci, ((wc, vc), zc))| {
+                    let base = ci * CHUNK;
+                    for (j, ((wo, vo), zo)) in wc.iter_mut().zip(vc).zip(zc).enumerate() {
+                        let r = base + j;
+                        let (m, d1, d2, _) = derivs(eta[r]);
+                        let wr = wt(r);
+                        wo.write(wr * d1);
+                        vo.write(wr * (d.y[r] - m));
+                        zo.write(wr * d2);
+                    }
+                })
+        });
     }
+    // SAFETY: every slot of `0..n` in `w`, `v`, `z` was written above.
+    let (w, v, z) = unsafe { (par::assume_init(w), par::assume_init(v), par::assume_init(z)) };
     let mx = center(abs, &d.x, &w, pool, ctx)?;
     ctx.check()?;
-    let h = wcross(&mx, &w);
+    let h = wcross(&mx, &w, pool);
     // A = MX z (new), Bl = MX w (over MX).
-    let mut a = alloc_cols(p, n)?;
+    let mut a_uninit: Vec<Vec<std::mem::MaybeUninit<f64>>> = (0..p).map(|_| par::alloc_uninit::<f64>(n)).collect::<Result<_, _>>()?;
     let mut bl = mx;
-    for (ac, bc) in a.iter_mut().zip(bl.iter_mut()) {
-        for r in 0..n {
-            ac[r] = bc[r] * z[r];
-            bc[r] *= w[r];
+    for (ac, bc) in a_uninit.iter_mut().zip(bl.iter_mut()) {
+        if n <= CHUNK || pool.threads() <= 1 {
+            for r in 0..n {
+                ac[r].write(bc[r] * z[r]);
+                bc[r] *= w[r];
+            }
+        } else {
+            pool.install(|| {
+                ac.par_chunks_mut(CHUNK)
+                    .zip(bc.par_chunks_mut(CHUNK))
+                    .zip(z.par_chunks(CHUNK).zip(w.par_chunks(CHUNK)))
+                    .for_each(|((ao, bo), (zc, wc))| {
+                        for ((av, bv), (&zv, &wv)) in ao.iter_mut().zip(bo).zip(zc.iter().zip(wc)) {
+                            av.write(*bv * zv);
+                            *bv *= wv;
+                        }
+                    })
+            });
         }
     }
     drop(z);
-    let b = bias_sum(d, spec, plan, &a, &bl, &w, &v, 1.0)?;
+    // SAFETY: every slot of `0..n` in each column of `a_uninit` was written above.
+    let a: Vec<Vec<f64>> = a_uninit.into_iter().map(|col| unsafe { par::assume_init(col) }).collect();
+    let b = bias_sum(d, spec, plan, &a, &bl, &w, &v, 1.0, pool)?;
     let hn: Vec<f64> = h.iter().map(|x| x / n as f64).collect();
     let neg: Vec<f64> = b.iter().map(|x| -x).collect();
     let bias_term = chol_solve(&hn, p, &neg, 1)?;
@@ -371,9 +499,19 @@ fn coef_bias(d: &LogitData, abs: &mut dyn Absorber, eta: &[f64], spec: &BiasSpec
 }
 
 /// eta + X (to - from): the uncorrected fixed effects with the linear index at `to`.
-pub(crate) fn shifted_eta(d: &LogitData, eta: &[f64], from: &[f64], to: &[f64]) -> Vec<f64> {
+pub(crate) fn shifted_eta(d: &LogitData, eta: &[f64], from: &[f64], to: &[f64], pool: &Pool) -> Vec<f64> {
     let delta: Vec<f64> = to.iter().zip(from).map(|(a, b)| a - b).collect();
-    (0..eta.len()).map(|r| eta[r] + d.x.iter().zip(&delta).map(|(x, c)| x[r] * c).sum::<f64>()).collect()
+    let n = eta.len();
+    if n <= CHUNK || pool.threads() <= 1 {
+        return (0..n).map(|r| eta[r] + d.x.iter().zip(&delta).map(|(x, c)| x[r] * c).sum::<f64>()).collect();
+    }
+    pool.install(|| {
+        (0..n)
+            .into_par_iter()
+            .with_min_len(CHUNK)
+            .map(|r| eta[r] + d.x.iter().zip(&delta).map(|(x, c)| x[r] * c).sum::<f64>())
+            .collect()
+    })
 }
 
 /// Newton iterations of the fixed-effects-only problem.
@@ -392,47 +530,103 @@ pub fn resolve_fe(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], eta_start
     par::with_pool(par::threads_for(ctx.threads, n), |pool| resolve_in(d, abs, coef, eta_start, pool, ctx))?
 }
 
-fn deviance(y: &[f64], wt: &[f64], eta: &[f64]) -> f64 {
-    -2.0 * y.iter().zip(wt).zip(eta).map(|((y, w), e)| w * logit_ll(*y, *e)).sum::<f64>()
+fn deviance(y: &[f64], wt: &[f64], eta: &[f64], pool: &Pool) -> f64 {
+    -2.0 * par::sum_chunks(pool, y.len(), CHUNK, 1, |range, acc| {
+        for i in range {
+            acc[0] += wt[i] * logit_ll(y[i], eta[i]);
+        }
+    })[0]
 }
 
 pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], eta_start: &[f64], pool: &Pool, ctx: &Ctx) -> Result<Resolved, RfError> {
     let order = abs.row_order().to_vec();
     let n = order.len();
-    let at = |k: usize| order[k] as usize;
-    let mut off = zeros(n)?;
-    let mut y = zeros(n)?;
-    let mut wt = zeros(n)?;
-    let mut eta = zeros(n)?;
-    for k in 0..n {
-        let i = at(k);
-        off[k] = d.offset.map_or(0.0, |o| o[i]) + d.x.iter().zip(coef).map(|(x, c)| x[i] * c).sum::<f64>();
-        y[k] = d.y[i];
-        wt[k] = d.weights.map_or(1.0, |w| w[i]);
-        eta[k] = eta_start[i];
+    let mut off = par::alloc_uninit::<f64>(n)?;
+    let mut y = par::alloc_uninit::<f64>(n)?;
+    let mut wt = par::alloc_uninit::<f64>(n)?;
+    let mut eta = par::alloc_uninit::<f64>(n)?;
+    if n <= CHUNK || pool.threads() <= 1 {
+        for (k, &idx) in order.iter().enumerate() {
+            let i = idx as usize;
+            off[k].write(d.offset.map_or(0.0, |o| o[i]) + d.x.iter().zip(coef).map(|(x, c)| x[i] * c).sum::<f64>());
+            y[k].write(d.y[i]);
+            wt[k].write(d.weights.map_or(1.0, |w| w[i]));
+            eta[k].write(eta_start[i]);
+        }
+    } else {
+        pool.install(|| {
+            off.par_chunks_mut(CHUNK)
+                .zip(y.par_chunks_mut(CHUNK))
+                .zip(wt.par_chunks_mut(CHUNK))
+                .zip(eta.par_chunks_mut(CHUNK))
+                .zip(order.par_chunks(CHUNK))
+                .for_each(|((((oc, yc), wtc), ec), ord)| {
+                    for ((((oo, yo), wto), eo), &idx) in oc.iter_mut().zip(yc).zip(wtc).zip(ec).zip(ord) {
+                        let i = idx as usize;
+                        oo.write(d.offset.map_or(0.0, |o| o[i]) + d.x.iter().zip(coef).map(|(x, c)| x[i] * c).sum::<f64>());
+                        yo.write(d.y[i]);
+                        wto.write(d.weights.map_or(1.0, |w| w[i]));
+                        eo.write(eta_start[i]);
+                    }
+                })
+        });
     }
-    let mut dev = deviance(&y, &wt, &eta);
-    let mut w = zeros(n)?;
-    let mut u = zeros(n)?;
-    let mut block = zeros(n)?;
-    let mut next = zeros(n)?;
+    // SAFETY: every slot of `0..n` in `off`, `y`, `wt`, `eta` was written above.
+    let (off, y, wt, mut eta) = unsafe { (par::assume_init(off), par::assume_init(y), par::assume_init(wt), par::assume_init(eta)) };
+    let mut dev = deviance(&y, &wt, &eta, pool);
+    let mut w = zeros(n, pool)?;
+    let mut u = zeros(n, pool)?;
+    let mut block = zeros(n, pool)?;
+    let mut next = zeros(n, pool)?;
     let opts = SolveOpts { tol: CENTER_TOL, maxiter: CENTER_MAXITER, want_coefs: false };
     for it in 1..=RESOLVE_MAXITER {
         ctx.check()?;
         // Newton step in increment form: eta += P_w (y - mu)/mu' (P_w = the weighted FE projection).
-        for k in 0..n {
-            let m = family::mean(crate::api::Family::Logit, eta[k]);
-            let d1 = m * (1.0 - m);
-            w[k] = wt[k] * d1;
-            u[k] = (y[k] - m) / d1;
+        if n <= CHUNK || pool.threads() <= 1 {
+            for k in 0..n {
+                let m = family::mean(crate::api::Family::Logit, eta[k]);
+                let d1 = m * (1.0 - m);
+                w[k] = wt[k] * d1;
+                u[k] = (y[k] - m) / d1;
+                block[k] = u[k];
+            }
+        } else {
+            pool.install(|| {
+                w.par_chunks_mut(CHUNK)
+                    .zip(u.par_chunks_mut(CHUNK))
+                    .zip(block.par_chunks_mut(CHUNK))
+                    .zip(eta.par_chunks(CHUNK).zip(wt.par_chunks(CHUNK)).zip(y.par_chunks(CHUNK)))
+                    .for_each(|(((wc, uc), bc), ((ec, wtc), yc))| {
+                        for (((wo, uo), bo), ((&ek, &wtk), &yk)) in wc.iter_mut().zip(uc).zip(bc).zip(ec.iter().zip(wtc).zip(yc)) {
+                            let m = family::mean(crate::api::Family::Logit, ek);
+                            let d1 = m * (1.0 - m);
+                            *wo = wtk * d1;
+                            let uk = (yk - m) / d1;
+                            *uo = uk;
+                            *bo = uk;
+                        }
+                    })
+            });
         }
         abs.set_weights(Some(&w), pool, ctx)?;
-        block.copy_from_slice(&u);
         abs.residualize(&mut block, 1, &opts, None, pool, ctx)?;
-        for k in 0..n {
-            next[k] = eta[k] + (u[k] - block[k]);
+        if n <= CHUNK || pool.threads() <= 1 {
+            for k in 0..n {
+                next[k] = eta[k] + (u[k] - block[k]);
+            }
+        } else {
+            pool.install(|| {
+                next.par_chunks_mut(CHUNK)
+                    .zip(eta.par_chunks(CHUNK))
+                    .zip(u.par_chunks(CHUNK).zip(block.par_chunks(CHUNK)))
+                    .for_each(|((nc, ec), (uc, bc))| {
+                        for ((no, &ek), (&uk, &bk)) in nc.iter_mut().zip(ec).zip(uc.iter().zip(bc)) {
+                            *no = ek + (uk - bk);
+                        }
+                    })
+            });
         }
-        let mut dev_next = deviance(&y, &wt, &next);
+        let mut dev_next = deviance(&y, &wt, &next, pool);
         let mut halved = false;
         let mut tries = 0;
         while dev_next.is_nan() || dev_next > dev + 1e-12 * (0.1 + dev.abs()) {
@@ -441,10 +635,18 @@ pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], et
                 return Err(RfError::Code(430, "bias correction: the re-estimation of the fixed effects could not decrease the deviance".into()));
             }
             halved = true;
-            next.iter_mut().zip(&eta).for_each(|(a, b)| *a = 0.5 * (*a + b));
-            dev_next = deviance(&y, &wt, &next);
+            if n <= CHUNK || pool.threads() <= 1 {
+                next.iter_mut().zip(&eta).for_each(|(a, b)| *a = 0.5 * (*a + b));
+            } else {
+                pool.install(|| next.par_chunks_mut(CHUNK).zip(eta.par_chunks(CHUNK)).for_each(|(nc, ec)| nc.iter_mut().zip(ec).for_each(|(a, b)| *a = 0.5 * (*a + b))));
+            }
+            dev_next = deviance(&y, &wt, &next, pool);
         }
-        let step = next.iter().zip(&eta).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        let step = par::map_chunks(pool, n, CHUNK, |_, range| {
+            next[range.clone()].iter().zip(&eta[range]).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max)
+        })
+        .into_iter()
+        .fold(0.0, f64::max);
         if !step.is_finite() {
             return Err(RfError::Code(430, "bias correction: the re-estimation of the fixed effects diverged".into()));
         }
@@ -452,15 +654,22 @@ pub(crate) fn resolve_in(d: &LogitData, abs: &mut dyn Absorber, coef: &[f64], et
         dev = dev_next;
         if !halved && step < RESOLVE_TOL {
             // FE coefficients of the solution: the FE part eta - offset - X coef lies in the FE space.
-            for k in 0..n {
-                block[k] = eta[k] - off[k];
+            if n <= CHUNK || pool.threads() <= 1 {
+                for k in 0..n {
+                    block[k] = eta[k] - off[k];
+                }
+            } else {
+                pool.install(|| {
+                    block.par_chunks_mut(CHUNK).zip(eta.par_chunks(CHUNK)).zip(off.par_chunks(CHUNK)).for_each(|((bc, ec), oc)| {
+                        for ((bo, &ek), &ok) in bc.iter_mut().zip(ec).zip(oc) {
+                            *bo = ek - ok;
+                        }
+                    })
+                });
             }
             let info = abs.residualize(&mut block, 1, &SolveOpts { want_coefs: true, ..opts }, None, pool, ctx)?;
             let fe_coefs = info.coefs.ok_or_else(|| RfError::Internal("absorber returned no FE coefficients".into()))?;
-            let mut out = next;
-            for k in 0..n {
-                out[at(k)] = eta[k];
-            }
+            let out = crate::fe_recovery::to_kept_order(&eta, &order, pool)?;
             return Ok(Resolved { eta: out, fe_coefs, iterations: it });
         }
     }

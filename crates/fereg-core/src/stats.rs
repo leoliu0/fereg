@@ -3,7 +3,9 @@
 //! All row passes are chunked by [`CHUNK`] with chunk-ordered combination, so results do not
 //! depend on the thread count. Blocks are N x R row-major.
 
-use crate::par::{self, CHUNK, Pool, dispatch_width, width};
+#[cfg(target_arch = "x86_64")]
+use crate::par::has_avx2_fma;
+use crate::par::{self, CHUNK, MAX_DISPATCH_WIDTH, Pool, dispatch_width, width};
 
 /// Pass-A statistics of the raw (un-residualized) columns.
 #[derive(Clone, Debug)]
@@ -44,13 +46,29 @@ pub(crate) fn col_stats(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) 
 /// Pass-A statistics of one chunk. Unweighted (`W = false`), the weighted sums equal the
 /// unweighted ones bit for bit (w = 1), so they are copied instead of recomputed.
 fn col_stats_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>) -> Part {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        return unsafe { col_stats_chunk_avx2::<R, W>(rows, r, w, range) };
+    }
+    col_stats_chunk_inner::<R, W>(rows, r, w, range)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn col_stats_chunk_avx2<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>) -> Part {
+    col_stats_chunk_inner::<R, W>(rows, r, w, range)
+}
+
+#[inline(always)]
+fn col_stats_chunk_inner<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>) -> Part {
     let r = width::<R>(r);
     let cn = range.len() as f64;
     let rows = &rows[range.start * r..range.end * r];
     // Accumulators in a local array for const widths (kept in registers; accumulating into heap
     // slices chains every term through store-to-load forwarding).
-    let (mut arr, mut heap) = ([0.0f64; 56], Vec::new());
-    let buf: &mut [f64] = if R > 0 && R <= 8 {
+    let (mut arr, mut heap) = ([0.0f64; 7 * MAX_DISPATCH_WIDTH], Vec::new());
+    let buf: &mut [f64] = if R > 0 && R <= MAX_DISPATCH_WIDTH {
         &mut arr[..7 * r]
     } else {
         heap.resize(7 * r, 0.0);
@@ -172,10 +190,28 @@ pub(crate) fn gram(rows: &[f64], r: usize, w: Option<&[f64]>, pool: &Pool) -> (V
 
 /// Pass B over one chunk (upper triangle of G, then sum z^2).
 fn gram_chunk<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>, acc: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { gram_chunk_avx2::<R, W>(rows, r, w, range, acc) };
+        return;
+    }
+    gram_chunk_inner::<R, W>(rows, r, w, range, acc);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn gram_chunk_avx2<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>, acc: &mut [f64]) {
+    gram_chunk_inner::<R, W>(rows, r, w, range, acc);
+}
+
+#[inline(always)]
+fn gram_chunk_inner<const R: usize, const W: bool>(rows: &[f64], r: usize, w: Option<&[f64]>, range: std::ops::Range<usize>, acc: &mut [f64]) {
     let r = width::<R>(r);
     // Accumulate in a local array for const widths (registers), then add to the zeroed `acc`.
-    let mut arr = [0.0f64; 72];
-    let local = R > 0 && R <= 8;
+    const BUF_CAP: usize = MAX_DISPATCH_WIDTH * MAX_DISPATCH_WIDTH + MAX_DISPATCH_WIDTH;
+    let mut arr = [0.0f64; BUF_CAP];
+    let local = R > 0 && R <= MAX_DISPATCH_WIDTH;
     let buf: &mut [f64] = if local { &mut arr[..r * r + r] } else { &mut acc[..r * r + r] };
     let (g, ss) = buf.split_at_mut(r * r);
     let w = if W { &w.expect("weighted chunk")[range.clone()] } else { &[][..] };

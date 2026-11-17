@@ -21,11 +21,15 @@
 //! absorber (bit-identical for any thread count), so every result is independent of the thread
 //! count.
 
+use rayon::prelude::*;
+
 use crate::absorber::{Absorber, SolveOpts};
 use crate::api::Ctx;
 use crate::error::RfError;
 use crate::gather;
-use crate::par::{self, Pool};
+use crate::par::{self, CHUNK, Pool};
+use crate::structure::{scatter_by_code, split_bounds};
+use crate::vcov;
 
 mod analytical;
 mod ape;
@@ -35,9 +39,8 @@ pub use analytical::{Corrected, Resolved, analytical, resolve_fe};
 pub use ape::{ApeSpec, Apes, FullSample, ape_point, apes, binary};
 pub use jackknife::{JkOut, JkPanel, JkSpec, Permutation, SubFit, Subpanel, jackknife};
 
-pub(crate) use analytical::{plan_bandwidth, shifted_eta};
-#[cfg(test)]
-pub(crate) use ape::apes_retained;
+pub(crate) use analytical::{analytical_in, plan_bandwidth, resolve_in, shifted_eta};
+pub(crate) use ape::{ape_point_in, apes_in_pool};
 
 /// Which reference's normalization of the bias terms (they coincide on balanced panels).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -217,22 +220,34 @@ pub(crate) fn check_structure(structure: Structure, k: usize) -> Result<(), RfEr
     }
 }
 
+#[derive(Clone, Copy)]
+struct SyncMut<T>(*mut T);
+// SAFETY: callers write disjoint indices (`order` is a bijection `0..n -> 0..n`).
+unsafe impl<T> Send for SyncMut<T> {}
+unsafe impl<T> Sync for SyncMut<T> {}
+
+impl<T> SyncMut<T> {
+    #[inline(always)]
+    unsafe fn write(self, idx: usize, val: T) {
+        unsafe { self.0.add(idx).write(val) };
+    }
+}
+
 /// `p` zeroed columns of `n` values (fallible: [`RfError::OutOfMemory`]).
-pub(crate) fn alloc_cols(p: usize, n: usize) -> Result<Vec<Vec<f64>>, RfError> {
-    (0..p).map(|_| par::alloc_vec(n, 0.0)).collect()
+pub(crate) fn alloc_cols(p: usize, n: usize, pool: &Pool) -> Result<Vec<Vec<f64>>, RfError> {
+    (0..p).map(|_| par::alloc_par(n, 0.0, pool)).collect()
 }
 
 /// A zeroed vector of `n` values (fallible).
-pub(crate) fn zeros(n: usize) -> Result<Vec<f64>, RfError> {
-    par::alloc_vec(n, 0.0)
+pub(crate) fn zeros(n: usize, pool: &Pool) -> Result<Vec<f64>, RfError> {
+    par::alloc_par(n, 0.0, pool)
 }
 
 /// Kept-order columns residualized on the fixed effects under the weights `w` (kept order). The
 /// absorber is left with these weights.
 pub(crate) fn center(abs: &mut dyn Absorber, cols: &[&[f64]], w: &[f64], pool: &Pool, ctx: &Ctx) -> Result<Vec<Vec<f64>>, RfError> {
     let order = abs.row_order().to_vec();
-    let mut w_rows = zeros(order.len())?;
-    w_rows.iter_mut().zip(&order).for_each(|(o, &k)| *o = w[k as usize]);
+    let w_rows = vcov::to_row_order(w, &order, pool)?;
     abs.set_weights(Some(&w_rows), pool, ctx)?;
     drop(w_rows);
     let r = cols.len();
@@ -243,13 +258,31 @@ pub(crate) fn center(abs: &mut dyn Absorber, cols: &[&[f64]], w: &[f64], pool: &
     let opts = SolveOpts { tol: CENTER_TOL, maxiter: CENTER_MAXITER, want_coefs: false };
     abs.residualize(&mut block, r, &opts, None, pool, ctx)?;
     let n = order.len();
-    let mut out = alloc_cols(r, n)?;
-    for (row, &k) in order.iter().enumerate() {
-        for (j, o) in out.iter_mut().enumerate() {
-            o[k as usize] = block[row * r + j];
+    let mut uninit: Vec<Vec<std::mem::MaybeUninit<f64>>> = (0..r).map(|_| par::alloc_uninit::<f64>(n)).collect::<Result<_, _>>()?;
+    let ptrs: Vec<SyncMut<std::mem::MaybeUninit<f64>>> = uninit.iter_mut().map(|v| SyncMut(v.as_mut_ptr())).collect();
+    if n <= CHUNK || pool.threads() <= 1 {
+        for (row, &k) in order.iter().enumerate() {
+            let ku = k as usize;
+            let src = &block[row * r..(row + 1) * r];
+            for (j, &val) in src.iter().enumerate() {
+                unsafe { ptrs[j].write(ku, std::mem::MaybeUninit::new(val)) };
+            }
         }
+    } else {
+        pool.install(|| {
+            order.par_chunks(CHUNK).zip(block.par_chunks(CHUNK * r)).for_each(|(oc, bc)| {
+                for (&k, src) in oc.iter().zip(bc.chunks_exact(r)) {
+                    let ku = k as usize;
+                    for (j, &val) in src.iter().enumerate() {
+                        // SAFETY: `order` is a bijection `0..n -> 0..n`, so chunks write disjoint indices.
+                        unsafe { ptrs[j].write(ku, std::mem::MaybeUninit::new(val)) };
+                    }
+                }
+            })
+        });
     }
-    Ok(out)
+    // SAFETY: every index `0..n` of each column was written once via `order`.
+    Ok(uninit.into_iter().map(|v| unsafe { par::assume_init(v) }).collect())
 }
 
 /// Fixed-effect values of a solution ([`Corrected::fe_coefs`], [`Resolved::fe_coefs`]): per
@@ -263,15 +296,26 @@ pub fn saved_fe(abs: &dyn Absorber, terms: &[crate::session::Term], fe_coefs: &c
     crate::fe_recovery::saved_fe(abs, &all, fe_coefs, 0.0)
 }
 
-/// A' diag(w) A for kept-order columns (p x p row-major), serial in row order.
-pub(crate) fn wcross(a: &[Vec<f64>], w: &[f64]) -> Vec<f64> {
+/// A' diag(w) A for kept-order columns (p x p row-major), reduced in fixed chunk order.
+pub(crate) fn wcross(a: &[Vec<f64>], w: &[f64], pool: &Pool) -> Vec<f64> {
     let p = a.len();
-    let mut h = vec![0.0; p * p];
+    if p == 0 {
+        return Vec::new();
+    }
+    let mut h = par::sum_chunks(pool, w.len(), CHUNK, p * p, |range, acc| {
+        for r in range {
+            let wr = w[r];
+            for i in 0..p {
+                let wi = a[i][r] * wr;
+                for j in i..p {
+                    acc[i * p + j] += wi * a[j][r];
+                }
+            }
+        }
+    });
     for i in 0..p {
-        for j in i..p {
-            let s: f64 = a[i].iter().zip(&a[j]).zip(w).map(|((x, y), w)| x * y * w).sum();
-            h[i * p + j] = s;
-            h[j * p + i] = s;
+        for j in 0..i {
+            h[i * p + j] = h[j * p + i];
         }
     }
     h
@@ -316,8 +360,8 @@ pub(crate) fn chol_solve(a: &[f64], p: usize, b: &[f64], m: usize) -> Result<Vec
     Ok(x)
 }
 
-/// Rows of every group of `codes` (ascending row within the group), as offsets and ids.
-pub(crate) fn groups(codes: &[u32], g: usize) -> (Vec<usize>, Vec<u32>) {
+/// Rows of every group of `codes` (ascending row within the group), serial.
+pub(crate) fn groups_seq(codes: &[u32], g: usize) -> (Vec<usize>, Vec<u32>) {
     let mut off = vec![0usize; g + 1];
     for &c in codes {
         off[c as usize + 1] += 1;
@@ -334,20 +378,39 @@ pub(crate) fn groups(codes: &[u32], g: usize) -> (Vec<usize>, Vec<u32>) {
     (off, ids)
 }
 
+/// Rows of every group of `codes` (ascending row within the group), as offsets and ids.
+pub(crate) fn groups(codes: &[u32], g: usize, pool: &Pool) -> Result<(Vec<usize>, Vec<u32>), RfError> {
+    if codes.len() <= CHUNK || pool.threads() <= 1 {
+        return Ok(groups_seq(codes, g));
+    }
+    let (off32, ids) = scatter_by_code(codes, g, pool)?;
+    Ok((off32.into_iter().map(|v| v as usize).collect(), ids))
+}
+
 /// Groups of `codes` with the rows of each group sorted by `key` (stable: ties keep row order).
-pub(crate) fn ordered_groups(codes: &[u32], g: usize, key: Option<&dyn Fn(usize) -> i64>) -> (Vec<usize>, Vec<u32>) {
-    let (off, mut ids) = groups(codes, g);
+pub(crate) fn ordered_groups(
+    codes: &[u32],
+    g: usize,
+    key: Option<&(dyn Fn(usize) -> i64 + Sync)>,
+    pool: &Pool,
+) -> Result<(Vec<usize>, Vec<u32>), RfError> {
+    let (off, mut ids) = groups(codes, g, pool)?;
     if let Some(key) = key {
-        for q in 0..g {
-            ids[off[q]..off[q + 1]].sort_by_key(|&r| key(r as usize));
+        if g < 64 || pool.threads() <= 1 {
+            for q in 0..g {
+                ids[off[q]..off[q + 1]].sort_by_key(|&r| key(r as usize));
+            }
+        } else {
+            let slices = split_bounds(&mut ids, &off);
+            pool.install(|| slices.into_par_iter().with_min_len(64).for_each(|s| s.sort_by_key(|&r| key(r as usize))));
         }
     }
-    (off, ids)
+    Ok((off, ids))
 }
 
 /// Time-order key inside the groups of the lag term `lag` under alpaca's rules: the codes of the
 /// other terms in term order (lexicographic); none (row order) for a one-way model.
-pub(crate) fn default_key<'a>(fe: &'a [FeCodes<'a>], lag: usize) -> Option<Box<dyn Fn(usize) -> i64 + 'a>> {
+pub(crate) fn default_key<'a>(fe: &'a [FeCodes<'a>], lag: usize) -> Option<Box<dyn Fn(usize) -> i64 + Sync + 'a>> {
     let others: Vec<usize> = (0..fe.len()).filter(|&q| q != lag).collect();
     match others[..] {
         [] => None,

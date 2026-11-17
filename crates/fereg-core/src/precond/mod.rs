@@ -76,9 +76,15 @@ impl Precond {
             apply_joint(j, r, z, w, pool);
             return;
         }
-        jacobi::apply(&self.inv_diag, r, z, w, pool);
+        let has_jacobi_large = self.large.iter().any(|bp| matches!(bp, BlockPrecond::Jacobi));
         if let Some(d) = &self.small {
+            if has_jacobi_large {
+                let ms = st.m_small;
+                jacobi::apply(&self.inv_diag[ms..], &r[ms * w..], &mut z[ms * w..], w, pool);
+            }
             d.apply(r, z, st.m_small, w, pool);
+        } else if has_jacobi_large || st.m_small > 0 {
+            jacobi::apply(&self.inv_diag, r, z, w, pool);
         }
         let ns = st.blocks.iter().filter(|b| b.small).count();
         // The factored blocks are independent: every (block, column group) is solved
@@ -91,36 +97,37 @@ impl Precond {
         if tasks.is_empty() {
             return;
         }
-        let sols: Vec<Vec<f64>> = pool.install(|| {
-            tasks
-                .par_iter()
-                .map(|(b, cols)| {
-                    let off = st.blocks[ns + b].off;
-                    match &self.large[*b] {
-                        BlockPrecond::SparseChol { keep, f, .. } => {
-                            let mut rhs =
-                                Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
-                            f.solve(&mut rhs);
-                            let mut sol = Vec::with_capacity(keep.len() * cols.len());
-                            for j in 0..cols.len() {
-                                sol.extend((0..keep.len()).map(|i| rhs[(i, j)]));
-                            }
-                            sol
-                        }
-                        BlockPrecond::ApproxChol { keep, f } => {
-                            let mut col: Vec<f64> = keep.iter().map(|&k| r[(off + k as usize) * w + cols.start]).collect();
-                            f.solve_col(&mut col);
-                            col
-                        }
-                        BlockPrecond::Jacobi => unreachable!("Jacobi blocks have no solve task"),
-                    }
-                })
-                .collect()
-        });
+        enum TaskSol {
+            Mat(Mat<f64>),
+            Col(Vec<f64>),
+        }
+        let solve_one = |(b, cols): &(usize, Range<usize>)| {
+            let off = st.blocks[ns + *b].off;
+            match &self.large[*b] {
+                BlockPrecond::SparseChol { keep, f, .. } => {
+                    let mut rhs =
+                        Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
+                    f.solve(&mut rhs);
+                    TaskSol::Mat(rhs)
+                }
+                BlockPrecond::ApproxChol { keep, f } => {
+                    let mut col: Vec<f64> = keep.iter().map(|&k| r[(off + k as usize) * w + cols.start]).collect();
+                    f.solve_col(&mut col);
+                    TaskSol::Col(col)
+                }
+                BlockPrecond::Jacobi => unreachable!("Jacobi blocks have no solve task"),
+            }
+        };
+        let sols: Vec<TaskSol> = if tasks.len() <= 1 || pool.threads() <= 1 {
+            tasks.iter().map(solve_one).collect()
+        } else {
+            pool.install(|| tasks.par_iter().map(solve_one).collect())
+        };
         for (b, bp) in self.large.iter().enumerate() {
-            if !matches!(bp, BlockPrecond::Jacobi) {
-                let blk = &st.blocks[ns + b];
-                z[blk.off * w..(blk.off + blk.g) * w].iter_mut().for_each(|v| *v = 0.0);
+            let (BlockPrecond::SparseChol { keep, .. } | BlockPrecond::ApproxChol { keep, .. }) = bp else { continue };
+            let blk = &st.blocks[ns + b];
+            if keep.len() < blk.g {
+                z[blk.off * w..(blk.off + blk.g) * w].fill(0.0);
             }
         }
         for ((b, cols), sol) in tasks.iter().zip(&sols) {
@@ -129,9 +136,20 @@ impl Precond {
                 BlockPrecond::Jacobi => unreachable!("Jacobi blocks have no solve task"),
             };
             let off = st.blocks[ns + b].off;
-            for (j, c) in cols.clone().enumerate() {
-                for (i, &k) in keep.iter().enumerate() {
-                    z[(off + k as usize) * w + c] = sol[j * keep.len() + i];
+            match sol {
+                TaskSol::Mat(rhs) => {
+                    for (j, c) in cols.clone().enumerate() {
+                        let col = rhs.col_as_slice(j);
+                        for (&k, &v) in keep.iter().zip(col) {
+                            z[(off + k as usize) * w + c] = v;
+                        }
+                    }
+                }
+                TaskSol::Col(col) => {
+                    let c = cols.start;
+                    for (&k, &v) in keep.iter().zip(col) {
+                        z[(off + k as usize) * w + c] = v;
+                    }
                 }
             }
         }
@@ -143,22 +161,24 @@ impl Precond {
 fn apply_joint(j: &Joint, r: &[f64], z: &mut [f64], w: usize, pool: &Pool) {
     let keep = &j.keep;
     let groups: Vec<Range<usize>> = (0..w.div_ceil(SOLVE_COLS)).map(|c| c * SOLVE_COLS..((c + 1) * SOLVE_COLS).min(w)).collect();
-    let sols: Vec<Mat<f64>> = pool.install(|| {
-        groups
-            .par_iter()
-            .map(|cols| {
-                let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, jj| r[keep[i] as usize * w + cols.start + jj]);
-                j.f.solve(&mut rhs);
-                rhs
-            })
-            .collect()
-    });
-    z.iter_mut().for_each(|v| *v = 0.0);
+    let solve_group = |cols: &Range<usize>| {
+        let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, jj| r[keep[i] as usize * w + cols.start + jj]);
+        j.f.solve(&mut rhs);
+        rhs
+    };
+    let sols: Vec<Mat<f64>> = if groups.len() <= 1 || pool.threads() <= 1 {
+        groups.iter().map(solve_group).collect()
+    } else {
+        pool.install(|| groups.par_iter().map(solve_group).collect())
+    };
+    if keep.len() * w < z.len() {
+        z.fill(0.0);
+    }
     for (cols, sol) in groups.iter().zip(&sols) {
-        for (i, &k) in keep.iter().enumerate() {
-            let zr = &mut z[k as usize * w..(k as usize + 1) * w];
-            for (jj, c) in cols.clone().enumerate() {
-                zr[c] = sol[(i, jj)];
+        for (jj, c) in cols.clone().enumerate() {
+            let col = sol.col_as_slice(jj);
+            for (&k, &v) in keep.iter().zip(col) {
+                z[k as usize * w + c] = v;
             }
         }
     }

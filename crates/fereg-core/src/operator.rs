@@ -7,12 +7,13 @@
 //! large-block scatters are pulls along the level-sorted cell lists, so results are bit-identical
 //! for any number of threads (plan D3).
 
+use std::mem::MaybeUninit;
 use std::sync::Mutex;
 
 use rayon::prelude::*;
 
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool, alloc_vec, dispatch_width, width};
+use crate::par::{CHUNK, MAX_DISPATCH_WIDTH, Pool, alloc_par, alloc_uninit, alloc_vec, assume_init, dispatch_width, has_avx2_fma, sum_chunks, width};
 use crate::rng::SplitMix64;
 use crate::structure::{Structure, split_bounds};
 
@@ -191,29 +192,9 @@ fn seg_level_sums(codes: &[u32], w: &[f64], out: &mut [f64], tmp: &mut Vec<(u32,
 
 /// Computes the weight state for row weights `w_rows` (row order).
 pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Result<WeightState, RfError> {
-    let mc = st.ncells;
-    // With one row per cell (no `cell_obs_off`) the cell weights are the row weights.
-    let cell_sums = match (&w_rows, &st.cell_obs_off) {
-        (_, None) => None,
-        (w, Some(_)) => {
-            let mut cw = alloc_vec(mc, 0.0)?;
-            pool.install(|| {
-                cw.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, ch)| {
-                    for (k, v) in ch.iter_mut().enumerate() {
-                        let rows = st.rows_of_cell(ci * CHUNK + k);
-                        *v = match w {
-                            Some(w) => w[rows].iter().sum(),
-                            None => rows.len() as f64,
-                        };
-                    }
-                })
-            });
-            Some(cw)
-        }
-    };
     let mut ws = WeightState {
-        w_rows,
-        cell_sums,
+        w_rows: None,
+        cell_sums: None,
         n1: Vec::new(),
         nr: Vec::new(),
         diag: Vec::new(),
@@ -221,16 +202,139 @@ pub fn weight_state(st: &Structure, w_rows: Option<Vec<f64>>, pool: &Pool) -> Re
         sw: 0.0,
         small_s: None,
     };
-    ws.n1 = pool.install(|| (0..st.g1).into_par_iter().with_min_len(1024).map(|s| st.cells_of(s).map(|c| ws.cw(c)).sum()).collect());
-    let parts: Vec<f64> = pool.install(|| ws.n1.par_chunks(CHUNK).map(|ch| ch.iter().sum::<f64>()).collect());
-    ws.sw = parts.iter().sum();
-
-    let (nr, dq, small_s) = level_weights(st, &ws, pool)?;
-    ws.small_s = small_s;
-    ws.diag = nr.iter().zip(&dq).map(|(n, d)| n - d).collect();
-    ws.redundant = ws.diag.iter().zip(&nr).map(|(d, n)| *d <= REDUNDANT * n).collect();
-    ws.nr = nr;
+    refresh_weights(st, &mut ws, w_rows, pool)?;
     Ok(ws)
+}
+
+/// Refreshes `ws` in place for `w_rows`, reusing existing buffers (`cell_sums`, `n1`, `redundant`)
+/// across IRLS weight updates.
+pub fn refresh_weights(st: &Structure, ws: &mut WeightState, w_rows: Option<Vec<f64>>, pool: &Pool) -> Result<(), RfError> {
+    let mc = st.ncells;
+    ws.w_rows = w_rows;
+    // With one row per cell (no `cell_obs_off`) the cell weights are the row weights.
+    if st.cell_obs_off.is_none() {
+        ws.cell_sums = None;
+    } else {
+        let w = ws.w_rows.as_deref();
+        let fill_cell = |c: usize| match w {
+            Some(w) => w[st.rows_of_cell(c)].iter().sum(),
+            None => st.rows_of_cell(c).len() as f64,
+        };
+        let cw = match ws.cell_sums.take() {
+            Some(mut buf) if buf.len() == mc => {
+                if mc <= CHUNK || pool.threads() <= 1 {
+                    for (c, v) in buf.iter_mut().enumerate() {
+                        *v = fill_cell(c);
+                    }
+                } else {
+                    pool.install(|| {
+                        buf.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, ch)| {
+                            let base = ci * CHUNK;
+                            for (k, v) in ch.iter_mut().enumerate() {
+                                *v = fill_cell(base + k);
+                            }
+                        })
+                    });
+                }
+                buf
+            }
+            _ => {
+                let mut buf = alloc_uninit::<f64>(mc)?;
+                if mc <= CHUNK || pool.threads() <= 1 {
+                    for (c, v) in buf.iter_mut().enumerate() {
+                        v.write(fill_cell(c));
+                    }
+                } else {
+                    pool.install(|| {
+                        buf.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, ch)| {
+                            let base = ci * CHUNK;
+                            for (k, v) in ch.iter_mut().enumerate() {
+                                v.write(fill_cell(base + k));
+                            }
+                        })
+                    });
+                }
+                // SAFETY: every slot of `0..mc` was written above.
+                unsafe { assume_init(buf) }
+            }
+        };
+        ws.cell_sums = Some(cw);
+    }
+
+    let mut n1 = std::mem::take(&mut ws.n1);
+    let cw_opt = ws.cell_w();
+    let seg_sum = |s: usize| -> f64 {
+        let cells = st.cells_of(s);
+        match cw_opt {
+            Some(cw) => cw[cells].iter().sum(),
+            None => cells.len() as f64,
+        }
+    };
+    if n1.len() == st.g1 {
+        if st.g1 <= 1024 || pool.threads() <= 1 {
+            for (s, v) in n1.iter_mut().enumerate() {
+                *v = seg_sum(s);
+            }
+        } else {
+            pool.install(|| {
+                n1.par_chunks_mut(1024).enumerate().for_each(|(ci, ch)| {
+                    let base = ci * 1024;
+                    for (k, v) in ch.iter_mut().enumerate() {
+                        *v = seg_sum(base + k);
+                    }
+                })
+            });
+        }
+    } else {
+        let mut buf = alloc_uninit::<f64>(st.g1)?;
+        if st.g1 <= 1024 || pool.threads() <= 1 {
+            for (s, v) in buf.iter_mut().enumerate() {
+                v.write(seg_sum(s));
+            }
+        } else {
+            pool.install(|| {
+                buf.par_chunks_mut(1024).enumerate().for_each(|(ci, ch)| {
+                    let base = ci * 1024;
+                    for (k, v) in ch.iter_mut().enumerate() {
+                        v.write(seg_sum(base + k));
+                    }
+                })
+            });
+        }
+        // SAFETY: every slot of `0..st.g1` was written above.
+        n1 = unsafe { assume_init(buf) };
+    }
+    ws.sw = sum_chunks(pool, n1.len(), CHUNK, 1, |r, acc| {
+        acc[0] += n1[r].iter().sum::<f64>();
+    })[0];
+    ws.n1 = n1;
+
+    let (nr, mut dq, small_s) = level_weights(st, ws, pool)?;
+    ws.small_s = small_s;
+    let m = nr.len();
+    let mut red = std::mem::take(&mut ws.redundant);
+    if red.len() != m {
+        red = vec![false; m];
+    }
+    if m <= CHUNK || pool.threads() <= 1 {
+        for ((d, &n), r) in dq.iter_mut().zip(&nr).zip(red.iter_mut()) {
+            *d = n - *d;
+            *r = *d <= REDUNDANT * n;
+        }
+    } else {
+        pool.install(|| {
+            dq.par_chunks_mut(CHUNK).zip(nr.par_chunks(CHUNK)).zip(red.par_chunks_mut(CHUNK)).for_each(|((dc, nc), rc)| {
+                for ((d, &n), r) in dc.iter_mut().zip(nc).zip(rc.iter_mut()) {
+                    *d = n - *d;
+                    *r = *d <= REDUNDANT * n;
+                }
+            })
+        });
+    }
+    ws.diag = dq;
+    ws.redundant = red;
+    ws.nr = nr;
+    Ok(())
 }
 
 /// Level weights n_r and sum_{g1} c^2/n1 of every reduced coordinate, plus the dense small block
@@ -254,81 +358,196 @@ fn level_weights(st: &Structure, ws: &WeightState, pool: &Pool) -> Result<(Vec<f
     let ns = st.blocks.iter().filter(|b| b.small).count();
     let batch = (4096 / ms.max(1)).max(128);
     let offs = block_offsets(st, 1);
-    let accs: Vec<(Vec<f64>, Vec<f64>)> = pool.install(|| {
-        (0..nt)
-            .into_par_iter()
-            .map(|t| {
-                let (s0, s1) = (tb[t] as usize, tb[t + 1] as usize);
-                let mut acc = vec![0.0; 2 * m];
-                let mut cs = vec![0.0; m];
-                let mut acc_s = if fuse { vec![0.0; ms * ms] } else { Vec::new() };
-                let ld = if fuse { batch.min(s1 - s0) } else { 0 };
-                let mut cbuf = vec![0.0; ms * ld];
-                let mut ncol = 0;
-                for s in s0..s1 {
-                    let cells = st.cells_of(s);
-                    let codes = &st.cell_codes()[cells.start * nb..cells.end * nb];
-                    for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
-                        let w = ws.cw(c);
-                        for (&code, &off) in cc.iter().zip(&offs) {
-                            cs[off + code as usize] += w;
+    let cw_opt = ws.cell_w();
+    let task_fn = |t: usize| -> (Vec<f64>, Vec<f64>) {
+        let (s0, s1) = (tb[t] as usize, tb[t + 1] as usize);
+        let mut acc = vec![0.0; 2 * m];
+        let mut cs = vec![0.0; m];
+        let mut acc_s = if fuse { vec![0.0; ms * ms] } else { Vec::new() };
+        let ld = if fuse { batch.min(s1 - s0) } else { 0 };
+        let mut cbuf = vec![0.0; ms * ld];
+        let mut ncol = 0;
+        let all_codes = st.cell_codes();
+        if nb == 1 && !fuse {
+            let off0 = offs[0];
+            for s in s0..s1 {
+                let cells = st.cells_of(s);
+                let codes = &all_codes[cells.clone()];
+                let n1 = ws.n1[s];
+                match cw_opt {
+                    Some(cw) => {
+                        let wc = &cw[cells];
+                        for (&code, &w) in codes.iter().zip(wc) {
+                            cs[off0 + code as usize] += w;
                         }
-                    }
-                    let n1 = ws.n1[s];
-                    for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
-                        let w = ws.cw(c);
-                        for (&code, &off) in cc.iter().zip(&offs) {
-                            let k = off + code as usize;
+                        for (&code, &w) in codes.iter().zip(wc) {
+                            let k = off0 + code as usize;
                             acc[k] += w;
                             acc[m + k] += w * cs[k] / n1;
                         }
-                        if fuse && ns > 1 {
-                            // Cross counts between distinct small blocks (the diagonal is n_r).
-                            for (b, (&code, &off)) in cc[..ns].iter().zip(&offs).enumerate() {
-                                let row = &mut acc_s[(off + code as usize) * ms..(off + code as usize + 1) * ms];
-                                for (b2, (&code2, &off2)) in cc[..ns].iter().zip(&offs).enumerate() {
-                                    if b2 != b {
-                                        row[off2 + code2 as usize] += w;
-                                    }
-                                }
+                    }
+                    None => {
+                        for &code in codes {
+                            cs[off0 + code as usize] += 1.0;
+                        }
+                        for &code in codes {
+                            let k = off0 + code as usize;
+                            acc[k] += 1.0;
+                            acc[m + k] += cs[k] / n1;
+                        }
+                    }
+                }
+                for &code in codes {
+                    cs[off0 + code as usize] = 0.0;
+                }
+            }
+            return (acc, acc_s);
+        }
+        if nb == 2 && (!fuse || ns <= 1) {
+            let (off0, off1) = (offs[0], offs[1]);
+            for s in s0..s1 {
+                let cells = st.cells_of(s);
+                let codes = &all_codes[cells.start * 2..cells.end * 2];
+                let n1 = ws.n1[s];
+                match cw_opt {
+                    Some(cw) => {
+                        let wc = &cw[cells];
+                        for (cc, &w) in codes.chunks_exact(2).zip(wc) {
+                            cs[off0 + cc[0] as usize] += w;
+                            cs[off1 + cc[1] as usize] += w;
+                        }
+                        for (cc, &w) in codes.chunks_exact(2).zip(wc) {
+                            let k0 = off0 + cc[0] as usize;
+                            let k1 = off1 + cc[1] as usize;
+                            acc[k0] += w;
+                            acc[m + k0] += w * cs[k0] / n1;
+                            acc[k1] += w;
+                            acc[m + k1] += w * cs[k1] / n1;
+                        }
+                    }
+                    None => {
+                        for cc in codes.chunks_exact(2) {
+                            cs[off0 + cc[0] as usize] += 1.0;
+                            cs[off1 + cc[1] as usize] += 1.0;
+                        }
+                        for cc in codes.chunks_exact(2) {
+                            let k0 = off0 + cc[0] as usize;
+                            let k1 = off1 + cc[1] as usize;
+                            acc[k0] += 1.0;
+                            acc[m + k0] += cs[k0] / n1;
+                            acc[k1] += 1.0;
+                            acc[m + k1] += cs[k1] / n1;
+                        }
+                    }
+                }
+                if fuse {
+                    let f = 1.0 / n1.sqrt();
+                    for (k, v) in cs[..ms].iter().enumerate() {
+                        cbuf[k * ld + ncol] = v * f;
+                    }
+                    ncol += 1;
+                    if ncol == ld {
+                        sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+                        ncol = 0;
+                    }
+                }
+                for cc in codes.chunks_exact(2) {
+                    cs[off0 + cc[0] as usize] = 0.0;
+                    cs[off1 + cc[1] as usize] = 0.0;
+                }
+            }
+            if fuse && ncol > 0 {
+                sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+            }
+            return (acc, acc_s);
+        }
+        for s in s0..s1 {
+            let cells = st.cells_of(s);
+            let codes = &all_codes[cells.start * nb..cells.end * nb];
+            for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
+                let w = match cw_opt {
+                    Some(cw) => cw[c],
+                    None => 1.0,
+                };
+                for (&code, &off) in cc.iter().zip(&offs) {
+                    cs[off + code as usize] += w;
+                }
+            }
+            let n1 = ws.n1[s];
+            for (cc, c) in codes.chunks_exact(nb).zip(cells.clone()) {
+                let w = match cw_opt {
+                    Some(cw) => cw[c],
+                    None => 1.0,
+                };
+                for (&code, &off) in cc.iter().zip(&offs) {
+                    let k = off + code as usize;
+                    acc[k] += w;
+                    acc[m + k] += w * cs[k] / n1;
+                }
+                if fuse && ns > 1 {
+                    // Cross counts between distinct small blocks (the diagonal is n_r).
+                    for (b, (&code, &off)) in cc[..ns].iter().zip(&offs).enumerate() {
+                        let row = &mut acc_s[(off + code as usize) * ms..(off + code as usize + 1) * ms];
+                        for (b2, (&code2, &off2)) in cc[..ns].iter().zip(&offs).enumerate() {
+                            if b2 != b {
+                                row[off2 + code2 as usize] += w;
                             }
                         }
                     }
-                    if fuse {
-                        let f = 1.0 / n1.sqrt();
-                        for (k, v) in cs[..ms].iter().enumerate() {
-                            cbuf[k * ld + ncol] = v * f;
-                        }
-                        ncol += 1;
-                        if ncol == ld {
-                            sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
-                            ncol = 0;
-                        }
-                    }
-                    for cc in codes.chunks_exact(nb) {
-                        for (&code, &off) in cc.iter().zip(&offs) {
-                            cs[off + code as usize] = 0.0;
-                        }
-                    }
-                }
-                if fuse && ncol > 0 {
-                    sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
-                }
-                (acc, acc_s)
-            })
-            .collect()
-    });
-    let mut out = alloc_vec(2 * m, 0.0)?;
-    pool.install(|| {
-        out.par_chunks_mut(4096).enumerate().for_each(|(ci, o)| {
-            let (base, len) = (ci * 4096, o.len());
-            for (acc, _) in &accs {
-                for (a, v) in o.iter_mut().zip(&acc[base..base + len]) {
-                    *a += v;
                 }
             }
-        })
-    });
+            if fuse {
+                let f = 1.0 / n1.sqrt();
+                for (k, v) in cs[..ms].iter().enumerate() {
+                    cbuf[k * ld + ncol] = v * f;
+                }
+                ncol += 1;
+                if ncol == ld {
+                    sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+                    ncol = 0;
+                }
+            }
+            for cc in codes.chunks_exact(nb) {
+                for (&code, &off) in cc.iter().zip(&offs) {
+                    cs[off + code as usize] = 0.0;
+                }
+            }
+        }
+        if fuse && ncol > 0 {
+            sub_gram_lower(&mut acc_s, ms, &cbuf, ld, ncol);
+        }
+        (acc, acc_s)
+    };
+    let accs: Vec<(Vec<f64>, Vec<f64>)> = if nt <= 1 || pool.threads() <= 1 {
+        (0..nt).map(task_fn).collect()
+    } else {
+        pool.install(|| (0..nt).into_par_iter().map(task_fn).collect())
+    };
+    let mut out = alloc_uninit::<f64>(2 * m)?;
+    if 2 * m <= 4096 || pool.threads() <= 1 {
+        for (i, o) in out.iter_mut().enumerate() {
+            let mut s = 0.0;
+            for (acc, _) in &accs {
+                s += acc[i];
+            }
+            o.write(s);
+        }
+    } else {
+        pool.install(|| {
+            out.par_chunks_mut(4096).enumerate().for_each(|(ci, o)| {
+                let base = ci * 4096;
+                for (k, slot) in o.iter_mut().enumerate() {
+                    let mut s = 0.0;
+                    for (acc, _) in &accs {
+                        s += acc[base + k];
+                    }
+                    slot.write(s);
+                }
+            })
+        });
+    }
+    // SAFETY: every slot of `0..2*m` was written above.
+    let mut out = unsafe { assume_init(out) };
     let dq = out.split_off(m);
     let small = fuse.then(|| {
         let mut full = vec![0.0; ms * ms];
@@ -395,66 +614,99 @@ fn level_weights_pull(st: &Structure, ws: &WeightState, pool: &Pool) -> Result<(
     let ms = st.m_small;
     let tb = st.tasks(2 * ms);
     let cb = st.cell_bounds(&tb);
-    let mut zq = alloc_vec(mc * nl, 0.0)?;
+    let mut zq = alloc_uninit::<f64>(mc * nl)?;
     let zb: Vec<usize> = cb.iter().map(|c| c * nl).collect();
     let pieces = split_bounds(&mut zq, &zb);
-    let wsr = ws;
-    let accs: Vec<Vec<f64>> = pool.install(|| {
-        pieces
-            .into_par_iter()
-            .enumerate()
-            .map(|(t, zt)| {
-                let mut acc = vec![0.0; 2 * ms];
-                let (mut codes, mut w, mut csum, mut tmp) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                for s in tb[t] as usize..tb[t + 1] as usize {
-                    let cells = st.cells_of(s);
-                    let k = cells.len();
-                    w.clear();
-                    w.extend(cells.clone().map(|c| wsr.cw(c)));
-                    csum.resize(k, 0.0);
-                    let n1 = wsr.n1[s];
-                    for (b, blk) in st.blocks.iter().enumerate() {
-                        codes.clear();
-                        codes.extend(cells.clone().map(|c| st.codes(c)[b]));
-                        seg_level_sums(&codes, &w, &mut csum, &mut tmp);
-                        for i in 0..k {
-                            let q = w[i] * csum[i] / n1;
-                            if blk.small {
-                                let at = blk.off + codes[i] as usize;
-                                acc[at] += w[i];
-                                acc[ms + at] += q;
-                            } else {
-                                zt[(cells.start + i - cb[t]) * nl + (b - ns)] = q;
-                            }
-                        }
+    let cw_opt = ws.cell_w();
+    let all_codes = st.cell_codes();
+    let nb = st.nb;
+    let run_piece = |(t, zt): (usize, &mut [MaybeUninit<f64>])| -> Vec<f64> {
+        let mut acc = vec![0.0; 2 * ms];
+        let (mut codes_buf, mut w_unit, mut csum, mut tmp) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for s in tb[t] as usize..tb[t + 1] as usize {
+            let cells = st.cells_of(s);
+            let k = cells.len();
+            let w: &[f64] = match cw_opt {
+                Some(cw) => &cw[cells.clone()],
+                None => {
+                    if w_unit.len() < k {
+                        w_unit.resize(k, 1.0);
+                    }
+                    &w_unit[..k]
+                }
+            };
+            if csum.len() < k {
+                csum.resize(k, 0.0);
+            }
+            let n1 = ws.n1[s];
+            for (b, blk) in st.blocks.iter().enumerate() {
+                let codes: &[u32] = if nb == 1 {
+                    &all_codes[cells.clone()]
+                } else {
+                    codes_buf.clear();
+                    codes_buf.extend(all_codes[cells.start * nb..cells.end * nb].chunks_exact(nb).map(|cc| cc[b]));
+                    &codes_buf
+                };
+                seg_level_sums(codes, w, &mut csum[..k], &mut tmp);
+                for i in 0..k {
+                    let q = w[i] * csum[i] / n1;
+                    if blk.small {
+                        let at = blk.off + codes[i] as usize;
+                        acc[at] += w[i];
+                        acc[ms + at] += q;
+                    } else {
+                        zt[(cells.start + i - cb[t]) * nl + (b - ns)].write(q);
                     }
                 }
-                acc
-            })
-            .collect()
-    });
-    let mut nr = alloc_vec(st.m, 0.0)?;
-    let mut dq = alloc_vec(st.m, 0.0)?;
-    for acc in &accs {
-        for k in 0..ms {
-            nr[k] += acc[k];
-            dq[k] += acc[ms + k];
+            }
         }
+        acc
+    };
+    let accs: Vec<Vec<f64>> = if pieces.len() <= 1 || pool.threads() <= 1 {
+        pieces.into_iter().enumerate().map(run_piece).collect()
+    } else {
+        pool.install(|| pieces.into_par_iter().enumerate().map(run_piece).collect())
+    };
+    // SAFETY: every `(cell, large_block)` slot in `0..mc*nl` was written above.
+    let zq = unsafe { assume_init(zq) };
+    let mut nr = alloc_uninit::<f64>(st.m)?;
+    let mut dq = alloc_uninit::<f64>(st.m)?;
+    for k in 0..ms {
+        let (mut sn, mut sd) = (0.0, 0.0);
+        for acc in &accs {
+            sn += acc[k];
+            sd += acc[ms + k];
+        }
+        nr[k].write(sn);
+        dq[k].write(sd);
     }
     for (b, blk) in st.blocks.iter().enumerate().skip(ns) {
         let col = b - ns;
         let rng = blk.off..blk.off + blk.g;
         let (nr_b, dq_b) = (&mut nr[rng.clone()], &mut dq[rng]);
-        pool.install(|| {
-            nr_b.par_iter_mut().zip(dq_b.par_iter_mut()).enumerate().with_min_len(1024).for_each(|(g, (n, d))| {
-                for &c in &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize] {
-                    *n += wsr.cw(c as usize);
-                    *d += zq[c as usize * nl + col];
-                }
-            })
-        });
+        let pull_level = |(g, (n, d)): (usize, (&mut MaybeUninit<f64>, &mut MaybeUninit<f64>))| {
+            let (mut sn, mut sd) = (0.0, 0.0);
+            for &c in &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize] {
+                let ci = c as usize;
+                sn += match cw_opt {
+                    Some(cw) => cw[ci],
+                    None => 1.0,
+                };
+                sd += zq[ci * nl + col];
+            }
+            n.write(sn);
+            d.write(sd);
+        };
+        if blk.g <= 1024 || pool.threads() <= 1 {
+            nr_b.iter_mut().zip(dq_b.iter_mut()).enumerate().for_each(pull_level);
+        } else {
+            pool.install(|| {
+                nr_b.par_iter_mut().zip(dq_b.par_iter_mut()).enumerate().with_min_len(1024).for_each(pull_level);
+            });
+        }
     }
-    Ok((nr, dq))
+    // SAFETY: `0..ms` and every large block `ms..st.m` were written above.
+    Ok((unsafe { assume_init(nr) }, unsafe { assume_init(dq) }))
 }
 
 /// Segment boundaries of tasks with per-task accumulators of `acc_len` values over the whole
@@ -530,11 +782,11 @@ unsafe fn gather_cells<const R: usize>(codes: &[u32], nb: usize, offs: &[usize],
         u.fill(0.0);
         return;
     }
-    if R > 0 {
+    if R > 0 && R <= MAX_DISPATCH_WIDTH {
         // Sums in a local array (registers): accumulating into `u` would chain every term
         // through store-to-load forwarding.
         for (cc, uc) in codes.chunks_exact(nb).zip(u.chunks_exact_mut(r)) {
-            let mut acc = [0.0f64; 8];
+            let mut acc = [0.0f64; MAX_DISPATCH_WIDTH];
             for (&code, &off) in cc.iter().zip(offs) {
                 let at = off + code as usize * r;
                 // SAFETY: code < code_bound(b), so at + r <= offs[b] + code_bound(b)*r <= p.len().
@@ -563,8 +815,8 @@ unsafe fn gather_cells<const R: usize>(codes: &[u32], nb: usize, offs: &[usize],
 /// Per-column accumulator of a kernel instance: a local array (kept in registers) for const
 /// widths, else `v` resized to `r`.
 #[inline(always)]
-fn regs<'a, const R: usize>(arr: &'a mut [f64; 8], v: &'a mut Vec<f64>, r: usize) -> &'a mut [f64] {
-    if R > 0 && R <= 8 {
+fn regs<'a, const R: usize>(arr: &'a mut [f64; MAX_DISPATCH_WIDTH], v: &'a mut Vec<f64>, r: usize) -> &'a mut [f64] {
+    if R > 0 && R <= MAX_DISPATCH_WIDTH {
         &mut arr[..R]
     } else {
         v.clear();
@@ -621,7 +873,24 @@ fn apply_task_nb<const R: usize, const UNIT: bool>(ops: &Ops, p: &[f64], r: usiz
     }
 }
 
-fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &[f64], r: usize, mut t: Task) {
+fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &[f64], r: usize, t: Task) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { apply_task_avx2::<R, UNIT, NB>(ops, p, r, t) };
+        return;
+    }
+    apply_task_inner::<R, UNIT, NB>(ops, p, r, t);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_task_avx2<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &[f64], r: usize, t: Task) {
+    apply_task_inner::<R, UNIT, NB>(ops, p, r, t);
+}
+
+#[inline(always)]
+fn apply_task_inner<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &[f64], r: usize, mut t: Task) {
     let r = width::<R>(r);
     let (st, ws) = (ops.st, ops.ws);
     let nb = width::<NB>(st.nb);
@@ -631,7 +900,7 @@ fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &
     assert!(st.codes_within(nb, offs, r, nb, p.len()) && st.codes_within(nb, offs, r, t.nacc, t.acc.len()));
     let cw: &[f64] = ws.cell_w().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let (mut tarr, mut tvec) = ([0.0f64; 8], Vec::new());
+    let (mut tarr, mut tvec) = ([0.0f64; MAX_DISPATCH_WIDTH], Vec::new());
     let tv = regs::<R>(&mut tarr, &mut tvec, r);
     for s in t.segs.clone() {
         let cells = st.cells_of(s);
@@ -679,7 +948,24 @@ fn apply_task<const R: usize, const UNIT: bool, const NB: usize>(ops: &Ops, p: &
 
 /// Task body of [`Ops::rhs`]: cell sums s_c = sum w v, b1 (per segment), sum w v^2 and sum w v
 /// (`extra`), then z_c = s_c - W_c*b1/n1.
-fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize, mut t: Task) {
+fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize, t: Task) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { rhs_task_avx2::<R, UNIT>(ops, rows, r, t) };
+        return;
+    }
+    rhs_task_inner::<R, UNIT>(ops, rows, r, t);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn rhs_task_avx2<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize, t: Task) {
+    rhs_task_inner::<R, UNIT>(ops, rows, r, t);
+}
+
+#[inline(always)]
+fn rhs_task_inner<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize, mut t: Task) {
     let r = width::<R>(r);
     let (st, ws) = (ops.st, ops.ws);
     let nb = st.nb;
@@ -688,7 +974,14 @@ fn rhs_task<const R: usize, const UNIT: bool>(ops: &Ops, rows: &[f64], r: usize,
     assert!(st.codes_within(nb, &offs, r, t.nacc, t.acc.len()));
     let cw: &[f64] = ws.cell_w().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let (mut a1, mut v1, mut a2, mut v2, mut a3, mut v3) = ([0.0f64; 8], Vec::new(), [0.0f64; 8], Vec::new(), [0.0f64; 8], Vec::new());
+    let (mut a1, mut v1, mut a2, mut v2, mut a3, mut v3) = (
+        [0.0f64; MAX_DISPATCH_WIDTH],
+        Vec::new(),
+        [0.0f64; MAX_DISPATCH_WIDTH],
+        Vec::new(),
+        [0.0f64; MAX_DISPATCH_WIDTH],
+        Vec::new(),
+    );
     let esq = regs::<R>(&mut a1, &mut v1, r);
     let esum = regs::<R>(&mut a2, &mut v2, r);
     // b1 of the current segment, accumulated in registers and stored once.
@@ -781,6 +1074,43 @@ fn residualize_task<const R: usize, const UNIT: bool>(
     segs: std::ops::Range<usize>,
     x: &[f64],
     b1: &[f64],
+    alpha: Option<&mut [f64]>,
+) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { residualize_task_avx2::<R, UNIT>(ops, rp, row0, r, segs, x, b1, alpha) };
+        return;
+    }
+    residualize_task_inner::<R, UNIT>(ops, rp, row0, r, segs, x, b1, alpha);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn residualize_task_avx2<const R: usize, const UNIT: bool>(
+    ops: &Ops,
+    rp: &mut [f64],
+    row0: usize,
+    r: usize,
+    segs: std::ops::Range<usize>,
+    x: &[f64],
+    b1: &[f64],
+    alpha: Option<&mut [f64]>,
+) {
+    residualize_task_inner::<R, UNIT>(ops, rp, row0, r, segs, x, b1, alpha);
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn residualize_task_inner<const R: usize, const UNIT: bool>(
+    ops: &Ops,
+    rp: &mut [f64],
+    row0: usize,
+    r: usize,
+    segs: std::ops::Range<usize>,
+    x: &[f64],
+    b1: &[f64],
     mut alpha: Option<&mut [f64]>,
 ) {
     let r = width::<R>(r);
@@ -791,7 +1121,7 @@ fn residualize_task<const R: usize, const UNIT: bool>(
     assert!(st.codes_within(nb, &offs, r, nb, x.len()));
     let cw: &[f64] = ws.cell_w().unwrap_or(&[]);
     let mut u: Vec<f64> = Vec::new();
-    let (mut aarr, mut avec) = ([0.0f64; 8], Vec::new());
+    let (mut aarr, mut avec) = ([0.0f64; MAX_DISPATCH_WIDTH], Vec::new());
     let a = regs::<R>(&mut aarr, &mut avec, r);
     let s0 = segs.start;
     for s in segs {
@@ -845,6 +1175,66 @@ fn residualize_task<const R: usize, const UNIT: bool>(
             }
         }
     }
+}
+
+#[inline(always)]
+fn pull_level_inner<const R: usize>(zbuf: &[f64], r: usize, cells: &[u32], out: &mut [f64]) {
+    let r = width::<R>(r);
+    if R > 0 && R <= MAX_DISPATCH_WIDTH {
+        let mut acc = [0.0f64; MAX_DISPATCH_WIDTH];
+        for &c in cells {
+            let at = c as usize * r;
+            let zv = &zbuf[at..at + r];
+            for j in 0..r {
+                acc[j] += zv[j];
+            }
+        }
+        out.copy_from_slice(&acc[..r]);
+    } else {
+        out.fill(0.0);
+        for &c in cells {
+            let at = c as usize * r;
+            for (o, &v) in out.iter_mut().zip(&zbuf[at..at + r]) {
+                *o += v;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn pull_level_avx2<const R: usize>(zbuf: &[f64], r: usize, cells: &[u32], out: &mut [f64]) {
+    pull_level_inner::<R>(zbuf, r, cells, out);
+}
+
+fn pull_large_block<const R: usize, const _B: bool>(zbuf: &[f64], r: usize, yb: &mut [f64], perm: &[u32], perm_off: &[u32], pool: &Pool) {
+    let r = width::<R>(r);
+    let avx2 = has_avx2_fma();
+    if yb.len() <= 512 * r || pool.threads() <= 1 {
+        for (g, out) in yb.chunks_exact_mut(r).enumerate() {
+            let cells = &perm[perm_off[g] as usize..perm_off[g + 1] as usize];
+            #[cfg(target_arch = "x86_64")]
+            if avx2 {
+                unsafe { pull_level_avx2::<R>(zbuf, r, cells, out) };
+                continue;
+            }
+            let _ = avx2;
+            pull_level_inner::<R>(zbuf, r, cells, out);
+        }
+        return;
+    }
+    pool.install(|| {
+        yb.par_chunks_mut(r).enumerate().with_min_len(512).for_each(|(g, out)| {
+            let cells = &perm[perm_off[g] as usize..perm_off[g + 1] as usize];
+            #[cfg(target_arch = "x86_64")]
+            if avx2 {
+                unsafe { pull_level_avx2::<R>(zbuf, r, cells, out) };
+                return;
+            }
+            let _ = avx2;
+            pull_level_inner::<R>(zbuf, r, cells, out);
+        })
+    });
 }
 
 impl Ops<'_> {
@@ -901,7 +1291,7 @@ impl Ops<'_> {
         let nt = tb.len() - 1;
         if use_z && sc.zbuf.len() < st.ncells * r {
             sc.zbuf = Vec::new();
-            sc.zbuf = alloc_vec(st.ncells * r, 0.0)?;
+            sc.zbuf = alloc_par(st.ncells * r, 0.0, pool)?;
         }
         if sc.accs.len() < nt {
             sc.accs.resize_with(nt, Vec::new);
@@ -970,22 +1360,11 @@ impl Ops<'_> {
     fn pull_large(&self, zbuf: &[f64], r: usize, y: &mut [f64], pool: &Pool) {
         let st = self.st;
         let ms = st.m_small;
-        let ylarge = &mut y[ms * r..];
-        let mut rest = ylarge;
+        let mut rest = &mut y[ms * r..];
         for blk in st.blocks.iter().filter(|b| !b.small) {
             let (yb, tail) = rest.split_at_mut(blk.g * r);
             rest = tail;
-            pool.install(|| {
-                yb.par_chunks_mut(r).enumerate().with_min_len(512).for_each(|(g, out)| {
-                    out.iter_mut().for_each(|v| *v = 0.0);
-                    for &c in &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize] {
-                        let at = c as usize * r;
-                        for (o, v) in out.iter_mut().zip(&zbuf[at..at + r]) {
-                            *o += v;
-                        }
-                    }
-                })
-            });
+            dispatch_width!(r, false, pull_large_block(zbuf, r, yb, &blk.perm, &blk.perm_off, pool));
         }
     }
 
@@ -999,8 +1378,8 @@ impl Ops<'_> {
     /// Right-hand side of the reduced system for the row block `rows` (N x r, row order).
     pub fn rhs(&self, rows: &[f64], r: usize, sc: &mut Scratch, pool: &Pool) -> Result<Rhs, RfError> {
         let st = self.st;
-        let mut y = alloc_vec(st.m * r, 0.0)?;
-        let mut b1 = alloc_vec(st.g1 * r, 0.0)?;
+        let mut y = alloc_par(st.m * r, 0.0, pool)?;
+        let mut b1 = alloc_par(st.g1 * r, 0.0, pool)?;
         let unit = self.unit();
         let extra = self.scatter(r, &mut y, sc, Some((&mut b1, r)), 2 * r, pool, |t| dispatch_width!(r, unit, rhs_task(self, rows, r, t)))?;
         let (wsq, wsum) = extra.split_at(r);
@@ -1024,6 +1403,13 @@ impl Ops<'_> {
             None => (0..tb.len() - 1).map(|_| None).collect(),
         };
         let unit = self.unit();
+        if row_pieces.len() <= 1 || pool.threads() <= 1 {
+            row_pieces.into_iter().zip(ap).enumerate().for_each(|(t, (rp, at))| {
+                let segs = tb[t] as usize..tb[t + 1] as usize;
+                dispatch_width!(r, unit, residualize_task(self, rp, rb[t] / r, r, segs, x, b1, at));
+            });
+            return;
+        }
         pool.install(|| {
             row_pieces.into_par_iter().zip(ap).enumerate().for_each(|(t, (rp, at))| {
                 let segs = tb[t] as usize..tb[t + 1] as usize;
@@ -1035,27 +1421,31 @@ impl Ops<'_> {
     /// FE fit per row for one coefficient column: alpha1[g1] + sum_b x_b[g_b] (`x` m-vector, `alpha` g1).
     pub fn fit_rows(&self, x: &[f64], alpha: &[f64], pool: &Pool) -> Vec<f64> {
         let st = self.st;
-        let mut out = vec![0.0; st.n];
-        let tb = st.parts.clone();
-        let cb = st.cell_bounds(&tb);
+        let mut out = alloc_uninit::<f64>(st.n).expect("fit_rows allocation");
+        let tb = &st.parts;
+        let cb = st.cell_bounds(tb);
         let rb: Vec<usize> = cb.iter().map(|&c| st.cell_row(c)).collect();
         let pieces = split_bounds(&mut out, &rb);
-        pool.install(|| {
-            pieces.into_par_iter().enumerate().for_each(|(t, piece)| {
-                for s in tb[t] as usize..tb[t + 1] as usize {
-                    for c in st.cells_of(s) {
-                        let mut f = alpha[s];
-                        for (b, &code) in st.codes(c).iter().enumerate() {
-                            f += x[st.blocks[b].off + code as usize];
-                        }
-                        for row in st.rows_of_cell(c) {
-                            piece[row - rb[t]] = f;
-                        }
+        let fill = |(t, piece): (usize, &mut [MaybeUninit<f64>])| {
+            for s in tb[t] as usize..tb[t + 1] as usize {
+                for c in st.cells_of(s) {
+                    let mut f = alpha[s];
+                    for (b, &code) in st.codes(c).iter().enumerate() {
+                        f += x[st.blocks[b].off + code as usize];
+                    }
+                    for row in st.rows_of_cell(c) {
+                        piece[row - rb[t]].write(f);
                     }
                 }
-            })
-        });
-        out
+            }
+        };
+        if pieces.len() <= 1 || pool.threads() <= 1 {
+            pieces.into_iter().enumerate().for_each(fill);
+        } else {
+            pool.install(|| pieces.into_par_iter().enumerate().for_each(fill));
+        }
+        // SAFETY: every row belongs to one cell of one segment in `0..st.g1`, written above.
+        unsafe { assume_init(out) }
     }
 
     /// [`Ops::assemble_small`] for small blocks dense within the segments: the cell-weight
@@ -1323,24 +1713,46 @@ impl Ops<'_> {
                 })
                 .collect()
         });
-        let total: usize = lists.iter().map(|l| l.1.len()).sum();
         let mut off = alloc_vec(st.g1 + 1, 0u32)?;
-        let mut codes = alloc_vec(0, 0u32)?;
-        codes.try_reserve_exact(total).map_err(|_| RfError::OutOfMemory)?;
-        let mut sums = alloc_vec(0, 0.0)?;
-        sums.try_reserve_exact(total).map_err(|_| RfError::OutOfMemory)?;
+        let mut part_bounds = Vec::with_capacity(lists.len() + 1);
+        part_bounds.push(0usize);
         let mut s = 0usize;
         let mut work = 0u64;
-        for (cnt, c, w) in lists {
-            for k in cnt {
+        let mut pos = 0usize;
+        for (cnt, c, _) in &lists {
+            for &k in cnt {
                 off[s + 1] = off[s] + k;
                 work += u64::from(k) * u64::from(k);
                 s += 1;
             }
-            codes.extend(c);
-            sums.extend(w);
+            pos += c.len();
+            part_bounds.push(pos);
         }
-        Ok(SegAgg { off, codes, sums, work })
+        let total = pos;
+        let mut codes = alloc_uninit::<u32>(total)?;
+        let mut sums = alloc_uninit::<f64>(total)?;
+        if total <= CHUNK || pool.threads() <= 1 {
+            for (p, (_, c, w)) in lists.iter().enumerate() {
+                let b0 = part_bounds[p];
+                for (i, (&cv, &wv)) in c.iter().zip(w).enumerate() {
+                    codes[b0 + i].write(cv);
+                    sums[b0 + i].write(wv);
+                }
+            }
+        } else {
+            let cp = split_bounds(&mut codes, &part_bounds);
+            let sp = split_bounds(&mut sums, &part_bounds);
+            pool.install(|| {
+                cp.into_par_iter().zip(sp).zip(&lists).for_each(|((co, so), (_, c, w))| {
+                    for ((dc, ds), (&cv, &wv)) in co.iter_mut().zip(so.iter_mut()).zip(c.iter().zip(w)) {
+                        dc.write(cv);
+                        ds.write(wv);
+                    }
+                })
+            });
+        }
+        // SAFETY: `part_bounds` partitions `0..total`, and every slice was written above.
+        Ok(SegAgg { off, codes: unsafe { assume_init(codes) }, sums: unsafe { assume_init(sums) }, work })
     }
 
     /// Block of every reduced coordinate and segment of every cell (structural; for the joint
@@ -1424,8 +1836,8 @@ impl Ops<'_> {
             lptr[i + 1] = lptr[i] + row_nnz[l as usize];
         }
         let cap = lptr[nl] as usize;
-        let mut lcol = alloc_vec(cap, 0u32)?;
-        let mut lval = alloc_vec(cap, 0.0)?;
+        let mut lcol = alloc_uninit::<u32>(cap)?;
+        let mut lval = alloc_uninit::<f64>(cap)?;
         let mut lused = alloc_vec(nl, 0u32)?;
         let scratch = RowScratch::new(m, pool);
         {
@@ -1473,8 +1885,8 @@ impl Ops<'_> {
                         for &h in touched.iter() {
                             let hn = newid[h as usize];
                             if hn != u32::MAX {
-                                cols[i] = hn;
-                                vals[i] = acc[h as usize];
+                                cols[i].write(hn);
+                                vals[i].write(acc[h as usize]);
                                 i += 1;
                             }
                         }
@@ -1483,23 +1895,40 @@ impl Ops<'_> {
                 })
             });
         }
+        let lrow_col = |r: usize| -> &[u32] {
+            let (a, u) = (lptr[r] as usize, lused[r] as usize);
+            // SAFETY: row `r` wrote `0..u` at offset `a`.
+            unsafe { std::slice::from_raw_parts(lcol.as_ptr().cast::<u32>().add(a), u) }
+        };
+        let lrow_val = |r: usize| -> &[f64] {
+            let (a, u) = (lptr[r] as usize, lused[r] as usize);
+            // SAFETY: row `r` wrote `0..u` at offset `a`.
+            unsafe { std::slice::from_raw_parts(lval.as_ptr().cast::<f64>().add(a), u) }
+        };
+        if sk == 0 && (0..nl).all(|r| lptr[r] + lused[r] == lptr[r + 1]) {
+            // SAFETY: every row filled its entire structural slice (`lused[r] == row_nnz`), so all
+            // `0..cap` entries of `lcol` and `lval` are initialized.
+            return Ok(Csr { n: nk, ptr: lptr, col: unsafe { assume_init(lcol) }, val: unsafe { assume_init(lval) } });
+        }
         // Small rows: dense S_SS over the kept small coordinates, then the mirrored small
         // columns of the large rows (large rows ascending, so columns stay sorted).
         let dense = if sk > 0 { self.assemble_small(pool)? } else { Vec::new() };
-        let small_cols = |r: usize| {
-            let a = lptr[r] as usize;
-            let row = &lcol[a..a + lused[r] as usize];
-            a..a + row.partition_point(|&c| (c as usize) < sk)
-        };
+        let small_len = |r: usize| lrow_col(r).partition_point(|&c| (c as usize) < sk);
         let mut ptr = alloc_vec(nk + 1, 0u32)?;
         let mut cnt = alloc_vec(sk, 0u32)?;
         for i in 0..sk {
             let gi = keep_idx[i] as usize;
             cnt[i] = (0..sk).filter(|&j| j == i || dense[gi * ms + keep_idx[j] as usize] != 0.0).count() as u32;
         }
-        for r in 0..nl {
-            for e in small_cols(r) {
-                cnt[lcol[e] as usize] += 1;
+        let mut slens = Vec::new();
+        if sk > 0 {
+            slens.reserve_exact(nl);
+            for r in 0..nl {
+                let sl = small_len(r);
+                slens.push(sl as u32);
+                for &c in &lrow_col(r)[..sl] {
+                    cnt[c as usize] += 1;
+                }
             }
         }
         for i in 0..sk {
@@ -1509,32 +1938,76 @@ impl Ops<'_> {
             ptr[sk + r + 1] = ptr[sk + r] + lused[r];
         }
         let total = ptr[nk] as usize;
-        let mut col = alloc_vec(total, 0u32)?;
-        let mut val = alloc_vec(total, 0.0)?;
-        let mut cur: Vec<usize> = ptr[..sk].iter().map(|&p| p as usize).collect();
-        for i in 0..sk {
-            let gi = keep_idx[i] as usize;
-            for j in 0..sk {
-                let v = dense[gi * ms + keep_idx[j] as usize];
-                if j == i || v != 0.0 {
-                    col[cur[i]] = j as u32;
-                    val[cur[i]] = v;
-                    cur[i] += 1;
+        let small_total = ptr[sk] as usize;
+        let mut col = alloc_uninit::<u32>(total)?;
+        let mut val = alloc_uninit::<f64>(total)?;
+        {
+            let (scol, lcol_out) = col.split_at_mut(small_total);
+            let (sval, lval_out) = val.split_at_mut(small_total);
+            let fill_small = |scol: &mut [MaybeUninit<u32>], sval: &mut [MaybeUninit<f64>]| {
+                if sk == 0 {
+                    return;
                 }
+                let mut cur: Vec<usize> = ptr[..sk].iter().map(|&p| p as usize).collect();
+                for i in 0..sk {
+                    let gi = keep_idx[i] as usize;
+                    for j in 0..sk {
+                        let v = dense[gi * ms + keep_idx[j] as usize];
+                        if j == i || v != 0.0 {
+                            scol[cur[i]].write(j as u32);
+                            sval[cur[i]].write(v);
+                            cur[i] += 1;
+                        }
+                    }
+                }
+                for r in 0..nl {
+                    let sl = slens[r] as usize;
+                    let (rc, rv) = (lrow_col(r), lrow_val(r));
+                    for e in 0..sl {
+                        let i = rc[e] as usize;
+                        scol[cur[i]].write((sk + r) as u32);
+                        sval[cur[i]].write(rv[e]);
+                        cur[i] += 1;
+                    }
+                }
+            };
+            if total - small_total <= CHUNK || pool.threads() <= 1 || nl < 512 {
+                fill_small(scol, sval);
+                for r in 0..nl {
+                    let b = ptr[sk + r] as usize - small_total;
+                    for (k, (&c, &v)) in lrow_col(r).iter().zip(lrow_val(r)).enumerate() {
+                        lcol_out[b + k].write(c);
+                        lval_out[b + k].write(v);
+                    }
+                }
+            } else {
+                let step = 512;
+                let chunks: Vec<usize> = (0..=nl.div_ceil(step)).map(|c| (c * step).min(nl)).collect();
+                let bounds: Vec<usize> = chunks.iter().map(|&r| ptr[sk + r] as usize - small_total).collect();
+                let cp = split_bounds(lcol_out, &bounds);
+                let vp = split_bounds(lval_out, &bounds);
+                pool.install(|| {
+                    rayon::join(
+                        || fill_small(scol, sval),
+                        || {
+                            cp.into_par_iter().zip(vp).enumerate().for_each(|(ci, (co, vo))| {
+                                let base = bounds[ci];
+                                for r in chunks[ci]..chunks[ci + 1] {
+                                    let b = ptr[sk + r] as usize - small_total - base;
+                                    for (k, (&c, &v)) in lrow_col(r).iter().zip(lrow_val(r)).enumerate() {
+                                        co[b + k].write(c);
+                                        vo[b + k].write(v);
+                                    }
+                                }
+                            });
+                        },
+                    );
+                });
             }
         }
-        for r in 0..nl {
-            for e in small_cols(r) {
-                let i = lcol[e] as usize;
-                col[cur[i]] = (sk + r) as u32;
-                val[cur[i]] = lval[e];
-                cur[i] += 1;
-            }
-            let (a, u, b) = (lptr[r] as usize, lused[r] as usize, ptr[sk + r] as usize);
-            col[b..b + u].copy_from_slice(&lcol[a..a + u]);
-            val[b..b + u].copy_from_slice(&lval[a..a + u]);
-        }
-        Ok(Csr { n: nk, ptr, col, val })
+        // SAFETY: `0..small_total` was filled by `fill_small` (`cur[i]` advances by `cnt[i]`), and
+        // `small_total..total` was filled by each large row `r` (`lused[r]` entries).
+        Ok(Csr { n: nk, ptr, col: unsafe { assume_init(col) }, val: unsafe { assume_init(val) } })
     }
 
     /// Number of structural nonzeros of each row of S_bb (diagonal included). Cost ~= E_b.

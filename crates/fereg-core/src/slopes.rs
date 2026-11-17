@@ -43,7 +43,9 @@ use crate::api::Ctx;
 use crate::cg::{self, CgSystem};
 use crate::error::RfError;
 use crate::operator::{Csr, REDUNDANT};
-use crate::par::{self, CHUNK, Pool, alloc_vec, sum_chunks};
+#[cfg(target_arch = "x86_64")]
+use crate::par::has_avx2_fma;
+use crate::par::{self, CHUNK, Pool, alloc_uninit, alloc_vec, assume_init, sum_chunks};
 use crate::precond::dense::Dense;
 use crate::precond::sparse_chol::SparseChol;
 use crate::precond::{SOLVE_COLS, solve_tasks};
@@ -428,9 +430,9 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
     let nslots_small = blocks[..nsmall].iter().map(|b| b.b).sum();
 
     // Slot coordinates and values, and E's slopes, in row order.
-    let mut sc = alloc_vec(n * k, 0u32)?;
-    let mut sv = alloc_vec(n * k, 1.0f64)?;
-    let mut he = alloc_vec(n * e_ns, 0.0f64)?;
+    let mut sc = alloc_uninit::<u32>(n * k)?;
+    let mut sv = alloc_uninit::<f64>(n * k)?;
+    let mut he = alloc_uninit::<f64>(n * e_ns)?;
     let obs = |i: usize| if identity { i } else { pi[i] as usize };
     pool.install(|| {
         if k > 0 {
@@ -441,11 +443,14 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
                         let tb = &terms[blk.term];
                         let c0 = (blk.off + tb.codes[o] as usize * blk.b) as u32;
                         for d in 0..blk.b {
-                            sr[blk.s0 + d] = c0 + d as u32;
+                            sr[blk.s0 + d].write(c0 + d as u32);
+                        }
+                        if blk.icpt {
+                            vr[blk.s0].write(1.0);
                         }
                         let first = blk.s0 + usize::from(blk.icpt);
                         for (s, x) in tb.slopes.iter().enumerate() {
-                            vr[first + s] = x[o];
+                            vr[first + s].write(x[o]);
                         }
                     }
                 }
@@ -456,12 +461,15 @@ pub fn build_structure(terms: &[Term], n: usize, small_limit: usize, pool: &Pool
                 for (j, hr) in hc.chunks_exact_mut(e_ns).enumerate() {
                     let o = obs(c * CHUNK + j);
                     for (s, x) in te.slopes.iter().enumerate() {
-                        hr[s] = x[o];
+                        hr[s].write(x[o]);
                     }
                 }
             });
         }
     });
+    // SAFETY: the blocks partition `0..k` per row (`s0` advances by `b = icpt + slopes.len()`),
+    // and `he` writes all `0..e_ns` per row.
+    let (sc, sv, he) = unsafe { (assume_init(sc), assume_init(sv), assume_init(he)) };
 
     let max_seg = seg_off.windows(2).map(|w| (w[1] - w[0]) as usize).max().unwrap_or(0);
     Ok(SlopeStructure {
@@ -991,6 +999,34 @@ fn seg_task<const W: usize, const K: usize, const APPLY: bool, const STATS: bool
     segs: Range<usize>,
     ins: &TaskIn,
     acc: &mut [f64],
+    zp: Option<&mut [f64]>,
+) -> [[f64; W]; 3] {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        return unsafe { seg_task_avx2::<W, K, APPLY, STATS>(ops, segs, ins, acc, zp) };
+    }
+    seg_task_inner::<W, K, APPLY, STATS>(ops, segs, ins, acc, zp)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn seg_task_avx2<const W: usize, const K: usize, const APPLY: bool, const STATS: bool>(
+    ops: SOps,
+    segs: Range<usize>,
+    ins: &TaskIn,
+    acc: &mut [f64],
+    zp: Option<&mut [f64]>,
+) -> [[f64; W]; 3] {
+    seg_task_inner::<W, K, APPLY, STATS>(ops, segs, ins, acc, zp)
+}
+
+#[inline(always)]
+fn seg_task_inner<const W: usize, const K: usize, const APPLY: bool, const STATS: bool>(
+    ops: SOps,
+    segs: Range<usize>,
+    ins: &TaskIn,
+    acc: &mut [f64],
     mut zp: Option<&mut [f64]>,
 ) -> [[f64; W]; 3] {
     let TaskIn { src, r, j0, sc, sv, seg_off, minv, wr, nk_acc } = *ins;
@@ -1103,7 +1139,26 @@ fn seg_task<const W: usize, const K: usize, const APPLY: bool, const STATS: bool
 /// rows of be x r) when given. Not inlined, for the same aliasing reason as [`seg_task`].
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn resid_task<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs: &mut [f64], r: usize, j0: usize, x: &[f64], mut alpha: Option<&mut [f64]>) {
+fn resid_task<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs: &mut [f64], r: usize, j0: usize, x: &[f64], alpha: Option<&mut [f64]>) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 and FMA support on this CPU.
+        unsafe { resid_task_avx2::<W, K>(ops, segs, vs, r, j0, x, alpha) };
+        return;
+    }
+    resid_task_inner::<W, K>(ops, segs, vs, r, j0, x, alpha);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn resid_task_avx2<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs: &mut [f64], r: usize, j0: usize, x: &[f64], alpha: Option<&mut [f64]>) {
+    resid_task_inner::<W, K>(ops, segs, vs, r, j0, x, alpha);
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn resid_task_inner<const W: usize, const K: usize>(ops: SOps, segs: Range<usize>, vs: &mut [f64], r: usize, j0: usize, x: &[f64], mut alpha: Option<&mut [f64]>) {
     let st = ops.st;
     let (sc, sv, seg_off, minv) = (&st.sc[..], &st.sv[..], &st.seg_off[..], &ops.ws.minv[..]);
     let (k, be) = (st.k, st.be);
@@ -1842,32 +1897,85 @@ impl SOps<'_> {
         // Coordinate CSR over the kept coordinates.
         let red = &ws.redundant[blk.off..blk.off + blk.g * b];
         let mut newid = vec![u32::MAX; blk.g * b];
-        let mut keep = Vec::new();
+        let mut keep = Vec::with_capacity(blk.g * b);
         for (c, &rd) in red.iter().enumerate() {
             if !rd {
                 newid[c] = keep.len() as u32;
                 keep.push(c as u32);
             }
         }
-        let mut ptr = Vec::with_capacity(keep.len() + 1);
-        ptr.push(0u32);
-        let mut col = Vec::new();
-        let mut val = Vec::new();
-        for &c in &keep {
-            let (g, a) = (c as usize / b, c as usize % b);
-            for e in lptr[g]..lptr[g + 1] {
-                let g2 = nbr[e] as usize;
-                for bb in 0..b {
-                    let id = newid[g2 * b + bb];
-                    if id != u32::MAX {
-                        col.push(id);
-                        val.push(vals[e * b2 + a * b + bb]);
+        let nk = keep.len();
+        let all_kept = nk == blk.g * b;
+        let mut ptr = alloc_vec(nk + 1, 0u32)?;
+        if all_kept {
+            for (k, &c) in keep.iter().enumerate() {
+                let g = c as usize / b;
+                ptr[k + 1] = ptr[k] + ((lptr[g + 1] - lptr[g]) * b) as u32;
+            }
+        } else {
+            for (k, &c) in keep.iter().enumerate() {
+                let g = c as usize / b;
+                let mut cnt = 0u32;
+                for &g2 in &nbr[lptr[g]..lptr[g + 1]] {
+                    for bb in 0..b {
+                        if newid[g2 as usize * b + bb] != u32::MAX {
+                            cnt += 1;
+                        }
+                    }
+                }
+                ptr[k + 1] = ptr[k] + cnt;
+            }
+        }
+        let total = ptr[nk] as usize;
+        let mut col = alloc_uninit::<u32>(total)?;
+        let mut val = alloc_uninit::<f64>(total)?;
+        let fill_range = |k0: usize, k1: usize, base: usize, co: &mut [ std::mem::MaybeUninit<u32> ], vo: &mut [ std::mem::MaybeUninit<f64> ]| {
+            for k in k0..k1 {
+                let c = keep[k] as usize;
+                let (g, a) = (c / b, c % b);
+                let mut at = ptr[k] as usize - base;
+                if all_kept {
+                    for e in lptr[g]..lptr[g + 1] {
+                        let c0 = nbr[e] * b as u32;
+                        let v0 = e * b2 + a * b;
+                        for bb in 0..b {
+                            co[at + bb].write(c0 + bb as u32);
+                            vo[at + bb].write(vals[v0 + bb]);
+                        }
+                        at += b;
+                    }
+                } else {
+                    for e in lptr[g]..lptr[g + 1] {
+                        let g2 = nbr[e] as usize;
+                        let v0 = e * b2 + a * b;
+                        for bb in 0..b {
+                            let id = newid[g2 * b + bb];
+                            if id != u32::MAX {
+                                co[at].write(id);
+                                vo[at].write(vals[v0 + bb]);
+                                at += 1;
+                            }
+                        }
                     }
                 }
             }
-            ptr.push(col.len() as u32);
+        };
+        if total <= CHUNK || pool.threads() <= 1 || nk < 512 {
+            fill_range(0, nk, 0, &mut col, &mut val);
+        } else {
+            let step = 512;
+            let kchunks: Vec<usize> = (0..=nk.div_ceil(step)).map(|c| (c * step).min(nk)).collect();
+            let bounds: Vec<usize> = kchunks.iter().map(|&k| ptr[k] as usize).collect();
+            let cp = split_bounds(&mut col, &bounds);
+            let vp = split_bounds(&mut val, &bounds);
+            pool.install(|| {
+                cp.into_par_iter().zip(vp).enumerate().for_each(|(ci, (co, vo))| {
+                    fill_range(kchunks[ci], kchunks[ci + 1], bounds[ci], co, vo);
+                })
+            });
         }
-        Ok(Some((Csr { n: keep.len(), ptr, col, val }, keep)))
+        // SAFETY: `ptr` counts the exact entries written for each kept coordinate `k` in `0..nk`.
+        Ok(Some((Csr { n: nk, ptr, col: unsafe { assume_init(col) }, val: unsafe { assume_init(val) } }, keep)))
     }
 }
 
@@ -1899,12 +2007,27 @@ impl SPre {
             let zs = &mut z[off * w..(off + blk.g * b) * w];
             let rs = &r[off * w..(off + blk.g * b) * w];
             let jv = &ops.ws.jinv[q];
-            pool.install(|| {
-                zs.par_chunks_mut(b * w).zip(rs.par_chunks(b * w)).enumerate().with_min_len(256).for_each(|(g, (zo, ri))| {
+            let apply_level = |g: usize, zo: &mut [f64], ri: &[f64]| {
+                if b == 1 {
+                    let j0 = jv[g];
+                    for (o, &x) in zo.iter_mut().zip(ri) {
+                        *o = j0 * x;
+                    }
+                } else if b == 2 {
+                    let jl = &jv[g * 4..g * 4 + 4];
+                    let (j00, j01, j10, j11) = (jl[0], jl[1], jl[2], jl[3]);
+                    let (r0, r1) = ri.split_at(w);
+                    let (z0, z1) = zo.split_at_mut(w);
+                    for j in 0..w {
+                        let (x0, x1) = (r0[j], r1[j]);
+                        z0[j] = j00 * x0 + j01 * x1;
+                        z1[j] = j10 * x0 + j11 * x1;
+                    }
+                } else {
                     let jl = &jv[g * b * b..(g + 1) * b * b];
                     for a in 0..b {
                         let out = &mut zo[a * w..(a + 1) * w];
-                        out.iter_mut().for_each(|v| *v = 0.0);
+                        out.fill(0.0);
                         for c in 0..b {
                             let f = jl[a * b + c];
                             if f != 0.0 {
@@ -1914,8 +2037,19 @@ impl SPre {
                             }
                         }
                     }
-                })
-            });
+                }
+            };
+            if blk.g <= 256 || pool.threads() <= 1 {
+                for (g, (zo, ri)) in zs.chunks_exact_mut(b * w).zip(rs.chunks_exact(b * w)).enumerate() {
+                    apply_level(g, zo, ri);
+                }
+            } else {
+                pool.install(|| {
+                    zs.par_chunks_mut(b * w).zip(rs.par_chunks(b * w)).enumerate().with_min_len(256).for_each(|(g, (zo, ri))| {
+                        apply_level(g, zo, ri);
+                    })
+                });
+            }
         }
         // Factored blocks are independent: each (block, column group) is a sequential solve
         // task, and the tasks run concurrently.
@@ -1927,34 +2061,33 @@ impl SPre {
             LargePre::Chol { keep, f } => (keep, f),
             LargePre::Jacobi => unreachable!("Jacobi blocks have no solve task"),
         };
-        let sols: Vec<Vec<f64>> = pool.install(|| {
-            tasks
-                .par_iter()
-                .map(|(k, cols)| {
-                    let (keep, f) = chol(*k);
-                    let off = st.blocks[st.nsmall + k].off;
-                    let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
-                    f.solve(&mut rhs);
-                    let mut sol = Vec::with_capacity(keep.len() * cols.len());
-                    for j in 0..cols.len() {
-                        sol.extend((0..keep.len()).map(|i| rhs[(i, j)]));
-                    }
-                    sol
-                })
-                .collect()
-        });
+        let solve_one = |(k, cols): &(usize, Range<usize>)| {
+            let (keep, f) = chol(*k);
+            let off = st.blocks[st.nsmall + k].off;
+            let mut rhs = Mat::<f64>::from_fn(keep.len(), cols.len(), |i, j| r[(off + keep[i] as usize) * w + cols.start + j]);
+            f.solve(&mut rhs);
+            rhs
+        };
+        let sols: Vec<Mat<f64>> = if tasks.len() <= 1 || pool.threads() <= 1 {
+            tasks.iter().map(solve_one).collect()
+        } else {
+            pool.install(|| tasks.par_iter().map(solve_one).collect())
+        };
         for (k, lp) in self.large.iter().enumerate() {
-            if let LargePre::Chol { .. } = lp {
+            if let LargePre::Chol { keep, .. } = lp {
                 let blk = &st.blocks[st.nsmall + k];
-                z[blk.off * w..(blk.off + blk.g * blk.b) * w].iter_mut().for_each(|v| *v = 0.0);
+                if keep.len() < blk.g * blk.b {
+                    z[blk.off * w..(blk.off + blk.g * blk.b) * w].fill(0.0);
+                }
             }
         }
-        for ((k, cols), sol) in tasks.iter().zip(&sols) {
+        for ((k, cols), rhs) in tasks.iter().zip(&sols) {
             let (keep, _) = chol(*k);
             let off = st.blocks[st.nsmall + k].off;
             for (j, c) in cols.clone().enumerate() {
-                for (i, &kk) in keep.iter().enumerate() {
-                    z[(off + kk as usize) * w + c] = sol[j * keep.len() + i];
+                let col = rhs.col_as_slice(j);
+                for (&kk, &v) in keep.iter().zip(col) {
+                    z[(off + kk as usize) * w + c] = v;
                 }
             }
         }
@@ -2060,11 +2193,22 @@ impl SlopeSolver {
         ctx.check()?;
         let w_rows = match weights {
             Some(w) => {
-                let mut v = alloc_vec(n, 0.0)?;
-                for (o, &k) in v.iter_mut().zip(&st.pi) {
-                    *o = w[k as usize];
+                let mut v = alloc_uninit::<f64>(n)?;
+                if n <= CHUNK || pool.threads() <= 1 {
+                    for (o, &k) in v.iter_mut().zip(&st.pi) {
+                        o.write(w[k as usize]);
+                    }
+                } else {
+                    pool.install(|| {
+                        v.par_chunks_mut(CHUNK).zip(st.pi.par_chunks(CHUNK)).for_each(|(oc, pc)| {
+                            for (o, &k) in oc.iter_mut().zip(pc) {
+                                o.write(w[k as usize]);
+                            }
+                        })
+                    });
                 }
-                Some(v)
+                // SAFETY: `st.pi` has length `n`, so every element of `v` was written.
+                Some(unsafe { assume_init(v) })
             }
             None => None,
         };

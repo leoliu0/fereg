@@ -7,6 +7,7 @@
 //! beta), so the relative accuracy does not degrade with large degrees of freedom.
 
 use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 /// ln sqrt(2*pi).
 const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_7;
@@ -236,6 +237,20 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
     let t = x + 7.5;
     let a = C.iter().enumerate().skip(1).fold(C[0], |a, (i, c)| a + c / (x + i as f64));
     LN_SQRT_2PI + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+/// `ln_gamma(y + 1.0)` with an L1-resident table for integers `0 <= y <= 256` (exact bit match
+/// with [`ln_gamma`]).
+#[inline]
+pub(crate) fn ln_gamma_plus1(y: f64) -> f64 {
+    static TABLE: OnceLock<[f64; 257]> = OnceLock::new();
+    if (0.0..=256.0).contains(&y) {
+        let k = y as usize;
+        if k as f64 == y {
+            return TABLE.get_or_init(|| std::array::from_fn(|i| ln_gamma(i as f64 + 1.0)))[k];
+        }
+    }
+    ln_gamma(y + 1.0)
 }
 
 /// Stirling correction ln Gamma(x) - ((x - 1/2)*ln x - x + ln sqrt(2*pi)) for x >= 10 (asymptotic series;

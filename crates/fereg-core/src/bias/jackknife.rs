@@ -211,7 +211,7 @@ fn mask(s: &Sub, panel: &JkPanel, parts: &[Permutation], n_rows: usize) -> Vec<b
         Kind::Ph(a) => {
             // Rows of each individual in (permuted) period order, ties in row order.
             let indiv = panel.individual.expect("checked");
-            let (off, ids) = super::groups(indiv, n);
+            let (off, ids) = super::groups_seq(indiv, n);
             let mut keep = vec![false; n_rows];
             let mut rows: Vec<u32> = Vec::new();
             for i in 0..n {

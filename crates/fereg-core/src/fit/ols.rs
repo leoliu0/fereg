@@ -91,20 +91,41 @@ pub(crate) fn sq_cor(parts: Vec<[f64; 6]>) -> f64 {
 
 /// Fitted values y - e (kept order) and their squared correlation with y, in one chunked pass.
 fn fitted_sq_cor(y: &[f64], kept: &[u32], e: &[f64], pool: &Pool) -> Result<(Vec<f64>, f64), RfError> {
-    let mut fitted = par::alloc_vec(kept.len(), 0.0)?;
-    let parts: Vec<[f64; 6]> = pool.install(|| {
+    let n = kept.len();
+    let mut fitted = par::alloc_uninit::<f64>(n)?;
+    let parts: Vec<[f64; 6]> = if n <= CHUNK || pool.threads() <= 1 {
         fitted
-            .par_chunks_mut(CHUNK)
-            .zip(kept.par_chunks(CHUNK).zip(e.par_chunks(CHUNK)))
-            .map(|(f, (kc, ec))| {
-                for ((f, &i), &ei) in f.iter_mut().zip(kc).zip(ec) {
-                    *f = y[i as usize] - ei;
+            .chunks_mut(CHUNK)
+            .zip(kept.chunks(CHUNK).zip(e.chunks(CHUNK)))
+            .map(|(fc, (kc, ec))| {
+                for ((f, &i), &ei) in fc.iter_mut().zip(kc).zip(ec) {
+                    f.write(y[i as usize] - ei);
                 }
-                cor_part(kc.iter().map(|&i| y[i as usize]).zip(f.iter().copied()))
+                cor_part(kc.iter().zip(ec).map(|(&i, &ei)| {
+                    let yi = y[i as usize];
+                    (yi, yi - ei)
+                }))
             })
             .collect()
-    });
-    Ok((fitted, sq_cor(parts)))
+    } else {
+        pool.install(|| {
+            fitted
+                .par_chunks_mut(CHUNK)
+                .zip(kept.par_chunks(CHUNK).zip(e.par_chunks(CHUNK)))
+                .map(|(fc, (kc, ec))| {
+                    for ((f, &i), &ei) in fc.iter_mut().zip(kc).zip(ec) {
+                        f.write(y[i as usize] - ei);
+                    }
+                    cor_part(kc.iter().zip(ec).map(|(&i, &ei)| {
+                        let yi = y[i as usize];
+                        (yi, yi - ei)
+                    }))
+                })
+                .collect()
+        })
+    };
+    // SAFETY: every slot of `0..n` was written above.
+    Ok((unsafe { par::assume_init(fitted) }, sq_cor(parts)))
 }
 
 /// Columns of the row block: [y, endog..., (1), inst..., x...].
@@ -307,8 +328,8 @@ pub(crate) fn linear(input: &FitInput, spec: &FitSpec, sample: Sample, ctx: &Ctx
     let keep_resid = spec.keep_resid;
     // Kept-order residuals: e2 (uncorrected; combo 1 for IV, equal to e = combo 0 otherwise)
     // always, the corrected IV residual e when kept.
-    let mut e2_kept = par::alloc_vec(n, 0.0)?;
-    let mut e_kept = if keep_resid && iv { par::alloc_vec(n, 0.0)? } else { Vec::new() };
+    let mut e2_kept = par::alloc_par(n, 0.0, pool)?;
+    let mut e_kept = if keep_resid && iv { par::alloc_par(n, 0.0, pool)? } else { Vec::new() };
     let mut store = vec![(usize::from(iv), e2_kept.as_mut_slice())];
     if keep_resid && iv {
         store.push((0, e_kept.as_mut_slice()));

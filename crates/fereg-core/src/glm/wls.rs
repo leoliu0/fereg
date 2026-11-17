@@ -29,6 +29,7 @@ fn givens_add(r: &mut [f64], m: usize, row: &mut [f64]) {
 }
 
 /// sum a_i*b_i with four interleaved accumulators (vectorizes; fixed order for a given length).
+#[inline(always)]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut s = [0.0f64; 4];
     let (ac, ar) = a.split_at(a.len() - a.len() % 4);
@@ -48,6 +49,23 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// Upper-triangular R (m x m, row-major) of the column-major nc x m matrix `a` (overwritten) by
 /// Householder reflections.
 fn householder_r(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if par::has_avx2_fma() {
+        // SAFETY: `has_avx2_fma()` verified AVX2 support; only `avx2` (no `fma`) is enabled so
+        // every product/sum rounds identically to scalar IEEE-754.
+        return unsafe { householder_r_avx2(a, nc, m) };
+    }
+    householder_r_inner(a, nc, m)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn householder_r_avx2(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
+    householder_r_inner(a, nc, m)
+}
+
+#[inline(always)]
+fn householder_r_inner(a: &mut [f64], nc: usize, m: usize) -> Vec<f64> {
     let mut rr = vec![0.0; m * m];
     for j in 0..m.min(nc) {
         let (head, tail) = a.split_at_mut((j + 1) * nc);
@@ -87,14 +105,19 @@ pub(crate) fn qr_factor(rows: &[f64], r: usize, cols: &[usize], w: Option<&[f64]
     let m = cols.len();
     let parts = par::map_chunks(pool, n, CHUNK, |_, range| {
         let nc = range.len();
-        let mut a = vec![0.0; m * nc];
+        let mut a = Vec::<std::mem::MaybeUninit<f64>>::with_capacity(m * nc);
+        // SAFETY: `MaybeUninit<f64>` requires no initialization; every slot in `0..m*nc` is
+        // written by the loop below before `assume_init`.
+        unsafe { a.set_len(m * nc) };
         for (ii, i) in range.enumerate() {
             let sw = w.map_or(1.0, |w| w[i].sqrt());
             let row = &rows[i * r..(i + 1) * r];
             for (j, &c) in cols.iter().enumerate() {
-                a[j * nc + ii] = sw * row[c];
+                a[j * nc + ii].write(sw * row[c]);
             }
         }
+        // SAFETY: all `m * nc` elements were written above.
+        let mut a = unsafe { par::assume_init(a) };
         householder_r(&mut a, nc, m)
     });
     let mut out = vec![0.0; m * m];

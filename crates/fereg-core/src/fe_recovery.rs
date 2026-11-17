@@ -15,16 +15,36 @@ use crate::session::Term;
 
 /// Row-order values -> kept order (`out[row_order[k]] = v[k]`).
 pub(crate) fn to_kept_order(v: &[f64], row_order: &[u32], pool: &Pool) -> Result<Vec<f64>, RfError> {
-    let mut out = par::alloc_vec(v.len(), 0.0)?;
-    let ptr = SendPtr(out.as_mut_ptr());
-    pool.install(|| {
-        v.par_iter().zip(row_order.par_iter()).for_each(|(&x, &k)| {
-            let p = ptr;
+    scale_to_kept_order(v, 1.0, 0.0, row_order, pool)
+}
+
+/// `out[row_order[k]] = a * v[k] + b`, without a zeroing pass.
+pub(crate) fn scale_to_kept_order(v: &[f64], a: f64, b: f64, row_order: &[u32], pool: &Pool) -> Result<Vec<f64>, RfError> {
+    assert_eq!(v.len(), row_order.len(), "to_kept_order: length mismatch");
+    let n = v.len();
+    let mut out = par::alloc_uninit::<f64>(n)?;
+    let ptr = SendPtr(out.as_mut_ptr().cast::<f64>());
+    let tr = |x: f64| if a == 1.0 && b == 0.0 { x } else if b == 0.0 { a * x } else { a * x + b };
+    if n <= par::CHUNK || pool.threads() <= 1 {
+        for (&x, &k) in v.iter().zip(row_order) {
+            debug_assert!((k as usize) < n);
             // SAFETY: row_order is a permutation of 0..n, so every slot is written exactly once.
-            unsafe { *p.0.add(k as usize) = x };
-        })
-    });
-    Ok(out)
+            unsafe { *ptr.0.add(k as usize) = tr(x) };
+        }
+    } else {
+        pool.install(|| {
+            v.par_chunks(par::CHUNK).zip(row_order.par_chunks(par::CHUNK)).for_each(|(vc, oc)| {
+                let p = ptr;
+                for (&x, &k) in vc.iter().zip(oc) {
+                    debug_assert!((k as usize) < n);
+                    // SAFETY: row_order is a permutation of 0..n, so every slot is written once.
+                    unsafe { *p.0.add(k as usize) = tr(x) };
+                }
+            })
+        });
+    }
+    // SAFETY: row_order is a permutation of 0..n, so every element 0..n was initialized.
+    Ok(unsafe { par::assume_init(out) })
 }
 
 #[derive(Clone, Copy)]

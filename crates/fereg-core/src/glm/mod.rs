@@ -75,14 +75,31 @@ struct SepRounds {
     iterations: usize,
 }
 
-/// reghdfe `reghdfe_standardize` (fast formula), floored at 1e-3.
-fn standardize_sd(v: impl Iterator<Item = f64>) -> f64 {
-    let (mut n, mut s, mut ss) = (0.0f64, 0.0f64, 0.0f64);
-    for x in v {
-        n += 1.0;
-        s += x;
-        ss += x * x;
+/// What outputs a GLM call materializes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutMode {
+    ResultOnly,
+    Both,
+    /// `fit::glm` internal fast path: skips Stata VCE / DoF / scalars and `GlmParts::fe_sum`.
+    FitPartsOnly,
+}
+
+#[derive(Clone, Copy)]
+struct SyncPtr<T>(*mut T);
+// SAFETY: callers write disjoint indices (`order` is a bijection `0..n -> 0..n`).
+unsafe impl<T> Send for SyncPtr<T> {}
+unsafe impl<T> Sync for SyncPtr<T> {}
+
+impl<T> SyncPtr<T> {
+    #[inline(always)]
+    unsafe fn write(self, idx: usize, val: T) {
+        unsafe { self.0.add(idx).write(val) };
     }
+}
+
+/// reghdfe `reghdfe_standardize` (fast formula), floored at 1e-3.
+#[inline]
+fn sd_from_sums(n: f64, s: f64, ss: f64) -> f64 {
     ((ss - s * s / n) / (n - 1.0)).sqrt().max(1e-3)
 }
 
@@ -185,7 +202,7 @@ impl Session {
     /// [`Session::keep`]); per-observation outputs refer to the final kept sample. ppmlhdfe /
     /// Stata `logit` conventions ([`GlmConvention::Ppmlhdfe`]).
     pub fn glm(&mut self, rows: Vec<f64>, lay: &Layout, offset: Option<Vec<f64>>, s: &Spec, g: &GlmOptions, ctx: &Ctx) -> Result<EstResult, RfError> {
-        self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, false, ctx).map(|(res, _)| res)
+        self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, OutMode::ResultOnly, ctx).map(|(res, _)| res)
     }
 
     /// [`Session::glm`] under convention `conv`, also returning the per-observation [`GlmParts`].
@@ -200,8 +217,28 @@ impl Session {
         conv: GlmConvention,
         ctx: &Ctx,
     ) -> Result<(EstResult, GlmParts), RfError> {
-        let (res, parts) = self.glm_checked(rows, lay, offset, s, g, conv, true, ctx)?;
+        let (res, parts) = self.glm_checked(rows, lay, offset, s, g, conv, OutMode::Both, ctx)?;
         Ok((res, parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))?))
+    }
+
+    /// Fit-layer fast path: runs IRLS under [`GlmConvention::Fixest`] on the caller's `pool` and
+    /// materializes only the [`GlmParts`] fields read by `fit::glm` (skipping Stata VCE, DoF,
+    /// scalar likelihood passes and `fe_sum`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn glm_fit_parts(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        pool: &Pool,
+        ctx: &Ctx,
+    ) -> Result<GlmParts, RfError> {
+        validate(self, &rows, lay, offset.as_deref(), s, g)?;
+        let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
+        let (_, parts) = self.glm_in_pool(rows, lay.nx, offset, s, g, GlmConvention::Fixest, OutMode::FitPartsOnly, &muted, pool)?;
+        parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))
     }
 
     /// The Poisson separation check alone on `rows` (layout `[y, x...]`, row order), after the
@@ -251,7 +288,7 @@ impl Session {
         s: &Spec,
         g: &GlmOptions,
         conv: GlmConvention,
-        want_parts: bool,
+        mode: OutMode,
         ctx: &Ctx,
     ) -> Result<(EstResult, Option<GlmParts>), RfError> {
         validate(self, &rows, lay, offset.as_deref(), s, g)?;
@@ -259,7 +296,7 @@ impl Session {
         // through EstResult::notes and the returned counts instead.
         let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
         let ctx = if conv == GlmConvention::Fixest { &muted } else { ctx };
-        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, conv, want_parts, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, conv, mode, ctx, pool))?
     }
 
     /// ppmlhdfe `remove_collinears` on the current sample, with the true weights.
@@ -438,43 +475,154 @@ impl Session {
         let n0 = self.n();
         let r0 = 1 + nx;
 
-        // Split [y, x...] and standardize.
-        let mut y: Vec<f64> = rows.iter().step_by(r0).copied().collect();
-        let mut x = par::alloc_vec(n0 * nx, 0.0)?;
-        if nx > 0 {
-            pool.install(|| x.par_chunks_mut(nx).zip(rows.par_chunks(r0)).for_each(|(o, row)| o.copy_from_slice(&row[1..])));
+        // Split [y, x...], validate finiteness / domain, and accumulate standardization sums in
+        // fixed chunks (thread-count deterministic).
+        let mut y_uninit = par::alloc_uninit::<f64>(n0)?;
+        let mut x_uninit = par::alloc_uninit::<f64>(n0 * nx)?;
+        struct SplitPart {
+            bad_finite: bool,
+            neg_y: bool,
+            sums: Vec<f64>,
         }
-        drop(rows);
-        if y.iter().chain(&x).any(|v| !v.is_finite()) || offset.as_ref().is_some_and(|o| o.iter().any(|v| !v.is_finite())) {
-            return Err(RfError::InvalidInput("glm: missing values in the data".into()));
-        }
-        match fam {
-            Family::Poisson => {
-                if y.iter().any(|&v| v < 0.0) {
-                    return Err(RfError::Code(459, "dependent variable must be greater than or equal to zero".into()));
+        let n_sums = 2 * (1 + nx);
+        let split_chunk = |yc: &mut [std::mem::MaybeUninit<f64>], xc: &mut [std::mem::MaybeUninit<f64>], rc: &[f64]| -> SplitPart {
+            let mut bad_finite = false;
+            let mut neg_y = false;
+            let mut sums = vec![0.0; n_sums];
+            for (k, row) in rc.chunks_exact(r0).enumerate() {
+                let raw_y = row[0];
+                if !raw_y.is_finite() {
+                    bad_finite = true;
+                }
+                let yi = if fam == Family::Poisson {
+                    if raw_y < 0.0 {
+                        neg_y = true;
+                    }
+                    raw_y
+                } else {
+                    f64::from(u8::from(raw_y != 0.0))
+                };
+                yc[k].write(yi);
+                sums[0] += yi;
+                sums[1] += yi * yi;
+                let xdst = &mut xc[k * nx..(k + 1) * nx];
+                for (j, &xv) in row[1..].iter().enumerate() {
+                    if !xv.is_finite() {
+                        bad_finite = true;
+                    }
+                    xdst[j].write(xv);
+                    sums[2 + 2 * j] += xv;
+                    sums[2 + 2 * j + 1] += xv * xv;
                 }
             }
-            _ => y.iter_mut().for_each(|v| *v = f64::from(u8::from(*v != 0.0))),
+            SplitPart { bad_finite, neg_y, sums }
+        };
+        let parts: Vec<SplitPart> = if n0 <= CHUNK {
+            vec![split_chunk(&mut y_uninit, &mut x_uninit, &rows)]
+        } else if pool.threads() <= 1 {
+            if nx == 0 {
+                y_uninit.chunks_mut(CHUNK).zip(rows.chunks(CHUNK * r0)).map(|(yc, rc)| split_chunk(yc, &mut [], rc)).collect()
+            } else {
+                y_uninit
+                    .chunks_mut(CHUNK)
+                    .zip(x_uninit.chunks_mut(CHUNK * nx))
+                    .zip(rows.chunks(CHUNK * r0))
+                    .map(|((yc, xc), rc)| split_chunk(yc, xc, rc))
+                    .collect()
+            }
+        } else if nx == 0 {
+            pool.install(|| {
+                y_uninit
+                    .par_chunks_mut(CHUNK)
+                    .zip(rows.par_chunks(CHUNK * r0))
+                    .map(|(yc, rc)| split_chunk(yc, &mut [], rc))
+                    .collect()
+            })
+        } else {
+            pool.install(|| {
+                y_uninit
+                    .par_chunks_mut(CHUNK)
+                    .zip(x_uninit.par_chunks_mut(CHUNK * nx))
+                    .zip(rows.par_chunks(CHUNK * r0))
+                    .map(|((yc, xc), rc)| split_chunk(yc, xc, rc))
+                    .collect()
+            })
+        };
+        drop(rows);
+        // SAFETY: every slot of `y_uninit` (`0..n0`) and `x_uninit` (`0..n0*nx`) was written above.
+        let mut y = unsafe { par::assume_init(y_uninit) };
+        let mut x = unsafe { par::assume_init(x_uninit) };
+        let off_bad = match offset.as_deref() {
+            None => false,
+            Some(o) if o.len() <= CHUNK || pool.threads() <= 1 => o.iter().any(|v| !v.is_finite()),
+            Some(o) => pool.install(|| o.par_chunks(CHUNK).any(|c| c.iter().any(|v| !v.is_finite()))),
+        };
+        if parts.iter().any(|p| p.bad_finite) || off_bad {
+            return Err(RfError::InvalidInput("glm: missing values in the data".into()));
         }
+        if fam == Family::Poisson && parts.iter().any(|p| p.neg_y) {
+            return Err(RfError::Code(459, "dependent variable must be greater than or equal to zero".into()));
+        }
+        let mut sums = vec![0.0; n_sums];
+        for p in &parts {
+            for (a, &b) in sums.iter_mut().zip(&p.sums) {
+                *a += b;
+            }
+        }
+        let nf = n0 as f64;
         // Dividing y by sd_y shifts eta by -ln sd_y, which only a free constant absorbs: without
         // one in the absorbed space (slope-only terms) y keeps its scale.
-        let sd_y = if fam == Family::Poisson && self.has_intercept() { standardize_sd(y.iter().copied()) } else { 1.0 };
+        let sd_y = if fam == Family::Poisson && self.has_intercept() { sd_from_sums(nf, sums[0], sums[1]) } else { 1.0 };
+        let sd_x: Vec<f64> = (0..nx).map(|j| sd_from_sums(nf, sums[2 + 2 * j], sums[2 + 2 * j + 1])).collect();
         if sd_y != 1.0 {
-            y.iter_mut().for_each(|v| *v /= sd_y);
-            let min_pos = y.iter().copied().filter(|v| *v > 0.0).fold(f64::INFINITY, f64::min);
+            let min_pos = if n0 <= CHUNK || pool.threads() <= 1 {
+                let mut mp = f64::INFINITY;
+                for v in &mut y {
+                    *v /= sd_y;
+                    if *v > 0.0 {
+                        mp = mp.min(*v);
+                    }
+                }
+                mp
+            } else {
+                let mps: Vec<f64> = pool.install(|| {
+                    y.par_chunks_mut(CHUNK)
+                        .map(|yc| {
+                            let mut mp = f64::INFINITY;
+                            for v in yc {
+                                *v /= sd_y;
+                                if *v > 0.0 {
+                                    mp = mp.min(*v);
+                                }
+                            }
+                            mp
+                        })
+                        .collect()
+                });
+                mps.into_iter().fold(f64::INFINITY, f64::min)
+            };
             if min_pos <= 1e-6 {
                 ctx.log(&format!("{{err}}warning: dependent variable takes very low values after standardizing ({min_pos:e})"));
             }
         }
-        let sd_x: Vec<f64> = (0..nx).map(|j| standardize_sd((0..n0).map(|i| x[i * nx + j]))).collect();
         if nx > 0 {
-            pool.install(|| {
-                x.par_chunks_mut(nx).for_each(|row| {
+            if n0 <= CHUNK || pool.threads() <= 1 {
+                for row in x.chunks_exact_mut(nx) {
                     for (v, s) in row.iter_mut().zip(&sd_x) {
                         *v /= s;
                     }
-                })
-            });
+                }
+            } else {
+                pool.install(|| {
+                    x.par_chunks_mut(CHUNK * nx).for_each(|xc| {
+                        for row in xc.chunks_exact_mut(nx) {
+                            for (v, s) in row.iter_mut().zip(&sd_x) {
+                                *v /= s;
+                            }
+                        }
+                    })
+                });
+            }
         }
         let tw = self.weights.as_deref().map(|w| vcov::to_row_order(w, self.row_order(), pool)).transpose()?;
         let mut d = GlmData { family: fam, n: n0, y, k: nx, x, cols: (0..nx).collect(), sd_x, off: offset, tw };
@@ -497,7 +645,7 @@ impl Session {
         s: &Spec,
         g: &GlmOptions,
         conv: GlmConvention,
-        want_parts: bool,
+        mode: OutMode,
         ctx: &Ctx,
         pool: &Pool,
     ) -> Result<(EstResult, Option<GlmParts>), RfError> {
@@ -520,16 +668,38 @@ impl Session {
         // the standardized scale; binomial (w*y + 1/2)/(w + 1) with the prior weights), else
         // ppmlhdfe `guess()` and, for logit, (y + 1/2)/2.
         let fixest = conv == GlmConvention::Fixest;
+        let init_mu = |f: &(dyn Fn(usize, f64) -> f64 + Sync)| -> Result<Vec<f64>, RfError> {
+            let mut out = par::alloc_uninit::<f64>(d.n)?;
+            if d.n <= CHUNK || pool.threads() <= 1 {
+                for (i, (m, &yi)) in out.iter_mut().zip(&d.y).enumerate() {
+                    m.write(f(i, yi));
+                }
+            } else {
+                pool.install(|| {
+                    out.par_chunks_mut(CHUNK).zip(d.y.par_chunks(CHUNK)).enumerate().for_each(|(ci, (mc, yc))| {
+                        let base = ci * CHUNK;
+                        for (k, (m, &yi)) in mc.iter_mut().zip(yc).enumerate() {
+                            m.write(f(base + k, yi));
+                        }
+                    })
+                });
+            }
+            // SAFETY: every slot of `0..d.n` was written above.
+            Ok(unsafe { par::assume_init(out) })
+        };
         let mut mu: Vec<f64> = match (fam, g.guess) {
-            (Family::Poisson, _) if fixest => d.y.iter().map(|y| y + 0.1 / sd_y).collect(),
+            (Family::Poisson, _) if fixest => {
+                let add = 0.1 / sd_y;
+                init_mu(&|_, y| y + add)?
+            }
             (Family::Logit, _) if fixest => {
                 let tw = d.tw.as_deref();
-                d.y.iter().enumerate().map(|(i, y)| tw.map_or((y + 0.5) / 2.0, |t| (t[i] * y + 0.5) / (t[i] + 1.0))).collect()
+                init_mu(&|i, y| tw.map_or((y + 0.5) / 2.0, |t| (t[i] * y + 0.5) / (t[i] + 1.0)))?
             }
-            (Family::Logit, _) => d.y.iter().map(|y| (y + 0.5) / 2.0).collect(),
+            (Family::Logit, _) => init_mu(&|_, y| (y + 0.5) / 2.0)?,
             (_, Guess::Simple) => {
                 let ybar = wmean(&d.y, d.tw.as_deref(), pool);
-                d.y.iter().map(|y| 0.5 * (y + ybar)).collect()
+                init_mu(&|_, y| 0.5 * (y + ybar))?
             }
             (_, Guess::Ols) => self.glm_ols_guess(&d, g, inner_maxiter, pool, ctx)?,
         };
@@ -549,7 +719,7 @@ impl Session {
             fixest,
             collinear: g.collinear,
         };
-        let mut eta = vec![0.0; d.n];
+        let mut eta = par::alloc_par(d.n, 0.0, pool)?;
         let mut out: IrlsOut = irls::irls(self.absorber.as_mut(), &d, &mut mu, &mut eta, &cfg, pool, ctx)?;
         let mut iter = out.iter;
         let mut subiter = out.subiter;
@@ -584,7 +754,7 @@ impl Session {
         }
         ctx.log(&format!("{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})", fmt_e(g.tol, 1)));
         ctx.check()?;
-        let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts };
+        let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, mode };
         self.glm_finish(&fin, status, s, g, pool, ctx)
     }
 
@@ -625,7 +795,7 @@ impl Session {
         pool: &Pool,
         ctx: &Ctx,
     ) -> Result<(EstResult, Option<GlmParts>), RfError> {
-        let Finish { d, out, mu, eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, want_parts } = *f;
+        let Finish { d, out, mu, eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, mode } = *f;
         let fam = d.family;
         let n = d.n;
         let k = d.k;
@@ -638,13 +808,38 @@ impl Session {
             if fw { tw.map_or(n as f64, |t| par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += t[rg].iter().sum::<f64>())[0]) } else { n as f64 };
         let sumw = par::sum_chunks(pool, n, CHUNK, 1, |rg, a| a[0] += w[rg].iter().sum::<f64>())[0];
         let cw = big_n / sumw;
-        let wv: Vec<f64> = w.iter().map(|v| v * cw).collect();
-        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true);
+        let wv_opt: Option<Vec<f64>> = if mode != OutMode::FitPartsOnly {
+            let mut wv = par::alloc_uninit::<f64>(n)?;
+            if n <= CHUNK || pool.threads() <= 1 {
+                for (o, &v) in wv.iter_mut().zip(w) {
+                    o.write(v * cw);
+                }
+            } else {
+                pool.install(|| {
+                    wv.par_chunks_mut(CHUNK).zip(w.par_chunks(CHUNK)).for_each(|(oc, wc)| {
+                        for (o, &v) in oc.iter_mut().zip(wc) {
+                            o.write(v * cw);
+                        }
+                    })
+                });
+            }
+            // SAFETY: every slot of `0..n` was written above.
+            Some(unsafe { par::assume_init(wv) })
+        } else {
+            None
+        };
 
         // reghdfe_rmcoll on the final weighted Gram (normally drops nothing); the columns the
         // fixest / pyfixest rule excluded during IRLS are out of it.
-        let gfull = stats::gram(block, r, Some(&wv), pool).0;
-        let mut gxx: Vec<f64> = (0..k * k).map(|ab| gfull[(1 + ab / k) * r + 1 + ab % k]).collect();
+        let mut gxx: Vec<f64> = if k == 0 {
+            Vec::new()
+        } else if let Some(wv) = wv_opt.as_deref() {
+            let gfull = stats::gram(block, r, Some(wv), pool).0;
+            (0..k * k).map(|ab| gfull[(1 + ab / k) * r + 1 + ab % k]).collect()
+        } else {
+            let gfull = stats::gram(block, r, Some(w), pool).0;
+            (0..k * k).map(|ab| gfull[(1 + ab / k) * r + 1 + ab % k] * cw).collect()
+        };
         for j in (0..k).filter(|&j| out.excluded[j]) {
             for l in 0..k {
                 gxx[j * k + l] = 0.0;
@@ -661,14 +856,19 @@ impl Session {
             for (c, b) in kept_cols.iter().zip(bk) {
                 beta[c - 1] = b;
             }
-            resid_owned = Some(
-                (0..n)
-                    .map(|i| {
+            let mut ro = par::alloc_uninit::<f64>(n)?;
+            pool.install(|| {
+                ro.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, oc)| {
+                    let base = ci * CHUNK;
+                    for (j, o) in oc.iter_mut().enumerate() {
+                        let i = base + j;
                         let row = &block[i * r..(i + 1) * r];
-                        row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>()
-                    })
-                    .collect(),
-            );
+                        o.write(row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>());
+                    }
+                })
+            });
+            // SAFETY: every slot of `0..n` was written above.
+            resid_owned = Some(unsafe { par::assume_init(ro) });
         }
         for j in (0..k).filter(|&j| dropped[j]) {
             status[d.cols[j]] = STATUS_COLLINEAR;
@@ -690,18 +890,36 @@ impl Session {
             });
             acc.iter().map(|a| a / sumw).collect()
         };
+        let off = d.off.as_deref();
         let lin_mean = match fam {
             // ppmlhdfe: mean(log(mu)) - mean(offset).
             Family::Poisson => {
-                let lm: Vec<f64> = mu.iter().map(|m| m.ln()).collect();
-                wmean(&lm, Some(w), pool) - d.off.as_deref().map_or(0.0, |o| wmean(o, Some(w), pool))
+                let acc = par::sum_chunks(pool, n, CHUNK, 2, |range, acc| {
+                    for i in range {
+                        acc[0] += w[i] * mu[i].ln();
+                        acc[1] += w[i];
+                    }
+                });
+                acc[0] / acc[1] - off.map_or(0.0, |o| wmean(o, Some(w), pool))
             }
             _ => {
-                let lm: Vec<f64> = (0..n).map(|i| eta[i] - d.off.as_deref().map_or(0.0, |o| o[i])).collect();
-                wmean(&lm, Some(w), pool)
+                let acc = par::sum_chunks(pool, n, CHUNK, 2, |range, acc| {
+                    for i in range {
+                        acc[0] += w[i] * (eta[i] - off.map_or(0.0, |o| o[i]));
+                        acc[1] += w[i];
+                    }
+                });
+                acc[0] / acc[1]
             }
         };
         let b0_s = lin_mean - xbar.iter().zip(&beta).map(|(m, b)| m * b).sum::<f64>();
+        if mode == OutMode::FitPartsOnly {
+            let cons = b0_s + if fam == Family::Poisson { sd_y.ln() } else { 0.0 };
+            let parts = self.glm_parts_out(f, &beta, &dropped, e, &status, cons, false, pool)?;
+            return Ok((EstResult::default(), Some(parts)));
+        }
+        let wv = wv_opt.as_deref().expect("allocated for full result");
+        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true);
         let msize = k + 1;
         let bread = vcov::inv_ext(&inv_xx, k, &xbar, big_n);
 
@@ -965,7 +1183,7 @@ impl Session {
                             acc[1] -= wi * ll0mu * sd_y;
                         } else {
                             let ys = y * sd_y;
-                            let lg = family::ln_gamma(ys + 1.0);
+                            let lg = family::ln_gamma_plus1(ys);
                             acc[0] += wi * (ys * (eta[i] + ln_sd) - mu[i] * sd_y - lg);
                             acc[1] += wi * (y * (sd_y * (ll0mu.ln() + ln_sd)) - ll0mu * sd_y - lg);
                         }
@@ -1059,7 +1277,11 @@ impl Session {
                 None => vec![f64::NAN; n],
             });
         }
-        let parts = if want_parts { Some(self.glm_parts_out(f, &beta, &dropped, e, &res.status, cons, pool)?) } else { None };
+        let parts = if mode == OutMode::Both {
+            Some(self.glm_parts_out(f, &beta, &dropped, e, &res.status, cons, true, pool)?)
+        } else {
+            None
+        };
         Ok((res, parts))
     }
 
@@ -1074,6 +1296,7 @@ impl Session {
         e: &[f64],
         status: &[u8],
         cons: f64,
+        want_fe_sum: bool,
         pool: &Pool,
     ) -> Result<GlmParts, RfError> {
         let Finish { d, out, mu, eta, nx, sd_y, iter, .. } = *f;
@@ -1089,35 +1312,81 @@ impl Session {
         for &j in &kept {
             coef[d.cols[j]] = beta[j] / d.sd_x[j];
         }
-        let off = d.off.as_deref();
-        let mut fe_sum = par::alloc_vec(n, 0.0)?;
-        pool.install(|| {
-            fe_sum.par_iter_mut().enumerate().for_each(|(i, v)| {
-                let xb: f64 = beta.iter().zip(&d.x[i * k..(i + 1) * k]).map(|(b, x)| b * x).sum();
-                *v = eta[i] - off.map_or(0.0, |o| o[i]) - xb + ln_sd;
-            })
-        });
-        let scaled = |v: &[f64], a: f64, b: f64| -> Result<Vec<f64>, RfError> {
-            let s: Vec<f64> = v.iter().map(|x| a * x + b).collect();
-            fe_recovery::to_kept_order(&s, order, pool)
+        let fe_sum = if want_fe_sum {
+            let off = d.off.as_deref();
+            let mut fs = par::alloc_uninit::<f64>(n)?;
+            let ptr = SyncPtr(fs.as_mut_ptr());
+            if n <= CHUNK || pool.threads() <= 1 {
+                for (i, &p) in order.iter().enumerate() {
+                    let xb: f64 = beta.iter().zip(&d.x[i * k..(i + 1) * k]).map(|(b, x)| b * x).sum();
+                    // SAFETY: `order` is a permutation of `0..n`.
+                    unsafe { ptr.write(p as usize, std::mem::MaybeUninit::new(eta[i] - off.map_or(0.0, |o| o[i]) - xb + ln_sd)) };
+                }
+            } else {
+                pool.install(|| {
+                    order.par_chunks(CHUNK).enumerate().for_each(|(ci, oc)| {
+                        let base = ci * CHUNK;
+                        for (j, &p) in oc.iter().enumerate() {
+                            let i = base + j;
+                            let xb: f64 = beta.iter().zip(&d.x[i * k..(i + 1) * k]).map(|(b, x)| b * x).sum();
+                            // SAFETY: `order` is a permutation of `0..n`, so chunks write disjoint indices.
+                            unsafe { ptr.write(p as usize, std::mem::MaybeUninit::new(eta[i] - off.map_or(0.0, |o| o[i]) - xb + ln_sd)) };
+                        }
+                    })
+                });
+            }
+            // SAFETY: every index `0..n` was written once via `order`.
+            unsafe { par::assume_init(fs) }
+        } else {
+            Vec::new()
         };
         // Kept-order row-major xt: kept position p holds solver row inv[p].
-        let mut inv = vec![0u32; n];
-        for (row, &p) in order.iter().enumerate() {
-            inv[p as usize] = row as u32;
-        }
-        let mut xt = par::alloc_vec(n * kk, 0.0)?;
-        if kk > 0 {
+        let xt = if kk == 0 {
+            Vec::new()
+        } else {
+            let mut inv = par::alloc_uninit::<u32>(n)?;
+            let inv_ptr = SyncPtr(inv.as_mut_ptr());
+            if n <= CHUNK || pool.threads() <= 1 {
+                for (row, &p) in order.iter().enumerate() {
+                    unsafe { inv_ptr.write(p as usize, std::mem::MaybeUninit::new(row as u32)) };
+                }
+            } else {
+                pool.install(|| {
+                    order.par_chunks(CHUNK).enumerate().for_each(|(ci, oc)| {
+                        let base = ci * CHUNK;
+                        for (j, &p) in oc.iter().enumerate() {
+                            // SAFETY: `order` is a permutation of `0..n`.
+                            unsafe { inv_ptr.write(p as usize, std::mem::MaybeUninit::new((base + j) as u32)) };
+                        }
+                    })
+                });
+            }
+            // SAFETY: every slot of `inv` was written once via `order`.
+            let inv = unsafe { par::assume_init(inv) };
+            let mut xt = par::alloc_uninit::<f64>(n * kk)?;
             let block = &out.block;
-            pool.install(|| {
-                xt.par_chunks_mut(kk).zip(inv.par_iter()).for_each(|(o, &row)| {
+            if n <= CHUNK || pool.threads() <= 1 {
+                for (o, &row) in xt.chunks_exact_mut(kk).zip(&inv) {
                     let src = &block[row as usize * r + 1..(row as usize + 1) * r];
                     for (v, &j) in o.iter_mut().zip(&kept) {
-                        *v = src[j] * d.sd_x[j];
+                        v.write(src[j] * d.sd_x[j]);
                     }
-                })
-            });
-        }
+                }
+            } else {
+                pool.install(|| {
+                    xt.par_chunks_mut(CHUNK * kk).zip(inv.par_chunks(CHUNK)).for_each(|(xc, ic)| {
+                        for (o, &row) in xc.chunks_exact_mut(kk).zip(ic) {
+                            let src = &block[row as usize * r + 1..(row as usize + 1) * r];
+                            for (v, &j) in o.iter_mut().zip(&kept) {
+                                v.write(src[j] * d.sd_x[j]);
+                            }
+                        }
+                    })
+                });
+            }
+            // SAFETY: every slot of `xt` (`0..n*kk`) was written above.
+            unsafe { par::assume_init(xt) }
+        };
         let fe = if self.terms.iter().any(|t| t.save) {
             let coefs = out.coefs.as_ref().ok_or_else(|| RfError::Internal("absorber returned no FE coefficients".into()))?;
             let c: Vec<f64> = std::iter::once(1.0).chain(beta.iter().map(|b| -b)).collect();
@@ -1129,13 +1398,13 @@ impl Session {
             coef,
             status: status.to_vec(),
             cons,
-            eta: scaled(eta, 1.0, ln_sd)?,
-            mu: scaled(mu, sd_y, 0.0)?,
-            w: scaled(&out.w, sd_y, 0.0)?,
+            eta: fe_recovery::scale_to_kept_order(eta, 1.0, ln_sd, order, pool)?,
+            mu: fe_recovery::scale_to_kept_order(mu, sd_y, 0.0, order, pool)?,
+            w: fe_recovery::scale_to_kept_order(&out.w, sd_y, 0.0, order, pool)?,
             k: kk,
             xt,
             working_resid: fe_recovery::to_kept_order(e, order, pool)?,
-            fe_sum: fe_recovery::to_kept_order(&fe_sum, order, pool)?,
+            fe_sum,
             fe,
             deviance: out.deviance * sd_y,
             iterations: iter,
@@ -1158,5 +1427,5 @@ struct Finish<'a> {
     iter: usize,
     subiter: usize,
     conv: GlmConvention,
-    want_parts: bool,
+    mode: OutMode,
 }

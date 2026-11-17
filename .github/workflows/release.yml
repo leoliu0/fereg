@@ -184,7 +184,8 @@ jobs:
       - uses: actions/checkout@v7
 
       # Linux builds run in the manylinux_2_28 container, which has every CPython; elsewhere the
-      # interpreters come from setup-python.
+      # interpreters come from setup-python (resolved explicitly so preinstalled 3.15+ on runners
+      # is not picked up by `--find-interpreter`).
       - uses: actions/setup-python@v7
         if: runner.os != 'Linux'
         with:
@@ -195,6 +196,32 @@ jobs:
             3.13
             3.14
 
+      - name: Locate CPython 3.10-3.14
+        if: runner.os != 'Linux'
+        id: py
+        shell: bash
+        run: |
+          interp=$(python -c '
+          import os, subprocess, sys
+          want = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+          found = {}
+          names = ["python.exe"] if sys.platform == "win32" else [f"python{v}" for v in want]
+          for d in os.environ.get("PATH", "").split(os.pathsep):
+              for n in names:
+                  p = os.path.join(d, n)
+                  if os.path.isfile(p):
+                      try:
+                          v = subprocess.check_output([p, "-c", "import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")"], text=True).strip()
+                      except Exception:
+                          continue
+                      if v in want and v not in found:
+                          found[v] = p.replace("\\", "/")
+          assert set(found) == set(want), f"missing: {set(want) - set(found)} (found {found})"
+          print(" ".join(found[v] for v in want))
+          ')
+          echo "interp=$interp"
+          echo "interp=$interp" >> "$GITHUB_OUTPUT"
+
       - uses: PyO3/maturin-action@v1
         with:
           maturin-version: v1.15.0
@@ -203,7 +230,7 @@ jobs:
           working-directory: python
           args: >-
             --release --locked --out dist --compatibility pypi
-            ${{ runner.os == 'Linux' && '-i python3.10 python3.11 python3.12 python3.13 python3.14' || '--find-interpreter' }}
+            -i ${{ runner.os == 'Linux' && 'python3.10 python3.11 python3.12 python3.13 python3.14' || steps.py.outputs.interp }}
 
       - name: One wheel per CPython 3.10-3.14
         shell: bash
