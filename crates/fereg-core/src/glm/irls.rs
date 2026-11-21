@@ -672,7 +672,13 @@ pub(crate) fn irls(
         }
 
         if c.log {
-            let min_eta = (0..n).filter(|&i| !sep[i]).map(|i| eta[i]).fold(f64::INFINITY, f64::min);
+            // `sep` is empty without the mu separation check (no row is then separated).
+            let min_eta = par::map_chunks(pool, n, CHUNK, |_, range| match sep_ref {
+                Some(s) => range.filter(|&i| !s[i]).map(|i| eta[i]).fold(f64::INFINITY, f64::min),
+                None => eta[range].iter().copied().fold(f64::INFINITY, f64::min),
+            })
+            .into_iter()
+            .fold(f64::INFINITY, f64::min);
             let flags = format!(
                 "{}{}{}{}",
                 if iter > 1 { ' ' } else { 'P' },

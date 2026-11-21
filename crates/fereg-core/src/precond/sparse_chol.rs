@@ -234,7 +234,11 @@ impl SparseChol {
             }
             Some((fwd, inv))
         } else if last >= n {
-            None
+            // Natural order, as an explicit permutation: faer's `SymmetricOrdering::Identity`
+            // analyzes the upper triangle of the pattern whatever `side` says, and the pattern
+            // here is the lower one (the symbolic factor would be the diagonal alone).
+            let id: Vec<u32> = (0..n as u32).collect();
+            Some((id.clone(), id))
         } else {
             let nl = n - last;
             // Lower triangle of the trailing submatrix: for i >= last, every entry j >= i in
@@ -411,5 +415,35 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    /// Every coordinate eliminated last (`last = n`: the joint matrix when no large coordinate
+    /// is kept): natural order, on a dense positive definite matrix.
+    #[test]
+    fn natural_order_factor_solves_dense_systems() {
+        let n = 6;
+        let mut dense = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                dense[i * n + j] = if i == j { 4.0 + i as f64 } else { -1.0 / (1.0 + (i as f64 - j as f64).abs()) };
+            }
+        }
+        let ptr: Vec<u32> = (0..=n).map(|i| (i * n) as u32).collect();
+        let col: Vec<u32> = (0..n * n).map(|k| (k % n) as u32).collect();
+        let a = Csr { n, ptr, col, val: dense.clone() };
+        with_pool(1, |pool| {
+            for last in [n, n + 3] {
+                let (mut f, vals) = SparseChol::analyze_last(&a, last, pool).expect("analysis");
+                assert!(f.factor(&vals, pool).unwrap(), "factorization failed");
+                let r = [1.0, -3.0, 2.0, 0.0, 0.7, -0.2];
+                let mut m = Mat::<f64>::from_fn(n, 1, |i, _| r[i]);
+                f.solve(&mut m);
+                for i in 0..n {
+                    let s: f64 = (0..n).map(|j| dense[i * n + j] * m[(j, 0)]).sum();
+                    assert!((s - r[i]).abs() < 1e-12, "last {last}, row {i}: {s} vs {}", r[i]);
+                }
+            }
+        })
+        .unwrap();
     }
 }

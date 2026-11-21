@@ -1,11 +1,13 @@
 # Generated into Makevars.win by ../configure.win. See Makevars.in for the build steps.
 # Windows builds use the GNU ABI Rust target matching Rtools (x86_64-pc-windows-gnu, or the
 # gnullvm targets for clang-based and ARM64 R builds).
+# PKG_LIBS lists the system libraries Rust's std needs on windows-gnu (rustc --print
+# native-static-libs); `synchronization` (WaitOnAddress, WakeByAddress*) since Rust 1.100.
 
 TARGET = @RUST_TARGET@
 LIBDIR = ./rust/lib
 STATLIB = $(LIBDIR)/libfereg.a
-PKG_LIBS = -L$(LIBDIR) -lfereg -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+PKG_LIBS = -L$(LIBDIR) -lfereg -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lsynchronization
 CARGO_HOME_DIR = $(CURDIR)/.cargo
 
 all: $(SHLIB) cleanup_rust

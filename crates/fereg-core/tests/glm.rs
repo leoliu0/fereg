@@ -700,6 +700,32 @@ fn each(specs: Vec<G>, f: impl Fn(&G)) {
     assert!(failed.is_empty(), "failed fixtures: {failed:?}");
 }
 
+/// The iteration log (the Stata default) with and without the mu separation check, including
+/// the re-run after the mu rule drops observations: same results as without the log.
+#[test]
+fn iteration_log_does_not_change_results() {
+    let mut specs: Vec<G> = poisson_specs().into_iter().take(3).collect();
+    specs.push(logit("l_oim", "y", &["fe1", "fe2"]));
+    let mut logit_mu = logit("l_oim", "y", &["fe1", "fe2"]);
+    logit_mu.mu = true;
+    specs.push(logit_mu);
+    for g in specs {
+        let csv = Csv::read(g.data);
+        let quiet = run(&g, &csv, AbsorberKind::Fast, 2).unwrap().res;
+        let Setup { mut session, rows, offset, spec, mut opts, .. } = setup(&g, &csv, AbsorberKind::Fast, 2).unwrap();
+        opts.log = true;
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let sink = |s: &str| lines.borrow_mut().push(s.to_string());
+        let ctx = Ctx { threads: 2, verbose: 0, interrupt: &|| false, log: &sink };
+        let logged = session.glm(rows, &Layout::ols(g.x.len()), offset, &spec, &opts, &ctx).unwrap();
+        assert_eq!(mat(&quiet, "b"), mat(&logged, "b"), "{}", g.fixture);
+        assert_eq!(quiet.scalars, logged.scalars, "{}", g.fixture);
+        let lines = lines.borrow();
+        let first = lines.iter().find(|l| l.contains("Iteration 1:")).unwrap_or_else(|| panic!("{}: no iteration line", g.fixture));
+        assert!(first.contains("min(eta) = ") && !first.contains("inf"), "{}: {first}", g.fixture);
+    }
+}
+
 #[test]
 fn logit_mu_rule_is_harmless_without_separation() {
     for &kind in KINDS {
