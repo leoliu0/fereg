@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: display (or quiet r(table)) of feppml and felogit results
+*! version 0.5.0  fereg: display (or quiet r(table)) of feppml and felogit results
 program _rf_glm_replay, rclass
 	version 16
 	syntax [, EForm IRr OR noHEader noTABle noFOOTnote *]
@@ -21,7 +21,29 @@ program _rf_glm_replay, rclass
 	if ("`header'" == "") _rf_glm_header
 	if ("`table'" == "") _coef_table, `options' `eform' `or'
 	return add // r(level), r(table), ...
+	* felogit with a bias correction or APEs: logitfe's table of average partial effects (not
+	* after a prefix such as bootstrap, whose e(bias) is a matrix and which posts no e(b2))
+	if ("`table'" == "" & "`e(cmd)'" == "felogit" & "`e(prefix)'" == "" & ///
+		inlist("`e(bias)'", "analytical", "jackknife", "none")) {
+		ApeTable, `options'
+		return add
+	}
 	if ("`footnote'" == "") _rf_footnote
+end
+
+
+* Average partial effects e(b2), e(V2) (logitfe.ado lines 2419-2424): title, the finite-population
+* line when e(fpc) != 1, and the table; r(table_ape)
+program ApeTable, rclass
+	syntax [, *]
+	tempname T
+	di as text ""
+	di as text "Average Partial Effects"
+	if (e(fpc) != 1) di as text "Variance adjusted by the finite population parameter " as res %8.4f e(fpc)
+	* base levels of factor variables (APE 0, variance 0) would show as (empty)
+	_coef_table, bmatrix(e(b2)) vmatrix(e(V2)) noemptycells `options'
+	matrix `T' = r(table)
+	return matrix table_ape = `T'
 end
 
 

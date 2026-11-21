@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: the variance-estimator keys of -prepare- (PROTOCOL.md, "Variance estimators")
+*! version 0.5.0  fereg: the variance-estimator keys of -prepare- (PROTOCOL.md, "Variance estimators")
 * Usage: _rf_vce_args, factors(prepare's factor list) vcetype() [clustervars() tvar() ivar() tdelta()
 *            dkraay_bw() hac(0|1) kernelkey() bw() kiefer(0|1) psd() lat() lon() cutoff() pixel()
 *            distance()]

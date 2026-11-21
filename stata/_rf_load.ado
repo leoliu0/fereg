@@ -1,4 +1,4 @@
-*! version 0.4.1  fereg: the only program that calls the compiled plugin
+*! version 0.5.0  fereg: the only program that calls the compiled plugin
 *
 * Usage:
 *   _rf_load                                     load the plugin and check that its version matches
@@ -11,7 +11,7 @@
 * = | ; * - and commas are a syntax error.
 program _rf_load
 	version 16
-	local rf_version 0.4.1
+	local rf_version 0.5.0
 
 	if (`"`0'"' == "") {
 		local _rf_version
