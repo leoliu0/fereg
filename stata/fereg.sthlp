@@ -203,7 +203,8 @@ error of every partialled-out variable (in the weighted sum-of-squares norm) is 
 
 {phang}
 {opt threads(#)} sets the number of threads used by the plugin; 0 (default) uses all logical CPUs.
-The results do not depend on the number of threads.
+The results do not depend on the number of threads. On Linux, with as many threads as physical
+cores, each thread is bound to its own core; the environment variable {cmd:FEREG_PIN=0} turns this off.
 
 {phang}
 {opt serialio} reads the data from Stata with a single thread.

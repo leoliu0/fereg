@@ -227,7 +227,7 @@ impl Session {
         let raw_cols: Option<Vec<Vec<f64>>> = if matches!(vce, Vce::Crv3(_)) { Some(kept_columns(&rows, r, self.absorber.row_order())?) } else { None };
 
         // Degrees of freedom do not depend on the data columns.
-        let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false);
+        let dof: Dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false, pool);
         ctx.check()?;
         crate::solve::log_phase(ctx, &mut t, "ols: weights+dof");
 

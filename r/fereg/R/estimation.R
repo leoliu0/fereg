@@ -43,7 +43,9 @@
 #' @param collin.tol Collinearity tolerance (fixest rule).
 #' @param nthreads Number of threads; `0` = all logical cores. Defaults to option
 #'   `fereg.nthreads`, else all cores, capped at `OMP_THREAD_LIMIT` when set (2 under R CMD
-#'   check, i.e. when `_R_CHECK_LIMIT_CORES_` is set).
+#'   check, i.e. when `_R_CHECK_LIMIT_CORES_` is set). On Linux, with as many threads as
+#'   physical cores, each thread is bound to its own core (the environment variable
+#'   `FEREG_PIN=0` turns this off).
 #' @param lean If `TRUE`, residuals, fitted values and the estimation state are not kept
 #'   (post-hoc variances then need a new estimation).
 #' @param notes Print notes about removed observations (option `fereg.notes`, default `TRUE`).

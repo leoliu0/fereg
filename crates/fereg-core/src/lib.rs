@@ -14,6 +14,8 @@ pub mod api;
 pub mod bias;
 pub mod cg;
 pub mod conley;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod cores;
 pub mod crv3;
 pub mod dof;
 pub mod error;

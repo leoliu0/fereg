@@ -77,7 +77,9 @@ perfectly fitted outcome in GLMs), \code{"singleton"} or \code{"none"}.}
 
 \item{nthreads}{Number of threads; \code{0} = all logical cores. Defaults to option
 \code{fereg.nthreads}, else all cores, capped at \code{OMP_THREAD_LIMIT} when set (2 under R CMD
-check, i.e. when \verb{_R_CHECK_LIMIT_CORES_} is set).}
+check, i.e. when \verb{_R_CHECK_LIMIT_CORES_} is set). On Linux, with as many threads as
+physical cores, each thread is bound to its own core (the environment variable
+\code{FEREG_PIN=0} turns this off).}
 
 \item{lean}{If \code{TRUE}, residuals, fitted values and the estimation state are not kept
 (post-hoc variances then need a new estimation).}

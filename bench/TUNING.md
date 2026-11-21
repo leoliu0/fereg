@@ -489,6 +489,96 @@ same columns (R: coefficients within 1e-14).
 - The candidate passes of item 12 gather three codes per row at random (about 0.08 s on the
   taxi panel); an interleaved code matrix would cut the cache misses.
 
+## 2026-11-19: worker placement, level lists, degrees of freedom, GLM row math
+
+Measured as on 2026-10-13 (`bench_csv`, minimum over 2 alternating rounds of the median) on a
+Ryzen 9 9950X3D (2 × 8 cores). Results of the least-squares rows are bit-identical; the GLM rows
+differ in the last places (item 17).
+
+| Row | Before (`ef32ba3`) | After | Ratio |
+|---|---|---|---|
+| OLS simple 1e7, 2 FEs, T=16 | 0.099 s | 0.096 s | 0.98 |
+| OLS simple 1e7, 3 FEs, T=16 | 0.165 s | 0.138 s | 0.84 |
+| OLS 10 regressors, 1e7, T=16 | 0.403 s | 0.363 s | 0.90 |
+| OLS 5 regressors, cluster, 1e7, T=16 | 0.301 s | 0.268 s | 0.89 |
+| OLS difficult 1e7, T=16 | 0.237 s | 0.226 s | 0.95 |
+| AKM scale 1e7, T=16 | 0.233 s | 0.200 s | 0.86 |
+| IV 1e7, hetero, T=16 | 0.266 s | 0.238 s | 0.90 |
+| Poisson simple / difficult 1e7, hetero, T=16 | 1.530 / 1.695 s | 1.349 / 1.665 s | 0.88 / 0.98 |
+| logit 1e7, T=16 | 1.150 s | 1.055 s | 0.92 |
+| AKM δ = 1 / 0.1 / 0.001, 1e6, T=16 | 0.027 / 0.102 / 0.021 s | 0.028 / 0.100 / 0.021 s | 1.02 / 0.98 / 1.01 |
+| OLS simple 1e6, T=16 | 0.0132 s | 0.0119 s | 0.90 |
+| OLS simple / difficult 1e6, T=1 | 0.059 / 0.098 s | 0.056 / 0.098 s | 0.94 / 1.00 |
+| AKM δ = 0.1, 1e6, T=1 | 0.188 s | 0.181 s | 0.96 |
+| IV / slopes 1e6, T=1 | 0.105 / 0.095 s | 0.098 / 0.093 s | 0.93 / 0.98 |
+| Poisson / logit 1e6, T=1 | 0.517 / 0.483 s | 0.464 / 0.367 s | 0.90 / 0.76 |
+
+Stata, `fereg y x1, absorb(indiv_id year firm_id) threads(16)` at 1e7 (the phase table of the
+article), median of 5 calls: 0.221 → 0.175 s (structure 0.021 → 0.010 s, weights and degrees of
+freedom 0.035 → 0.007 s, PCG 0.040 → 0.034 s).
+
+### 14. One worker per physical core (Linux)
+
+With 16 workers on 16 cores the scheduler wakes a worker on an idle hardware thread of a busy
+core of the waker's CCD before an idle core of the other CCD, and every kernel with one fixed
+task per worker waits for the slowest one: a matvec task took 2.2–2.4 ms alone on its core and
+3.5–3.7 ms next to another worker. A pool with as many workers as the calling thread may use
+physical cores now binds worker i to the hardware threads of core i (`cores.rs`; other pool
+sizes, the calling thread and other platforms are untouched; `FEREG_PIN=0` turns it off).
+
+| Row | T=32 | T=16 | T=16 bound | T=32 bound (rejected) |
+|---|---|---|---|---|
+| OLS simple 1e7 | 0.172 s | 0.168 s | 0.150 s | 0.183 s |
+| OLS difficult 1e7 | 0.254 s | 0.245 s | 0.233 s | 0.256 s |
+| AKM scale 1e7 | 0.253 s | 0.242 s | 0.225 s | 0.255 s |
+| Poisson 1e7 | 1.653 s | 1.613 s | 1.410 s | 1.714 s |
+| OLS simple 1e6 | 0.0152 s | 0.0147 s | 0.0129 s | 0.0149 s |
+| AKM δ = 0.1, 1e6 | 0.056 s | 0.043 s | 0.040 s | 0.051 s |
+
+### 15. Level-sorted cell lists at first use
+
+`Structure::build` sorted the cells of every large block by level (0.011 of the 0.021 s of the
+structure phase at 1e7), for the level pulls of reduced spaces beyond the accumulator budget and
+for the block and joint assemblies. The usual solve reads none of them: each block now builds
+its lists at the first call of `Structure::level_cells` (`OnceLock`).
+
+### 16. Degrees of freedom in parallel
+
+`estimate_dof` ran serial passes over the rows: nesting of each term in each cluster variable and
+the union-find of the first two terms (0.033 s at 1e7, as much as the PCG). The nesting check
+now runs over fixed chunks with the first cluster seen per level in an atomic, and the mobility
+groups use the lock-free union-find of the fixed-effect references (larger root under the
+smaller, so the groups and their numbering do not depend on the threads): 0.007 s.
+
+### 17. GLM row math without library calls
+
+The mu and deviance pass called the C library's `exp` (Poisson) or `exp` twice and `log1p`
+(logit) per row. `glm::family` now has `exp` and ln(1 + x) on [0, 1] in plain arithmetic without
+branches or tables (fdlibm's algorithms, errors below 1 ulp; within 1 ulp of glibc on 4e7
+arguments each), the logit shares one exponential between mu and the deviance, and the pass
+runs over blocks of 256 rows in a loop that vectorizes (AVX2 when the CPU has it; a row gets
+the same bits either way). Per row: logit 14.1 → 7.0 ns with 128-bit vectors and 3.7 ns with
+AVX2, Poisson 5.0 → 2.3 → 1.3 ns. The logit working response takes one division and no branch
+on y (same bits). At T=16 and 1e7 the IRLS row passes move about 100 bytes per row at the
+memory bandwidth, so only the rows that are bound by computation gain (T=1 above).
+
+### Fixes
+
+- The IRLS iteration log read the separation flags of every row, which do not exist without the
+  mu separation check (panic since `ef32ba3`; `test_ppml.do`). Its minimum of eta is now a
+  parallel pass instead of a serial scan per iteration.
+- `SparseChol::analyze_last` with every coordinate kept in place (natural order) panicked in
+  faer, whose identity ordering reads the upper triangle; the order is passed as a permutation.
+- R on Windows: Rust 1.100's std needs `-lsynchronization` (`Makevars.win.in`).
+
+### Not done
+
+- The large buffers of a fit are mapped and unmapped at every call. glibc with
+  `MALLOC_MMAP_THRESHOLD_` / `MALLOC_TRIM_THRESHOLD_` raised, or jemalloc, saves 4–6% (OLS 1e7
+  0.178 → 0.166 s, Poisson 1.68 → 1.61 s); both change the allocator of the host process.
+- Thin LTO with 16 codegen units builds 5× faster and is within 2% either way; the release
+  profile is unchanged.
+
 ## Earlier tuning (commit log)
 
 - `0a25c0f`, `738d70f`: one-pass (parallel) sample scan, uninitialized read buffers.

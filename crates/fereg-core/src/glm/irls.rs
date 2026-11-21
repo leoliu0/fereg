@@ -234,57 +234,122 @@ fn ln_y(fam: Family, y: &[f64], pool: &Pool) -> Result<Vec<f64>, RfError> {
     Ok(unsafe { par::assume_init(out) })
 }
 
-/// mu of row `i` from its eta (separated rows pinned to the boundary) and the row's deviance term
-/// (standardized scale). Shared by [`update_mu_deviance`] and the fused pass of [`irls`], so both
-/// compute identical values.
+/// Rows per call of [`mu_dev_rows`]: their deviance terms go through a buffer on the stack.
+const ROW_BLOCK: usize = 256;
+
+/// mu of a row from its eta and the row's deviance term (standardized scale); `lny` is read for
+/// Poisson only.
 #[inline(always)]
-fn mu_dev_row(fam: Family, d: &GlmData, i: usize, eta: f64, sep: bool, lny: &[f64]) -> (f64, f64) {
-    let yi = d.y[i];
-    let m = if sep { if fam == Family::Logit && yi > 0.0 { 1.0 - MU_MIN } else { MU_MIN } } else { family::mean(fam, eta) };
-    let w = d.tw.as_deref().map_or(1.0, |t| t[i]);
-    let dev = match fam {
-        Family::Logit => -w * family::logit_ll(yi, eta),
-        _ => w * (m - yi) + if yi > 0.0 { w * yi * (lny[i] - eta) } else { 0.0 },
-    };
-    (m, dev)
+fn mu_dev(fam: Family, eta: f64, y: f64, w: f64, lny: f64) -> (f64, f64) {
+    match fam {
+        Family::Logit => {
+            let (p, softplus) = family::invlogit_softplus(eta);
+            (p.clamp(MU_MIN, 1.0 - MU_MIN), -w * (y * eta - softplus))
+        }
+        _ => {
+            let m = family::mean(fam, eta);
+            (m, poisson_dev(m, eta, y, w, lny))
+        }
+    }
+}
+
+#[inline(always)]
+fn poisson_dev(mu: f64, eta: f64, y: f64, w: f64, lny: f64) -> f64 {
+    w * (mu - y) + if y > 0.0 { w * y * (lny - eta) } else { 0.0 }
+}
+
+/// [`mu_dev`] of a block of rows (`w = None`: unit weights), one plain loop per case so that it
+/// vectorizes; the values of a row do not depend on the instruction set.
+#[inline(always)]
+fn mu_dev_rows(fam: Family, eta: &[f64], y: &[f64], w: Option<&[f64]>, lny: &[f64], mu: &mut [f64], dev: &mut [f64]) {
+    let n = eta.len();
+    let (y, mu, dev) = (&y[..n], &mut mu[..n], &mut dev[..n]);
+    match (fam, w) {
+        (Family::Logit, Some(w)) => {
+            let w = &w[..n];
+            for j in 0..n {
+                (mu[j], dev[j]) = mu_dev(Family::Logit, eta[j], y[j], w[j], 0.0);
+            }
+        }
+        (Family::Logit, None) => {
+            for j in 0..n {
+                (mu[j], dev[j]) = mu_dev(Family::Logit, eta[j], y[j], 1.0, 0.0);
+            }
+        }
+        (_, Some(w)) => {
+            let (w, lny) = (&w[..n], &lny[..n]);
+            for j in 0..n {
+                (mu[j], dev[j]) = mu_dev(Family::Poisson, eta[j], y[j], w[j], lny[j]);
+            }
+        }
+        (_, None) => {
+            let lny = &lny[..n];
+            for j in 0..n {
+                (mu[j], dev[j]) = mu_dev(Family::Poisson, eta[j], y[j], 1.0, lny[j]);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mu_dev_rows_avx2(fam: Family, eta: &[f64], y: &[f64], w: Option<&[f64]>, lny: &[f64], mu: &mut [f64], dev: &mut [f64]) {
+    mu_dev_rows(fam, eta, y, w, lny, mu, dev)
+}
+
+/// [`mu_dev_rows`] with the widest vectors of the CPU.
+#[inline]
+fn mu_dev_block(fam: Family, eta: &[f64], y: &[f64], w: Option<&[f64]>, lny: &[f64], mu: &mut [f64], dev: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if par::has_avx2_fma() {
+            // SAFETY: the CPU has AVX2.
+            return unsafe { mu_dev_rows_avx2(fam, eta, y, w, lny, mu, dev) };
+        }
+    }
+    mu_dev_rows(fam, eta, y, w, lny, mu, dev)
+}
+
+/// mu of the rows `base..base + eta.len()` from their eta (separated rows pinned to the boundary)
+/// and the sum of the rows' deviance terms, added in row order. Shared by [`update_mu_deviance`]
+/// and the fused pass of [`irls`], so both compute identical values.
+fn mu_dev_chunk(fam: Family, d: &GlmData, base: usize, eta: &[f64], sep: Option<&[bool]>, lny: &[f64], mu: &mut [f64]) -> f64 {
+    let logit = fam == Family::Logit;
+    let tw = d.tw.as_deref();
+    let mut dev = [0.0; ROW_BLOCK];
+    let mut acc = 0.0;
+    for (b, (ec, mc)) in eta.chunks(ROW_BLOCK).zip(mu.chunks_mut(ROW_BLOCK)).enumerate() {
+        let rows = base + b * ROW_BLOCK..base + b * ROW_BLOCK + ec.len();
+        let (yc, wc) = (&d.y[rows.clone()], tw.map(|t| &t[rows.clone()]));
+        let lc = if logit { &[][..] } else { &lny[rows.clone()] };
+        mu_dev_block(fam, ec, yc, wc, lc, mc, &mut dev);
+        if let Some(sep) = sep {
+            for j in (0..ec.len()).filter(|&j| sep[rows.start + j]) {
+                mc[j] = if logit && yc[j] > 0.0 { 1.0 - MU_MIN } else { MU_MIN };
+                if !logit {
+                    dev[j] = poisson_dev(mc[j], ec[j], yc[j], wc.map_or(1.0, |w| w[j]), lc[j]);
+                }
+            }
+        }
+        for v in &dev[..ec.len()] {
+            acc += v;
+        }
+    }
+    acc
 }
 
 /// mu from eta with the separated observations pinned to the boundary, and the deviance of the new
 /// mu (standardized scale) in the same pass. Each fixed chunk sums its rows in order and the chunk
 /// sums are added in chunk order, so the result does not depend on the thread count.
 fn update_mu_deviance(fam: Family, d: &GlmData, eta: &[f64], sep: Option<&[bool]>, lny: &[f64], mu: &mut [f64], pool: &Pool) -> f64 {
-    if d.n <= CHUNK || pool.threads() <= 1 {
-        let mut total = 0.0;
-        for (c, mc) in mu.chunks_mut(CHUNK).enumerate() {
-            let base = c * CHUNK;
-            let mut acc = 0.0;
-            for (k, m) in mc.iter_mut().enumerate() {
-                let i = base + k;
-                let (mi, dev) = mu_dev_row(fam, d, i, eta[i], sep.is_some_and(|s| s[i]), lny);
-                *m = mi;
-                acc += dev;
-            }
-            total += acc;
-        }
-        return finish_deviance(total, d.n);
-    }
-    let parts: Vec<f64> = pool.install(|| {
-        mu.par_chunks_mut(CHUNK)
-            .enumerate()
-            .map(|(c, mc)| {
-                let base = c * CHUNK;
-                let mut acc = 0.0;
-                for (k, m) in mc.iter_mut().enumerate() {
-                    let i = base + k;
-                    let (mi, dev) = mu_dev_row(fam, d, i, eta[i], sep.is_some_and(|s| s[i]), lny);
-                    *m = mi;
-                    acc += dev;
-                }
-                acc
-            })
-            .collect()
-    });
-    finish_deviance(parts.iter().fold(0.0, |a, p| a + p), d.n)
+    let chunk = |(c, mc): (usize, &mut [f64])| mu_dev_chunk(fam, d, c * CHUNK, &eta[c * CHUNK..c * CHUNK + mc.len()], sep, lny, mc);
+    let total = if d.n <= CHUNK || pool.threads() <= 1 {
+        mu.chunks_mut(CHUNK).enumerate().map(chunk).fold(0.0, |a, p| a + p)
+    } else {
+        let parts: Vec<f64> = pool.install(|| mu.par_chunks_mut(CHUNK).enumerate().map(chunk).collect());
+        parts.iter().fold(0.0, |a, p| a + p)
+    };
+    finish_deviance(total, d.n)
 }
 
 /// Runs IRLS from `mu` (updated in place, as are `eta`) until convergence.
@@ -360,7 +425,7 @@ pub(crate) fn irls(
         let parts = par::map_chunks(pool, n, CHUNK, |_, range| {
             let mut acc = 0.0;
             for i in range {
-                acc += mu_dev_row(fam, d, i, shift0, false, &lny).1;
+                acc += mu_dev(fam, shift0, d.y[i], d.tw.as_deref().map_or(1.0, |t| t[i]), lny.get(i).copied().unwrap_or(0.0)).1;
             }
             acc
         });
@@ -375,6 +440,7 @@ pub(crate) fn irls(
             return Err(RfError::Code(430, format!("Failed to converge in {} iterations (eps={})", c.maxiter, fmt_e(eps, 6))));
         }
         ctx.check()?;
+        let mut t_phase = std::time::Instant::now();
         let predicted = predict_eps(&mut hist, eps);
         // ppmlhdfe `iter_fast_solver` (normal equations while far from convergence).
         // (Mata: a missing prediction compares as +inf, so it allows the fast solver.)
@@ -411,12 +477,15 @@ pub(crate) fn irls(
                 )
             });
         }
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: weights, working var");
         abs.set_weights(Some(&w), pool, ctx)?;
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: set weights");
 
         // (c)-(d) residualize [z, X].
         let opts = SolveOpts { tol: tol_in, maxiter: c.inner_maxiter, want_coefs: true };
         let info = abs.residualize(&mut block, r, &opts, warm.as_ref(), pool, ctx)?;
         edit_to_zero(&mut block, ztol, pool);
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: residualize");
         subiter += info.iterations;
         warm = info.coefs;
         let mut cached_wgram: Option<Vec<f64>> = None;
@@ -480,43 +549,25 @@ pub(crate) fn irls(
         } else {
             wls::qr_coefs(&block, r, 0, &xcols, Some(&w), pool)
         };
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: coefficients");
 
         // (e) working residuals and eta = z - resid (+ offset), keeping the previous eta; without
         // the mu separation check (which needs the new eta first), (f) mu and the deviance terms
         // in the same pass (same per-row arithmetic and chunk sums as update_mu_deviance).
         let fused = !c.check_sep;
         let anchor_iter1 = c.fixest && iter == 1;
-        let step_chunk = |base: usize, rc: &mut [f64], ec: &mut [f64], oc: Option<&mut [f64]>, mc: &mut [f64]| -> f64 {
-            let mut acc = 0.0;
-            if let Some(oc) = oc {
-                for (j, (((e, et), o), m)) in rc.iter_mut().zip(ec.iter_mut()).zip(oc.iter_mut()).zip(mc.iter_mut()).enumerate() {
-                    let i = base + j;
-                    let row = &block[i * r..(i + 1) * r];
-                    *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
-                    let off_i = off.map_or(0.0, |o| o[i]);
-                    *o = if anchor_iter1 { shift0 + off_i } else { *et };
-                    *et = z[i] - *e + off_i;
-                    if fused {
-                        let (mi, dev) = mu_dev_row(fam, d, i, *et, false, &lny);
-                        *m = mi;
-                        acc += dev;
-                    }
+        let step_chunk = |base: usize, rc: &mut [f64], ec: &mut [f64], mut oc: Option<&mut [f64]>, mc: &mut [f64]| -> f64 {
+            for (j, (e, et)) in rc.iter_mut().zip(ec.iter_mut()).enumerate() {
+                let i = base + j;
+                let row = &block[i * r..(i + 1) * r];
+                *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
+                let off_i = off.map_or(0.0, |o| o[i]);
+                if let Some(oc) = oc.as_deref_mut() {
+                    oc[j] = if anchor_iter1 { shift0 + off_i } else { *et };
                 }
-            } else {
-                for (j, ((e, et), m)) in rc.iter_mut().zip(ec.iter_mut()).zip(mc.iter_mut()).enumerate() {
-                    let i = base + j;
-                    let row = &block[i * r..(i + 1) * r];
-                    *e = row[0] - beta.iter().zip(&row[1..]).map(|(b, x)| b * x).sum::<f64>();
-                    let off_i = off.map_or(0.0, |o| o[i]);
-                    *et = z[i] - *e + off_i;
-                    if fused {
-                        let (mi, dev) = mu_dev_row(fam, d, i, *et, false, &lny);
-                        *m = mi;
-                        acc += dev;
-                    }
-                }
+                *et = z[i] - *e + off_i;
             }
-            acc
+            if fused { mu_dev_chunk(fam, d, base, ec, None, &lny, mc) } else { 0.0 }
         };
         let fused_sum = if n <= CHUNK || pool.threads() <= 1 {
             let mut total = 0.0;
@@ -613,6 +664,7 @@ pub(crate) fn irls(
                 n_sep = parts.into_iter().sum();
             }
         }
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: eta, separation");
         // (f) mu, deviance.
         let sep_ref = c.check_sep.then_some(sep.as_slice());
         let old_dev = if c.fixest && iter == 1 { dev0 } else { dev };
@@ -644,6 +696,7 @@ pub(crate) fn irls(
                 halved = true;
             }
         }
+        crate::solve::log_phase(ctx, &mut t_phase, "irls: mu, deviance");
         let mut delta = old_dev - dev;
         if !delta.is_nan() && dev < 0.1 * delta {
             delta = dev;

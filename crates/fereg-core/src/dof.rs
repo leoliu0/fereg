@@ -5,7 +5,12 @@
 //! a slot has K = number of levels of its term. Under `noabsorb` there is one slot `_cons`
 //! with K = 1 (reghdfe absorbs a one-level `_cons` factor).
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use rayon::prelude::*;
+
 use crate::api::DofOptions;
+use crate::par::{CHUNK, Pool, find_atomic, union_atomic};
 use crate::session::{ClusterDim, Term};
 use crate::stats::stdev;
 
@@ -56,7 +61,7 @@ struct DofTerm<'a> {
 /// slot whose position equals that term's position (reghdfe5.mata l.1446 indexes the extended
 /// list with the absvar index), which differs from the term's intercept slot when slope slots
 /// precede it; only the `e(dof_table)` flags change.
-pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &DofOptions, want_groupvar: bool, reghdfe5: bool) -> Dof {
+pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &DofOptions, want_groupvar: bool, reghdfe5: bool, pool: &Pool) -> Dof {
     let dterms: Vec<DofTerm> = if terms.is_empty() {
         vec![DofTerm { codes: std::borrow::Cow::Owned(vec![0; n]), g: 1, intercept: true, slopes: &[] }]
     } else {
@@ -97,7 +102,7 @@ pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &Do
                 if slot.exact {
                     continue;
                 }
-                if nested_within(&dterms[q].codes, dterms[q].g, &c.codes) {
+                if nested_within_in(&dterms[q].codes, dterms[q].g, &c.codes, pool) {
                     slot.m = slot.k;
                     slot.exact = true;
                     slot.nested = true;
@@ -142,7 +147,7 @@ pub fn estimate_dof(terms: &[Term], clusters: &[ClusterDim], n: usize, opts: &Do
                 let (j, qb) = idx[b];
                 pair_count += 1;
                 let save = pair_count == 1 && want_groupvar;
-                let (m, gv) = mobility_groups(&dterms[qa].codes, dterms[qa].g, &dterms[qb].codes, dterms[qb].g, save);
+                let (m, gv) = mobility_groups(&dterms[qa].codes, dterms[qa].g, &dterms[qb].codes, dterms[qb].g, save, pool);
                 if save {
                     groupvar = gv;
                 }
@@ -189,48 +194,62 @@ pub(crate) fn nested_within(codes: &[u32], g: usize, cluster: &[u32]) -> bool {
     true
 }
 
-fn find(parent: &mut [u32], mut x: u32) -> u32 {
-    while parent[x as usize] != x {
-        let p = parent[x as usize];
-        parent[x as usize] = parent[p as usize];
-        x = parent[x as usize];
+/// [`nested_within`] over fixed chunks of the observations in parallel: the first cluster value
+/// seen for a level is kept, whichever chunk sees it first, and every other must equal it.
+fn nested_within_in(codes: &[u32], g: usize, cluster: &[u32], pool: &Pool) -> bool {
+    if codes.len() <= CHUNK || pool.threads() <= 1 {
+        return nested_within(codes, g, cluster);
     }
-    x
+    let map: Vec<AtomicU32> = (0..g).map(|_| AtomicU32::new(u32::MAX)).collect();
+    let same = |c: u32, k: u32| {
+        let slot = &map[c as usize];
+        match slot.load(Ordering::Relaxed) {
+            v if v == k => true,
+            u32::MAX => slot.compare_exchange(u32::MAX, k, Ordering::Relaxed, Ordering::Relaxed).map_or_else(|seen| seen == k, |_| true),
+            _ => false,
+        }
+    };
+    pool.install(|| codes.par_chunks(CHUNK).zip(cluster.par_chunks(CHUNK)).all(|(cc, kc)| cc.iter().zip(kc).all(|(&c, &k)| same(c, k))))
 }
 
 /// Connected components of the bipartite graph between the levels of two terms (reghdfe
-/// `BipartiteGraph::init_zigzag`, via union-find). With `save`, also returns the component of
-/// each observation numbered 1.. in order of the smallest first-term level of each component
-/// (the order in which reghdfe's zigzag search discovers them).
-pub(crate) fn mobility_groups(a: &[u32], ga: usize, b: &[u32], gb: usize, save: bool) -> (u64, Option<Vec<u32>>) {
-    let mut parent: Vec<u32> = (0..(ga + gb) as u32).collect();
-    // The root of the previous observation's first-term level is cached (panels sorted by the
-    // first term repeat it); it stays a root until a union attaches it, which updates it.
-    let (mut last, mut rx) = (u32::MAX, 0u32);
-    for (&x, &y) in a.iter().zip(b) {
-        if x != last {
-            last = x;
-            rx = find(&mut parent, x);
-        }
-        let ry = find(&mut parent, ga as u32 + y);
-        if rx != ry {
-            // Deterministic: attach the larger root under the smaller.
-            let (lo, hi) = if rx < ry { (rx, ry) } else { (ry, rx) };
-            parent[hi as usize] = lo;
-            rx = lo;
-        }
+/// `BipartiteGraph::init_zigzag`), by a lock-free union-find over the observations. With `save`,
+/// also returns the component of each observation numbered 1.. in order of the smallest
+/// first-term level of each component (the order in which reghdfe's zigzag search discovers
+/// them). The components and their numbers are properties of the graph, so neither depends on
+/// the threads. (One thread took 0.036 s for the three pairs of the 10^7-row benchmark panel,
+/// of a 0.25 s `fereg` call.)
+pub(crate) fn mobility_groups(a: &[u32], ga: usize, b: &[u32], gb: usize, save: bool, pool: &Pool) -> (u64, Option<Vec<u32>>) {
+    let parent: Vec<AtomicU32> = (0..(ga + gb) as u32).map(AtomicU32::new).collect();
+    let link = |xs: &[u32], ys: &[u32]| xs.iter().zip(ys).for_each(|(&x, &y)| union_atomic(&parent, x, ga as u32 + y));
+    let serial = a.len() <= CHUNK || pool.threads() <= 1;
+    if serial {
+        link(a, b);
+    } else {
+        pool.install(|| a.par_chunks(CHUNK).zip(b.par_chunks(CHUNK)).for_each(|(xs, ys)| link(xs, ys)));
     }
-    let mut id = vec![0u32; ga + gb];
+    // The root of a component is its smallest vertex, a first-term level: the roots in ascending
+    // order number the components.
+    let is_root = |l: usize| parent[l].load(Ordering::Relaxed) == l as u32;
+    if !save {
+        let count = if serial {
+            (0..ga).filter(|&l| is_root(l)).count()
+        } else {
+            pool.install(|| (0..ga).into_par_iter().with_min_len(CHUNK).filter(|&l| is_root(l)).count())
+        };
+        return (count as u64, None);
+    }
+    let mut id = vec![0u32; ga];
     let mut next = 0u32;
-    for l in 0..ga as u32 {
-        let r = find(&mut parent, l) as usize;
-        if id[r] == 0 {
+    for (l, v) in id.iter_mut().enumerate() {
+        if is_root(l) {
             next += 1;
-            id[r] = next;
+            *v = next;
         }
     }
-    let gv = save.then(|| a.iter().map(|&x| id[find(&mut parent, x) as usize]).collect());
-    (u64::from(next), gv)
+    let group = |x: u32| id[find_atomic(&parent, x) as usize];
+    let gv = if serial { a.iter().map(|&x| group(x)).collect() } else { pool.install(|| a.par_iter().with_min_len(CHUNK).map(|&x| group(x)).collect()) };
+    (u64::from(next), Some(gv))
 }
 
 /// reghdfe `dof_update_cvars` for one slope: the variable is standardized (reghdfe
@@ -250,4 +269,82 @@ pub(crate) fn redundant_slope_levels(codes: &[u32], g: usize, x: &[f64], interce
         .zip(&hi)
         .filter(|(l, h)| if intercept { *h - *l <= 1e-6 } else { l.abs() + h.abs() <= 1e-6 })
         .count() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::par::with_pool;
+    use crate::rng::SplitMix64;
+
+    /// Components by plain search from every first-term level in ascending order.
+    fn reference_groups(a: &[u32], ga: usize, b: &[u32], gb: usize) -> (u64, Vec<u32>) {
+        let mut of_a = vec![Vec::new(); ga];
+        let mut of_b = vec![Vec::new(); gb];
+        for (&x, &y) in a.iter().zip(b) {
+            of_a[x as usize].push(y);
+            of_b[y as usize].push(x);
+        }
+        let mut id = vec![0u32; ga];
+        let mut seen_b = vec![false; gb];
+        let mut next = 0;
+        for l in 0..ga {
+            if id[l] != 0 {
+                continue;
+            }
+            next += 1;
+            id[l] = next;
+            let mut stack = vec![l as u32];
+            while let Some(x) = stack.pop() {
+                for &y in &of_a[x as usize] {
+                    if !std::mem::replace(&mut seen_b[y as usize], true) {
+                        for &x2 in &of_b[y as usize] {
+                            if id[x2 as usize] == 0 {
+                                id[x2 as usize] = next;
+                                stack.push(x2);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (u64::from(next), a.iter().map(|&x| id[x as usize]).collect())
+    }
+
+    /// Sparse graphs with many components (and levels without observations), below and above
+    /// one chunk, on 1 and 4 threads.
+    #[test]
+    fn mobility_groups_are_the_components_in_order_of_their_first_level() {
+        let mut rng = SplitMix64::new(11);
+        for (n, ga, gb) in [(50, 40, 30), (3 * CHUNK + 17, 40_000, 9_000), (2 * CHUNK, 7, 5), (2 * CHUNK + 1, 60_000, 60_000)] {
+            let a: Vec<u32> = (0..n).map(|_| (rng.next_u64() % ga as u64) as u32).collect();
+            // Mostly within a band around the first-term level, so several components survive.
+            let b: Vec<u32> = a.iter().map(|&x| ((u64::from(x) * gb as u64 / ga as u64 + rng.next_u64() % 2) % gb as u64) as u32).collect();
+            let (count, groups) = reference_groups(&a, ga, &b, gb);
+            // Levels of the first term without observations are components of their own.
+            assert!(count > 1 || ga <= 7, "one component: n {n}");
+            for threads in [1, 4] {
+                with_pool(threads, |pool| {
+                    assert_eq!(mobility_groups(&a, ga, &b, gb, true, pool), (count, Some(groups.clone())), "n {n}, {threads} threads");
+                    assert_eq!(mobility_groups(&a, ga, &b, gb, false, pool), (count, None), "n {n}, {threads} threads");
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn nesting_does_not_depend_on_the_threads() {
+        let n = 3 * CHUNK + 5;
+        let codes: Vec<u32> = (0..n).map(|i| (i % 5000) as u32).collect();
+        let nested: Vec<u32> = codes.iter().map(|c| c / 7).collect();
+        let mut broken = nested.clone();
+        broken[n - 3] += 1;
+        with_pool(4, |pool| {
+            assert!(nested_within_in(&codes, 5000, &nested, pool));
+            assert!(!nested_within_in(&codes, 5000, &broken, pool));
+        })
+        .unwrap();
+        assert!(nested_within(&codes, 5000, &nested) && !nested_within(&codes, 5000, &broken));
+    }
 }

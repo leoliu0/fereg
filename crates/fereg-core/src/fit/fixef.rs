@@ -13,7 +13,7 @@ use super::state::StateFe;
 use super::{FixefNorm, FixefValues};
 use crate::factor::{self, Codes};
 use crate::error::RfError;
-use crate::par::{CHUNK, Pool};
+use crate::par::{CHUNK, Pool, union_atomic};
 
 /// Fixed-effect values retained by a fit.
 pub(crate) struct FeLevels {
@@ -476,38 +476,6 @@ fn find(parent: &mut [u32], mut a: u32) -> u32 {
         a = parent[a as usize];
     }
     a
-}
-
-/// Lock-free union-find root with path halving (`parent[x] <= x` invariant).
-#[inline]
-fn find_atomic(parent: &[AtomicU32], mut a: u32) -> u32 {
-    loop {
-        let p = parent[a as usize].load(Ordering::Relaxed);
-        if p == a {
-            return a;
-        }
-        let gp = parent[p as usize].load(Ordering::Relaxed);
-        if gp != p {
-            parent[a as usize].store(gp, Ordering::Relaxed);
-        }
-        a = gp;
-    }
-}
-
-#[inline]
-fn union_atomic(parent: &[AtomicU32], a: u32, b: u32) {
-    if parent[a as usize].load(Ordering::Relaxed) == parent[b as usize].load(Ordering::Relaxed) {
-        return;
-    }
-    let (mut ra, mut rb) = (find_atomic(parent, a), find_atomic(parent, b));
-    while ra != rb {
-        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-        if parent[hi as usize].compare_exchange_weak(hi, lo, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-            return;
-        }
-        ra = find_atomic(parent, lo);
-        rb = find_atomic(parent, hi);
-    }
 }
 
 /// pyfixest's normalization of intercept terms `vals` (the first free, every other term's first

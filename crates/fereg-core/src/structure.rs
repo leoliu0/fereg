@@ -9,6 +9,7 @@
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
@@ -31,10 +32,24 @@ pub struct Block {
     /// Offset of level 0 in the reduced coordinate vector.
     pub off: usize,
     pub small: bool,
-    /// Large blocks: cell ids sorted by (level, cell).
-    pub perm: Vec<u32>,
-    /// Large blocks: `perm` offsets per level (g + 1 entries).
-    pub perm_off: Vec<u32>,
+    /// Large blocks: the level-sorted cell lists, built at first use ([`Structure::level_cells`]).
+    cells: OnceLock<LevelCells>,
+}
+
+/// The cells of a large block sorted by (level, cell).
+#[derive(Clone, Debug)]
+pub struct LevelCells {
+    perm: Vec<u32>,
+    /// Offsets of the levels in `perm` (g + 1 entries).
+    off: Vec<u32>,
+}
+
+impl LevelCells {
+    /// Cells of level `g`, ascending.
+    #[inline]
+    pub fn of(&self, g: usize) -> &[u32] {
+        &self.perm[self.off[g] as usize..self.off[g + 1] as usize]
+    }
 }
 
 pub struct Structure {
@@ -120,6 +135,26 @@ impl Structure {
             && nblocks <= nb
             && offs.len() >= nblocks
             && (0..nblocks).all(|b| self.code_bound[b].checked_mul(w).and_then(|e| e.checked_add(offs[b])).is_some_and(|e| e <= len))
+    }
+
+    /// The level-sorted cell lists of block `b`, built at the first call. Only the level pulls
+    /// of reduced spaces beyond the accumulator budget and the block and joint assemblies read
+    /// them: on the 10^7-row benchmark panel (43,478 firms; no kernel needs them) building them
+    /// with the structure took 0.011 s of its 0.020 s.
+    pub fn level_cells(&self, b: usize, pool: &Pool) -> Result<&LevelCells, RfError> {
+        let cells = &self.blocks[b].cells;
+        if cells.get().is_none() {
+            let (nb, cc) = (self.nb, &self.cell_codes);
+            let (off, perm) = counting_sort(self.ncells, self.blocks[b].g, |c| cc[c * nb + b], pool)?;
+            // A concurrent caller may have set the same lists first.
+            let _ = cells.set(LevelCells { perm, off });
+        }
+        Ok(cells.get().expect("set above"))
+    }
+
+    /// [`Structure::level_cells`] of a block whose lists were built before.
+    pub fn built_level_cells(&self, b: usize) -> &LevelCells {
+        self.blocks[b].cells.get().expect("level cells are built before the kernels that read them")
     }
 
     pub fn has_large(&self) -> bool {
@@ -346,7 +381,7 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
     let mut blocks = Vec::with_capacity(order.len());
     let mut off = 0usize;
     for &q in &order {
-        blocks.push(Block { term: q, g: terms[q].g, off, small: small_set[q], perm: Vec::new(), perm_off: Vec::new() });
+        blocks.push(Block { term: q, g: terms[q].g, off, small: small_set[q], cells: OnceLock::new() });
         off += terms[q].g;
     }
     let m = off;
@@ -487,15 +522,6 @@ pub fn build(terms: &[Term], n: usize, small_limit: usize, pool: &Pool) -> Resul
     if st.m_small > 0 && small_work > 64 * st.ncells as u64 {
         st.blocks.iter_mut().for_each(|b| b.small = false);
         st.m_small = 0;
-    }
-
-    // Level-sorted cell lists of the large blocks.
-    for b in 0..nb {
-        if !st.blocks[b].small {
-            let (perm, perm_off) = level_perm(&st, b, pool)?;
-            st.blocks[b].perm = perm;
-            st.blocks[b].perm_off = perm_off;
-        }
     }
     Ok(st)
 }
@@ -1053,13 +1079,6 @@ impl SegPass<'_> {
     }
 }
 
-/// Cells sorted by (level of block `b`, cell) with per-level offsets.
-fn level_perm(st: &Structure, b: usize, pool: &Pool) -> Result<(Vec<u32>, Vec<u32>), RfError> {
-    let (nb, cc) = (st.nb, &st.cell_codes);
-    let (off, perm) = counting_sort(st.ncells, st.blocks[b].g, |c| cc[c * nb + b], pool)?;
-    Ok((perm, off))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1132,8 +1151,9 @@ mod tests {
         let demote = total > 0 && work > 64 * ncells as u64;
         for (b, blk) in st.blocks.iter().enumerate() {
             assert_eq!(blk.small, small[blk.term] && !demote);
+            // Nothing is built with the structure; the lists are those of a plain sort.
+            assert!(blk.cells.get().is_none());
             if blk.small {
-                assert!(blk.perm.is_empty());
                 continue;
             }
             let mut perm: Vec<u32> = (0..ncells as u32).collect();
@@ -1145,8 +1165,9 @@ mod tests {
             for k in 0..blk.g {
                 off[k + 1] += off[k];
             }
-            assert_eq!(blk.perm, perm);
-            assert_eq!(blk.perm_off, off);
+            let lc = with_pool(2, |pool| st.level_cells(b, pool).unwrap().clone()).unwrap();
+            assert_eq!(lc.perm, perm);
+            assert_eq!(lc.off, off);
         }
     }
 

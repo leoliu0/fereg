@@ -236,7 +236,14 @@ impl Session {
         ctx: &Ctx,
     ) -> Result<GlmParts, RfError> {
         validate(self, &rows, lay, offset.as_deref(), s, g)?;
-        let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
+        // The iteration log and drop messages are SMCL for the Stata plugin: only the phase
+        // timings of verbose >= 2 ("fereg: ...") pass.
+        let timings = |m: &str| {
+            if m.starts_with("fereg: ") {
+                ctx.log(m)
+            }
+        };
+        let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &timings };
         let (_, parts) = self.glm_in_pool(rows, lay.nx, offset, s, g, GlmConvention::Fixest, OutMode::FitPartsOnly, &muted, pool)?;
         parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))
     }
@@ -919,7 +926,7 @@ impl Session {
             return Ok((EstResult::default(), Some(parts)));
         }
         let wv = wv_opt.as_deref().expect("allocated for full result");
-        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true);
+        let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true, pool);
         let msize = k + 1;
         let bread = vcov::inv_ext(&inv_xx, k, &xbar, big_n);
 

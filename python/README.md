@@ -84,7 +84,9 @@ scaled by the residual variance (pyfixest's `Feglm._vcov_iid` fixes the dispersi
 the `"ir"` check also works after rows were dropped before it (pyfixest's misaligns its
 predictions then and drops nothing).
 
-`nthreads` (default: all cores) sets the number of threads. Results do not depend on it.
+`nthreads` (default: all cores) sets the number of threads. Results do not depend on it. On
+Linux, with as many threads as physical cores, each thread is bound to its own core (the
+environment variable `FEREG_PIN=0` turns this off).
 
 The same core powers the Stata commands `fereg`/`feppml`/`felogit` and the R package `fereg`:
 see <https://github.com/leoliu0/fereg>.

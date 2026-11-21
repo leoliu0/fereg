@@ -593,7 +593,7 @@ impl FeSolver {
                         cell_seg = Some(self.st.cell_segments(pool)?);
                     }
                     let cs = cell_seg.as_deref().expect("set above");
-                    let nnz = ops.block_row_nnz(b, &agg, cs, pool);
+                    let nnz = ops.block_row_nnz(b, &agg, cs, pool)?;
                     let csr = ops.assemble_block(b, &agg, cs, &nnz, &keep, pool)?;
                     f.refactor(&csr, pool)?
                 }
@@ -848,7 +848,7 @@ fn escalate_block(ops: &Ops, b: usize, cfg: &SolverConfig, cell_seg: &mut Option
             *cell_seg = Some(ops.st.cell_segments(pool)?);
         }
         let cs = cell_seg.as_deref().expect("set above");
-        let row_nnz = ops.block_row_nnz(b, &agg, cs, pool);
+        let row_nnz = ops.block_row_nnz(b, &agg, cs, pool)?;
         nnz_total = row_nnz.iter().map(|&v| u64::from(v)).sum();
         if nnz_total <= cfg.max_block_nnz {
             exact_csr = Some(ops.assemble_block(b, &agg, cs, &row_nnz, &keep, pool)?);

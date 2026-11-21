@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use crate::error::RfError;
 use crate::par::{CHUNK, MAX_DISPATCH_WIDTH, Pool, alloc_par, alloc_uninit, alloc_vec, assume_init, dispatch_width, has_avx2_fma, sum_chunks, width};
 use crate::rng::SplitMix64;
-use crate::structure::{Structure, split_bounds};
+use crate::structure::{LevelCells, Structure, split_bounds};
 
 /// Coordinates with d <= REDUNDANT*n are redundant (no information beyond FE1).
 pub const REDUNDANT: f64 = 1e-12;
@@ -125,10 +125,10 @@ pub struct JointCells {
 
 impl JointCells {
     /// Cells (ascending) whose code in the coordinate's (large) block is coordinate `k`.
+    /// ([`Ops::joint_cells`] built the level-sorted cell lists.)
     fn cells<'a>(&'a self, st: &'a Structure, k: usize) -> &'a [u32] {
-        let blk = &st.blocks[self.coord_block[k] as usize];
-        let g = k - blk.off;
-        &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize]
+        let b = self.coord_block[k] as usize;
+        st.built_level_cells(b).of(k - st.blocks[b].off)
     }
 }
 
@@ -684,9 +684,10 @@ fn level_weights_pull(st: &Structure, ws: &WeightState, pool: &Pool) -> Result<(
         let col = b - ns;
         let rng = blk.off..blk.off + blk.g;
         let (nr_b, dq_b) = (&mut nr[rng.clone()], &mut dq[rng]);
+        let level_cells = st.level_cells(b, pool)?;
         let pull_level = |(g, (n, d)): (usize, (&mut MaybeUninit<f64>, &mut MaybeUninit<f64>))| {
             let (mut sn, mut sd) = (0.0, 0.0);
-            for &c in &blk.perm[blk.perm_off[g] as usize..blk.perm_off[g + 1] as usize] {
+            for &c in level_cells.of(g) {
                 let ci = c as usize;
                 sn += match cw_opt {
                     Some(cw) => cw[ci],
@@ -1207,12 +1208,12 @@ unsafe fn pull_level_avx2<const R: usize>(zbuf: &[f64], r: usize, cells: &[u32],
     pull_level_inner::<R>(zbuf, r, cells, out);
 }
 
-fn pull_large_block<const R: usize, const _B: bool>(zbuf: &[f64], r: usize, yb: &mut [f64], perm: &[u32], perm_off: &[u32], pool: &Pool) {
+fn pull_large_block<const R: usize, const _B: bool>(zbuf: &[f64], r: usize, yb: &mut [f64], level_cells: &LevelCells, pool: &Pool) {
     let r = width::<R>(r);
     let avx2 = has_avx2_fma();
     if yb.len() <= 512 * r || pool.threads() <= 1 {
         for (g, out) in yb.chunks_exact_mut(r).enumerate() {
-            let cells = &perm[perm_off[g] as usize..perm_off[g + 1] as usize];
+            let cells = level_cells.of(g);
             #[cfg(target_arch = "x86_64")]
             if avx2 {
                 unsafe { pull_level_avx2::<R>(zbuf, r, cells, out) };
@@ -1225,7 +1226,7 @@ fn pull_large_block<const R: usize, const _B: bool>(zbuf: &[f64], r: usize, yb: 
     }
     pool.install(|| {
         yb.par_chunks_mut(r).enumerate().with_min_len(512).for_each(|(g, out)| {
-            let cells = &perm[perm_off[g] as usize..perm_off[g + 1] as usize];
+            let cells = level_cells.of(g);
             #[cfg(target_arch = "x86_64")]
             if avx2 {
                 unsafe { pull_level_avx2::<R>(zbuf, r, cells, out) };
@@ -1351,21 +1352,23 @@ impl Ops<'_> {
             }
         }
         if use_z {
-            self.pull_large(&sc.zbuf, r, y, pool);
+            self.pull_large(&sc.zbuf, r, y, pool)?;
         }
         Ok(extra)
     }
 
     /// y[off_b + g] = sum_{c in level g of b} Z[c] for every large block.
-    fn pull_large(&self, zbuf: &[f64], r: usize, y: &mut [f64], pool: &Pool) {
+    fn pull_large(&self, zbuf: &[f64], r: usize, y: &mut [f64], pool: &Pool) -> Result<(), RfError> {
         let st = self.st;
         let ms = st.m_small;
         let mut rest = &mut y[ms * r..];
-        for blk in st.blocks.iter().filter(|b| !b.small) {
+        for (b, blk) in st.blocks.iter().enumerate().filter(|(_, b)| !b.small) {
             let (yb, tail) = rest.split_at_mut(blk.g * r);
             rest = tail;
-            dispatch_width!(r, false, pull_large_block(zbuf, r, yb, &blk.perm, &blk.perm_off, pool));
+            let level_cells = st.level_cells(b, pool)?;
+            dispatch_width!(r, false, pull_large_block(zbuf, r, yb, level_cells, pool));
         }
+        Ok(())
     }
 
     /// Y = S*P (both m x r row-major).
@@ -1763,6 +1766,9 @@ impl Ops<'_> {
         for (b, blk) in st.blocks.iter().enumerate() {
             coord_block[blk.off..blk.off + blk.g].iter_mut().for_each(|v| *v = b as u32);
         }
+        for b in (0..st.nb).filter(|&b| !st.blocks[b].small) {
+            st.level_cells(b, pool)?;
+        }
         Ok(JointCells { coord_block, cell_seg: st.cell_segments(pool)? })
     }
 
@@ -2011,10 +2017,10 @@ impl Ops<'_> {
     }
 
     /// Number of structural nonzeros of each row of S_bb (diagonal included). Cost ~= E_b.
-    pub fn block_row_nnz(&self, b: usize, agg: &SegAgg, cell_seg: &[u32], pool: &Pool) -> Vec<u32> {
-        let blk = &self.st.blocks[b];
-        let g = blk.g;
-        pool.install(|| {
+    pub fn block_row_nnz(&self, b: usize, agg: &SegAgg, cell_seg: &[u32], pool: &Pool) -> Result<Vec<u32>, RfError> {
+        let level_cells = self.st.level_cells(b, pool)?;
+        let g = self.st.blocks[b].g;
+        Ok(pool.install(|| {
             (0..g)
                 .into_par_iter()
                 .with_min_len(256)
@@ -2023,7 +2029,7 @@ impl Ops<'_> {
                     |mark, row| {
                         let mut cnt = 0u32;
                         let mut last = u32::MAX;
-                        for &c in &blk.perm[blk.perm_off[row] as usize..blk.perm_off[row + 1] as usize] {
+                        for &c in level_cells.of(row) {
                             let s = cell_seg[c as usize];
                             if s == last {
                                 continue;
@@ -2040,15 +2046,15 @@ impl Ops<'_> {
                     },
                 )
                 .collect()
-        })
+        }))
     }
 
     /// Exact S_bb (Laplacian) over the non-redundant levels of block `b`, as a full CSR whose
     /// diagonal is minus the sum of the row's off-diagonals. `keep_idx` maps kept index -> level.
     pub fn assemble_block(&self, b: usize, agg: &SegAgg, cell_seg: &[u32], row_nnz: &[u32], keep_idx: &[u32], pool: &Pool) -> Result<Csr, RfError> {
         let (st, ws) = (self.st, self.ws);
-        let blk = &st.blocks[b];
-        let g = blk.g;
+        let level_cells = st.level_cells(b, pool)?;
+        let g = st.blocks[b].g;
         let mut newid = vec![u32::MAX; g];
         for (k, &l) in keep_idx.iter().enumerate() {
             newid[l as usize] = k as u32;
@@ -2073,7 +2079,7 @@ impl Ops<'_> {
                         let row = keep_idx[k] as usize;
                         touched.clear();
                         let mut last = u32::MAX;
-                        for &c in &blk.perm[blk.perm_off[row] as usize..blk.perm_off[row + 1] as usize] {
+                        for &c in level_cells.of(row) {
                             let s = cell_seg[c as usize];
                             if s == last {
                                 continue;

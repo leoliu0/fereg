@@ -7,11 +7,14 @@
 //!   number of threads.
 //! - Every thread fereg starts (pool workers, [`spawn_scoped`]) runs with the floating-point
 //!   control state of the thread that starts it ([`FpEnv`]).
+//! - On Linux, a pool with one worker per physical core keeps each worker on its own core
+//!   (the `cores` module).
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
 #[cfg(target_arch = "x86_64")]
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
@@ -58,15 +61,23 @@ pub fn threads_for(requested: usize, work: usize) -> usize {
 }
 
 /// Runs `body` on the calling thread with a scoped pool of `threads` workers (0 = all CPUs).
-/// No worker outlives this call. Workers take the calling thread's [`FpEnv`].
+/// No worker outlives this call. Workers take the calling thread's [`FpEnv`] and, on Linux, one
+/// physical core each when there are as many workers as cores (the `cores` module).
 pub fn with_pool<R>(threads: usize, body: impl FnOnce(&Pool) -> R) -> Result<R, RfError> {
     let env = FpEnv::current();
+    let threads = resolve_threads(threads);
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    let cores = crate::cores::worker_sets(threads);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(resolve_threads(threads))
+        .num_threads(threads)
         .thread_name(|i| format!("fereg-{i}"))
         .build_scoped(
             move |thread| {
                 env.apply();
+                #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+                if let Some(sets) = &cores {
+                    sets[thread.index()].bind();
+                }
                 thread.run()
             },
             |pool| body(&Pool { pool }),
@@ -351,6 +362,41 @@ pub fn all_positive(v: &[f64], pool: &Pool) -> bool {
         return v.iter().all(|x| x.is_finite() && *x > 0.0);
     }
     pool.install(|| v.par_chunks(CHUNK).all(|c| c.iter().all(|x| x.is_finite() && *x > 0.0)))
+}
+
+/// Root of `a` in a lock-free union-find forest (`parent[x] <= x`; the root of a set is its
+/// smallest member), with path halving.
+#[inline]
+pub(crate) fn find_atomic(parent: &[AtomicU32], mut a: u32) -> u32 {
+    loop {
+        let p = parent[a as usize].load(Ordering::Relaxed);
+        if p == a {
+            return a;
+        }
+        let gp = parent[p as usize].load(Ordering::Relaxed);
+        if gp != p {
+            parent[a as usize].store(gp, Ordering::Relaxed);
+        }
+        a = gp;
+    }
+}
+
+/// Joins the sets of `a` and `b`: the larger root is linked under the smaller one, so the
+/// partition and its roots do not depend on the order of the calls or on the threads making them.
+#[inline]
+pub(crate) fn union_atomic(parent: &[AtomicU32], a: u32, b: u32) {
+    if parent[a as usize].load(Ordering::Relaxed) == parent[b as usize].load(Ordering::Relaxed) {
+        return;
+    }
+    let (mut ra, mut rb) = (find_atomic(parent, a), find_atomic(parent, b));
+    while ra != rb {
+        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+        if parent[hi as usize].compare_exchange_weak(hi, lo, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            return;
+        }
+        ra = find_atomic(parent, lo);
+        rb = find_atomic(parent, hi);
+    }
 }
 
 #[cfg(test)]
