@@ -142,22 +142,27 @@ pub(crate) fn id_stats(m: &Model, passes: &Passes) -> Result<IdStats, RfError> {
         });
     };
     let cd = cdev[k1 - 1];
-    let cdf = cd * (n - m.sdof - l) / l1 as f64;
+    let cdf = cd * (n - m.sdof - m.dofm - l) / l1 as f64;
     let iddf = (l1 - k1 + 1) as f64;
+    let n_eff = n - m.dofm;
     let (idstat, rkf) = match m.mode {
-        Mode::Iid => (n * ccev[k1 - 1], None),
+        Mode::Iid => (n_eff * ccev[k1 - 1], None),
         // kiefer: ranktest without robust, cluster or bw: Anderson LM, and the rk Wald F of an
         // iid ranktest is the Cragg-Donald F.
-        Mode::Ac if passes.ranktest_iid() => (n * ccev[k1 - 1], Some(cdf)),
+        Mode::Ac if passes.ranktest_iid() => (n_eff * ccev[k1 - 1], Some(cdf)),
         Mode::Robust | Mode::Ac | Mode::Cluster { .. } => {
-            let lm = kp_stat(&p, &passes.meat_rank(&p.ce, &p.cz)?, n);
+            let lm_raw = kp_stat(&p, &passes.meat_rank(&p.ce, &p.cz)?, n);
+            let lm = match m.mode {
+                Mode::Cluster { .. } => lm_raw,
+                _ => lm_raw / n * n_eff,
+            };
             // Wald version: vhat = y - z*pihat.
             let pihat = dense::spd_solve(&p.qzz, &p.qzy);
             let cw = p.ce.sub(&p.cz.mul(&pihat));
             let wald = kp_stat(&p, &passes.meat_rank(&cw, &p.cz)?, n);
             let rkf = match m.mode {
                 Mode::Cluster { g } => wald / (n - 1.0) * (n - l - m.sdof) * (g - 1.0) / g / l1 as f64,
-                _ => wald / n * (n - l - m.sdof) / l1 as f64,
+                _ => wald / n * (n - l - m.sdof - m.dofm) / l1 as f64,
             };
             (lm, Some(rkf))
         }

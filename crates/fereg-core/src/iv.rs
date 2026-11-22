@@ -276,6 +276,7 @@ pub(crate) struct Model<'a> {
     pub iz: &'a [usize],
     pub n: f64,
     pub sdof: f64,
+    pub dofm: f64,
     pub mode: Mode,
 }
 
@@ -309,15 +310,43 @@ impl Session {
         par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.iv_in_pool(rows, lay, s, ctx, pool))?
     }
 
-    fn iv_in_pool(&mut self, mut rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {
+    fn iv_in_pool(&mut self, rows_in: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {
         let n = self.n();
-        let r = lay.ncols();
-        let (nx, ne, ni) = (lay.nx, lay.nendog, lay.ninst);
+        let r_in = lay.ncols();
+        let (nx_in, ne, ni) = (lay.nx, lay.nendog, lay.ninst);
+        let no_absorb_const = self.terms.is_empty() && !s.noconstant && s.iv.report_constant;
+        let no_absorb_nocons = self.terms.is_empty() && s.noconstant;
+        let skip_absorber = no_absorb_const || no_absorb_nocons;
+        let cons_col = no_absorb_const.then_some(1 + nx_in);
+        let nx = nx_in + usize::from(no_absorb_const);
+        let r = r_in + usize::from(no_absorb_const);
+        let mut rows = if let Some(cc) = cons_col {
+            let mut ext = par::alloc_uninit::<f64>(n * r)?;
+            for (i, dst) in ext.chunks_exact_mut(r).enumerate() {
+                let src = &rows_in[i * r_in..(i + 1) * r_in];
+                for j in 0..cc {
+                    dst[j].write(src[j]);
+                }
+                dst[cc].write(1.0);
+                for j in cc..r_in {
+                    dst[j + 1].write(src[j]);
+                }
+            }
+            // SAFETY: all `n * r` slots written.
+            unsafe { par::assume_init(ext) }
+        } else {
+            rows_in
+        };
+
         let w = Weights::new(self.weight_kind, self.weights.as_deref(), self.absorber.row_order(), pool)?;
         let big_n = w.n;
         let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, false, pool);
-        // ivreghdfe l.670: absorb_ct = df_a, or 1 when every FE is nested in a cluster.
-        let sdof = dof.df_a.max(1) as f64;
+        let sdof = if !self.terms.is_empty() || !skip_absorber {
+            s.iv.sdofminus.unwrap_or_else(|| dof.df_a.max(1) as f64)
+        } else {
+            s.iv.sdofminus.unwrap_or(0.0)
+        };
+        let dofm = s.iv.dofminus;
         let vce = effective_vce(&self.vce, w.kind);
         // `vce(dkraay [#])` on IV is ivreghdfe's dkraay(#): Bartlett kernel, cluster on time.
         let dk_kernel = match &vce {
@@ -339,45 +368,96 @@ impl Session {
         let raw_cols = if matches!(vce, Vce::Crv3(_)) { Some(kept_columns(&rows, r, self.absorber.row_order())?) } else { None };
         ctx.check()?;
         let cs = stats::col_stats(&rows, r, w.raw.as_deref(), pool);
-        let want_coefs = s.want_d || (s.want_fe && self.terms.iter().any(|t| t.save));
-        let opts = SolveOpts { tol: s.tol, maxiter: s.maxiter, want_coefs };
-        let info = self.absorber.residualize(&mut rows, r, &opts, None, pool, ctx)?;
+        let want_coefs = !self.terms.is_empty() && (s.want_d || (s.want_fe && self.terms.iter().any(|t| t.save)));
+        let info = if skip_absorber {
+            crate::absorber::SolveInfo { iterations: 0, escalated: false, exact: true, coefs: None }
+        } else {
+            let opts = SolveOpts { tol: s.tol, maxiter: s.maxiter, want_coefs };
+            self.absorber.residualize(&mut rows, r, &opts, None, pool, ctx)?
+        };
         ctx.check()?;
         let (graw, ss_res) = stats::gram(&rows, r, w.wv.as_deref(), pool);
         let gm = M { r, c: r, d: graw };
+        let gm_c_opt = if no_absorb_const {
+            let cc = cons_col.expect("no_absorb_const sets cons_col");
+            let wmeans = &cs.wmean;
+            let mut gc = par::sum_chunks(pool, n, CHUNK, r * r, |range, acc| {
+                let mut d = vec![0.0; r];
+                for i in range {
+                    let row = &rows[i * r..(i + 1) * r];
+                    for j in 0..r {
+                        d[j] = if j == cc { 0.0 } else { row[j] - wmeans[j] };
+                    }
+                    let wi = w.wv(i);
+                    for a in 0..r {
+                        let wa = wi * d[a];
+                        for b in a..r {
+                            acc[a * r + b] += wa * d[b];
+                        }
+                    }
+                }
+            });
+            for a in 0..r {
+                for b in 0..a {
+                    gc[a * r + b] = gc[b * r + a];
+                }
+            }
+            gc[cc * r + cc] = w.n_const();
+            Some(M { r, c: r, d: gc })
+        } else {
+            None
+        };
 
-        // Collinearity: stage 1 (with the FEs) on every column, stage 2 on Z = [exog, inst] and
-        // then on X = [exog, endog], so excluded instruments and endogenous regressors are the
-        // ones dropped (ivreg2 drops the rightmost collinear variable).
+        // Collinearity: stage 1 (with the FEs) on every column, stage 2 on Z = [cons?, exog, inst]
+        // and then on X = [cons?, exog, endog], so `_cons` stays if collinear with indicators, and
+        // excluded instruments / endogenous regressors are dropped rightmost.
         let exog = |j: usize| 1 + j;
         let endog = |j: usize| 1 + nx + j;
         let inst = |j: usize| 1 + nx + ne + j;
-        let absorbed = stage1_absorbed(&ss_res, &cs.sumsq, collinear_tol(s.tol));
-        let mut status = vec![0u8; r - 1];
-        for c in 1..r {
-            if absorbed[c] {
-                status[c - 1] = STATUS_ABSORBED;
+        let mut col_status = vec![0u8; r - 1];
+        if !skip_absorber {
+            let absorbed = stage1_absorbed(&ss_res, &cs.sumsq, collinear_tol(s.tol));
+            for c in 1..r {
+                if absorbed[c] {
+                    col_status[c - 1] = STATUS_ABSORBED;
+                }
             }
         }
-        let alive = |status: &[u8], c: usize| status[c - 1] == 0;
-        let zc: Vec<usize> = (0..nx).map(exog).chain((0..ni).map(inst)).filter(|&c| alive(&status, c)).collect();
-        let (dz, _) = stage2_collinear(&gm.d, r, &zc, &cs.sd);
+        let alive = |st: &[u8], c: usize| st[c - 1] == 0;
+        let zc: Vec<usize> = cons_col
+            .into_iter()
+            .chain((0..nx_in).map(exog))
+            .chain((0..ni).map(inst))
+            .filter(|&c| alive(&col_status, c))
+            .collect();
+        let gm_collin = gm_c_opt.as_ref().unwrap_or(&gm);
+        let (dz, _) = stage2_collinear(&gm_collin.d, r, &zc, &cs.sd);
         for (&c, &d) in zc.iter().zip(&dz) {
             if d {
-                status[c - 1] = STATUS_COLLINEAR;
+                col_status[c - 1] = STATUS_COLLINEAR;
             }
         }
-        let ex: Vec<usize> = (0..nx).map(exog).filter(|&c| alive(&status, c)).collect();
-        let xc: Vec<usize> = ex.iter().copied().chain((0..ne).map(endog).filter(|&c| alive(&status, c))).collect();
-        let (dx, _) = stage2_collinear(&gm.d, r, &xc, &cs.sd);
+        let ex: Vec<usize> = (0..nx).map(exog).filter(|&c| alive(&col_status, c)).collect();
+        let xc: Vec<usize> = cons_col
+            .into_iter()
+            .filter(|&c| alive(&col_status, c))
+            .chain(ex.iter().copied().filter(|&c| Some(c) != cons_col))
+            .chain((0..ne).map(endog).filter(|&c| alive(&col_status, c)))
+            .collect();
+        let (dx, _) = stage2_collinear(&gm_collin.d, r, &xc, &cs.sd);
         for (&c, &d) in xc.iter().zip(&dx) {
             if d {
-                status[c - 1] = STATUS_COLLINEAR;
+                col_status[c - 1] = STATUS_COLLINEAR;
             }
         }
-        let ex: Vec<usize> = ex.into_iter().filter(|&c| alive(&status, c)).collect();
-        let en: Vec<usize> = (0..ne).map(endog).filter(|&c| alive(&status, c)).collect();
-        let iz: Vec<usize> = (0..ni).map(inst).filter(|&c| alive(&status, c)).collect();
+        let ex: Vec<usize> = ex.into_iter().filter(|&c| alive(&col_status, c)).collect();
+        let en: Vec<usize> = (0..ne).map(endog).filter(|&c| alive(&col_status, c)).collect();
+        let iz: Vec<usize> = (0..ni).map(inst).filter(|&c| alive(&col_status, c)).collect();
+        let cons_kept = cons_col.is_some_and(|c| alive(&col_status, c));
+        let status: Vec<u8> = match cons_col {
+            Some(cc) => col_status.iter().enumerate().filter(|&(idx, _)| idx != cc - 1).map(|(_, &s)| s).collect(),
+            None => col_status,
+        };
         let (k1, k2, l1) = (en.len(), ex.len(), iz.len());
         if l1 < k1 {
             return Err(RfError::Code(
@@ -409,13 +489,67 @@ impl Session {
         let xz = gm.pick(&xcols, &zcols);
         let zz = gm.pick(&zcols, &zcols);
         let zy = gm.pick(&zcols, &[0]);
-        let zzinv = dense::spd_inv(&zz);
-        let xz_zzinv = xz.mul(&zzinv);
-        let mut xpzx = xz_zzinv.mul(&xz.t());
-        xpzx.symmetrize();
-        let xpzx_inv = dense::spd_inv(&xpzx);
-        let xxinv = dense::spd_inv(&xx);
-        let beta = xpzx_inv.mul(&xz_zzinv.mul(&zy)).d;
+        let (zzinv, xpzx_inv, xxinv, beta, bmat) = if let (Some(gm_c), Some(cc)) = (&gm_c_opt, cons_col)
+            && cons_kept
+        {
+            debug_assert_eq!(xcols.last(), Some(&cc));
+            debug_assert_eq!(zcols.last(), Some(&cc));
+            let k_nc = k - 1;
+            let l_nc = l - 1;
+            let xcols_nc = &xcols[..k_nc];
+            let zcols_nc = &zcols[..l_nc];
+            let n_c = w.n_const();
+            let xbar_x: Vec<f64> = xcols_nc.iter().map(|&c| cs.wmean[c]).collect();
+            let zbar_z: Vec<f64> = zcols_nc.iter().map(|&c| cs.wmean[c]).collect();
+            let zzinv_nc = if l_nc > 0 { dense::spd_inv(&gm_c.pick(zcols_nc, zcols_nc)) } else { M::zeros(0, 0) };
+            let xxinv_nc = if k_nc > 0 { dense::spd_inv(&gm_c.pick(xcols_nc, xcols_nc)) } else { M::zeros(0, 0) };
+            let (xpzx_inv_nc, beta_nc, bmat_nc) = if k_nc > 0 {
+                let xz_nc = gm_c.pick(xcols_nc, zcols_nc);
+                let zy_nc = gm_c.pick(zcols_nc, &[0]);
+                let xz_zzinv_nc = xz_nc.mul(&zzinv_nc);
+                let mut xpzx_nc = xz_zzinv_nc.mul(&xz_nc.t());
+                xpzx_nc.symmetrize();
+                let xpzx_inv_nc = dense::spd_inv(&xpzx_nc);
+                let bmat_nc = xpzx_inv_nc.mul(&xz_zzinv_nc);
+                let beta_nc = bmat_nc.mul(&zy_nc).d;
+                (xpzx_inv_nc, beta_nc, bmat_nc)
+            } else {
+                (M::zeros(0, 0), Vec::new(), M::zeros(0, l_nc))
+            };
+            let b0 = cs.wmean[0] - xbar_x.iter().zip(&beta_nc).map(|(m, b)| m * b).sum::<f64>();
+            let mut beta = Vec::with_capacity(k);
+            beta.extend_from_slice(&beta_nc);
+            beta.push(b0);
+            let zzinv = M { r: l, c: l, d: vcov::inv_ext(&zzinv_nc.d, l_nc, &zbar_z, n_c) };
+            let xxinv = M { r: k, c: k, d: vcov::inv_ext(&xxinv_nc.d, k_nc, &xbar_x, n_c) };
+            let xpzx_inv = M { r: k, c: k, d: vcov::inv_ext(&xpzx_inv_nc.d, k_nc, &xbar_x, n_c) };
+            // B_raw = T_X^{-1} * diag(bmat_nc, 1/n_c) * T_Z'^{-1}.
+            let bz: Vec<f64> = (0..k_nc).map(|a| (0..l_nc).map(|j| bmat_nc.at(a, j) * zbar_z[j]).sum()).collect();
+            let mut bmat = M::zeros(k, l);
+            for a in 0..k_nc {
+                for j in 0..l_nc {
+                    bmat.set(a, j, bmat_nc.at(a, j));
+                }
+                bmat.set(a, l_nc, -bz[a]);
+            }
+            for j in 0..l_nc {
+                let row_c = -(0..k_nc).map(|a| xbar_x[a] * bmat_nc.at(a, j)).sum::<f64>();
+                bmat.set(k_nc, j, row_c);
+            }
+            let corner = 1.0 / n_c + (0..k_nc).map(|a| xbar_x[a] * bz[a]).sum::<f64>();
+            bmat.set(k_nc, l_nc, corner);
+            (zzinv, xpzx_inv, xxinv, beta, bmat)
+        } else {
+            let zzinv = dense::spd_inv(&zz);
+            let xz_zzinv = xz.mul(&zzinv);
+            let mut xpzx = xz_zzinv.mul(&xz.t());
+            xpzx.symmetrize();
+            let xpzx_inv = dense::spd_inv(&xpzx);
+            let xxinv = dense::spd_inv(&xx);
+            let bmat = xpzx_inv.mul(&xz_zzinv);
+            let beta = bmat.mul(&zy).d;
+            (zzinv, xpzx_inv, xxinv, beta, bmat)
+        };
         let ce = resid_coef(r, 0, &xcols, &beta);
         let ee = base.cross(&ce).d[0];
         let rss = ee;
@@ -440,29 +574,37 @@ impl Session {
         };
         let passes = Passes { extra, ..base };
 
-        let nk = big_n - k as f64 - sdof;
-        let sigmasq = rss / big_n;
-        let (mut v, omega, rank_s, mut rank_v) = match mode {
+        let nk = big_n - k as f64 - dofm - sdof;
+        let sigmasq = rss / (big_n - dofm);
+        let (mut v, mut v_small, omega, rank_s, mut rank_v) = match mode {
             Mode::Iid => {
-                let v = xpzx_inv.scale(rss / nk);
+                let v_sm = xpzx_inv.scale(rss / nk);
+                let v = if s.iv.small { v_sm.clone() } else { xpzx_inv.scale(sigmasq) };
                 let omega = zz.scale(sigmasq / big_n);
                 let rank_v = v.diag().iter().filter(|d| **d != 0.0).count();
-                (v, omega, dense::ginv(&zz).1, rank_v)
+                (v, v_sm, omega, dense::ginv(&zz).1, rank_v)
             }
             Mode::Robust | Mode::Cluster { .. } | Mode::Ac => {
                 let s_raw = passes.meat(&ce, &sz)?;
-                let bmat = xpzx_inv.mul(&xz_zzinv);
-                let mut v = bmat.mul(&s_raw).mul(&bmat.t());
-                v.symmetrize();
-                let adj = match mode {
-                    Mode::Cluster { g } => (big_n - 1.0) / nk * g / (g - 1.0),
+                let mut v_unadj = bmat.mul(&s_raw).mul(&bmat.t());
+                v_unadj.symmetrize();
+                let small_adj = match mode {
+                    Mode::Cluster { g } => (big_n - 1.0) / (big_n - k as f64 - sdof) * g / (g - 1.0),
                     _ => big_n / nk,
                 };
-                let v = v.scale(adj);
-                let omega = s_raw.scale(1.0 / big_n);
+                let nosmall_adj = match mode {
+                    Mode::Cluster { .. } => 1.0,
+                    _ => big_n / (big_n - dofm),
+                };
+                let v_sm = v_unadj.scale(small_adj);
+                let v = if s.iv.small { v_sm.clone() } else { v_unadj.scale(nosmall_adj) };
+                let omega = match mode {
+                    Mode::Cluster { .. } => s_raw.scale(1.0 / big_n),
+                    _ => s_raw.scale(1.0 / (big_n - dofm)),
+                };
                 let rank_s = dense::ginv(&omega).1;
                 let rank_v = dense::ginv(&v).1;
-                (v, omega, rank_s, rank_v)
+                (v, v_sm, omega, rank_s, rank_v)
             }
         };
         // CRV3: the jackknife replaces V (S and the diagnostics stay cluster-robust).
@@ -470,16 +612,17 @@ impl Session {
             let col = |c: usize| cols[c].as_slice();
             let fe: Vec<FeCols> =
                 self.terms.iter().map(|t| FeCols { codes: &t.codes, g: t.g, intercept: t.intercept, slopes: t.slopes.iter().map(Vec::as_slice).collect() }).collect();
-            let icpt = self.terms.is_empty();
-            // beta is ordered [endog, exog]; the refits use [constant?, exog, endog].
+            let icpt = self.terms.is_empty() && (!no_absorb_nocons);
+            let ex_nocl: Vec<usize> = ex.iter().copied().filter(|&c| Some(c) != cons_col).collect();
+            // beta is ordered [endog, exog, _cons?]; the refits use [constant?, exog, endog].
             let b_of = |c: usize| beta[xcols.iter().position(|&x| x == c).expect("regressor")];
-            let b0 = cs.wmean[0] - xcols.iter().zip(&beta).map(|(&c, b)| cs.wmean[c] * b).sum::<f64>();
-            let jk_beta: Vec<f64> = icpt.then_some(b0).into_iter().chain(ex.iter().map(|&c| b_of(c))).chain(en.iter().map(|&c| b_of(c))).collect();
+            let b0 = cs.wmean[0] - xcols.iter().zip(&beta).filter(|&(&c, _)| Some(c) != cons_col).map(|(&c, b)| cs.wmean[c] * b).sum::<f64>();
+            let jk_beta: Vec<f64> = icpt.then_some(b0).into_iter().chain(ex_nocl.iter().map(|&c| b_of(c))).chain(en.iter().map(|&c| b_of(c))).collect();
             let p = JkProblem {
                 model: JkModel::Linear,
                 n,
                 y: col(0),
-                x: ex.iter().map(|&c| col(c)).collect(),
+                x: ex_nocl.iter().map(|&c| col(c)).collect(),
                 endog: en.iter().map(|&c| col(c)).collect(),
                 inst: iz.iter().map(|&c| col(c)).collect(),
                 intercept: icpt,
@@ -494,17 +637,30 @@ impl Session {
                 collin_tol: crate::fit::FitSpec::default().collin_tol,
             };
             let skip = usize::from(icpt);
+            let k2_nc = ex_nocl.len();
             let augment = |_: &[u32], _: usize, betas: Vec<f64>| -> Vec<f64> {
-                betas.chunks_exact(skip + k).flat_map(|b| b[skip + k2..].iter().chain(&b[skip..skip + k2]).copied().collect::<Vec<_>>()).collect()
+                betas.chunks_exact(skip + k1 + k2_nc).flat_map(|b| {
+                    let mut out: Vec<f64> = b[skip + k2_nc..].iter().chain(&b[skip..skip + k2_nc]).copied().collect();
+                    if cons_kept {
+                        out.push(b[0]);
+                    }
+                    out
+                }).collect()
             };
-            let meat = stata_vce::crv3_meat(&p, &self.clusters, &beta, &augment, ctx, pool)?;
-            let q = (big_n - 1.0) / nk * g_min / (g_min - 1.0);
+            let mut b_crv3: Vec<f64> = (0..k1 + k2_nc).map(|i| beta[i]).collect();
+            if cons_kept {
+                b_crv3.push(b_of(cons_col.expect("cons")));
+            }
+            let meat = stata_vce::crv3_meat(&p, &self.clusters, &b_crv3, &augment, ctx, pool)?;
+            let q = if s.iv.small { (big_n - 1.0) / (big_n - k as f64 - sdof) * g_min / (g_min - 1.0) } else { 1.0 };
             v = M { r: k, c: k, d: meat.iter().map(|x| q * x).collect() };
+            v_small = M { r: k, c: k, d: meat.iter().map(|x| ((big_n - 1.0) / (big_n - k as f64 - sdof) * g_min / (g_min - 1.0)) * x).collect() };
             rank_v = dense::ginv(&v).1;
         }
         // Stata posts V only when it is exactly symmetric.
         v.symmetrize();
-        let wmat = zzinv.scale(big_n * big_n / rss);
+        v_small.symmetrize();
+        let wmat = zzinv.scale(big_n * (big_n - dofm) / rss);
 
         // Sargan (iid) / Hansen J from two-step efficient GMM residuals (s_gmm1s, s_iegmm).
         let jdf = l as f64 - k as f64;
@@ -513,7 +669,7 @@ impl Session {
             match mode {
                 Mode::Iid => {
                     let ze = zy.sub(&zx.mul(&M::col(&beta)));
-                    big_n * zzinv.quad(&ze.d) / rss
+                    (big_n - dofm) * zzinv.quad(&ze.d) / rss
                 }
                 _ => {
                     let oinv = dense::spd_inv(&omega);
@@ -532,57 +688,71 @@ impl Session {
             j = f64::NAN;
         }
 
-        // Wald F on all coefficients (ivreg2 `test` on the posted V; `small` -> F = chi^2/K).
-        let df_r = match mode {
+        // Wald F on all non-constant coefficients (`test`: small -> F = chi^2/fdf1 using v_small).
+        let cons_f = if cons_kept { 1.0 } else { 0.0 };
+        let k_nc = k - usize::from(cons_kept);
+        let fdf1 = k_nc as f64;
+        let fdf2 = match mode {
             Mode::Cluster { g } => g - 1.0,
             _ => nk,
         };
-        let f_stat = if k > 0 {
-            let (vinv, _) = dense::ginv(&v);
-            vinv.quad(&beta) / k as f64
+        let df_r = if s.iv.small { fdf2 } else { f64::NAN };
+        let f_stat = if k_nc > 0 {
+            let non_cons: Vec<usize> = (0..k).filter(|&i| Some(xcols[i]) != cons_col).collect();
+            let v_nc = v_small.pick(&non_cons, &non_cons);
+            let b_nc: Vec<f64> = non_cons.iter().map(|&i| beta[i]).collect();
+            let (vinv, _) = dense::ginv(&v_nc);
+            vinv.quad(&b_nc) / fdf1
         } else {
             f64::NAN
         };
 
-        // Fit statistics (ivreghdfe l.1242-1305 with `noconstant`).
+        // Fit statistics.
         let yy = gm.at(0, 0);
         let ym = ysum / big_n;
         let yyc = yy - big_n * ym * ym;
         let r2u = 1.0 - rss / yy;
         let r2c = 1.0 - rss / yyc;
+        let use_centered_r2 = self.terms.is_empty() && !s.noconstant;
+        let r2_main = if use_centered_r2 { r2c } else { r2u };
+        let mss = if use_centered_r2 { yyc - rss } else { yy - rss };
+        let r2_a = 1.0 - (1.0 - r2_main) * (big_n - if use_centered_r2 { 1.0 } else { 0.0 }) / nk;
+        let rmse = if s.iv.small { (rss / nk).sqrt() } else { sigmasq.sqrt() };
+        let df_m = if skip_absorber { fdf1 + sdof } else { k as f64 };
+        let partial_ct = if skip_absorber { sdof } else { sdof };
         let ll = -0.5 * (big_n * (2.0 * std::f64::consts::PI).ln() + big_n * (rss / big_n).ln() + big_n);
         ctx.check()?;
 
-        let model = Model { g: &gm, en: &en, ex: &ex, iz: &iz, n: big_n, sdof, mode };
+        let model = Model { g: &gm, en: &en, ex: &ex, iz: &iz, n: big_n, sdof, dofm, mode };
         let mut res = EstResult { status, ..EstResult::default() };
         let scal = |res: &mut EstResult, name: &str, v: f64| res.set_scalar(name, missing_if_nonfinite(v));
         scal(&mut res, "N", big_n);
         scal(&mut res, "df_r", df_r);
-        scal(&mut res, "df_m", k as f64);
+        scal(&mut res, "df_m", df_m);
         scal(&mut res, "sdofminus", sdof);
-        scal(&mut res, "dofminus", 0.0);
+        scal(&mut res, "dofminus", dofm);
         scal(&mut res, "center", 0.0);
-        scal(&mut res, "partial_ct", sdof);
-        scal(&mut res, "partialcons", sdof);
-        scal(&mut res, "cons", 0.0);
+        scal(&mut res, "partial_ct", partial_ct);
+        scal(&mut res, "partialcons", if !self.terms.is_empty() || !skip_absorber { sdof } else { 0.0 });
+        scal(&mut res, "cons", cons_f);
         scal(&mut res, "nocollin", 0.0);
         scal(&mut res, "inexog_ct", k2 as f64);
         scal(&mut res, "exexog_ct", l1 as f64);
         scal(&mut res, "endog_ct", k1 as f64);
-        scal(&mut res, "r2", r2u);
+        scal(&mut res, "r2", r2_main);
         scal(&mut res, "r2u", r2u);
         scal(&mut res, "r2c", r2c);
-        scal(&mut res, "r2_a", 1.0 - (1.0 - r2u) * big_n / nk);
-        scal(&mut res, "rmse", (rss / nk).sqrt());
+        scal(&mut res, "r2_a", r2_a);
+        scal(&mut res, "rmse", rmse);
         scal(&mut res, "rss", rss);
-        scal(&mut res, "mss", yy - rss);
+        scal(&mut res, "mss", mss);
         scal(&mut res, "yy", yy);
         scal(&mut res, "yyc", yyc);
         scal(&mut res, "ll", ll);
         scal(&mut res, "F", f_stat);
-        scal(&mut res, "Fp", dist::ftail(k as f64, df_r, f_stat));
-        scal(&mut res, "Fdf1", k as f64);
-        scal(&mut res, "Fdf2", df_r);
+        scal(&mut res, "Fp", dist::ftail(fdf1, fdf2, f_stat));
+        scal(&mut res, "Fdf1", fdf1);
+        scal(&mut res, "Fdf2", fdf2);
         scal(&mut res, "condxx", dense::cond_sym(&xx));
         scal(&mut res, "condzz", dense::cond_sym(&zz));
         scal(&mut res, "rankxx", k as f64);
@@ -665,8 +835,20 @@ impl Session {
         // First-stage statistics and regressions, in sent coordinates: e(first) is 21xnendog with
         // missing columns for dropped endogenous regressors; bfirst#/Vfirst#/sfirst# exist for
         // the kept ones only (# = position among the endogenous regressors sent), over Z sent.
-        let pos_x: Vec<usize> = xcols.iter().map(|&c| if c > nx { c - 1 - nx } else { ne + c - 1 }).collect();
-        let pos_z: Vec<usize> = zcols.iter().map(|&c| if c > nx { c - 1 - nx - ne } else { ni + c - 1 }).collect();
+        let pos_x: Vec<usize> = xcols.iter().map(|&c| {
+            if c > nx {
+                c - 1 - nx
+            } else {
+                ne + c - 1
+            }
+        }).collect();
+        let pos_z: Vec<usize> = zcols.iter().map(|&c| {
+            if c > nx {
+                c - 1 - nx - ne
+            } else {
+                ni + c - 1
+            }
+        }).collect();
         if k1 > 0 && (s.iv.first || s.iv.ffirst) {
             let fs = first::first_stage(&model, &passes, &xxinv, &xpzx_inv)?;
             let mut fm = vec![f64::NAN; 21 * ne];
@@ -703,7 +885,7 @@ impl Session {
             }
         }
 
-        // e(b), e(V) over every regressor sent (endog then exog); omitted entries are 0.
+        // e(b), e(V) over every regressor sent (endog then exog, plus `_cons` when `no_absorb_const`); omitted entries are 0.
         let kall = ne + nx;
         let mut b_out = vec![0.0; kall];
         for (a, &p) in pos_x.iter().enumerate() {
@@ -711,6 +893,7 @@ impl Session {
         }
         res.matrices.push(NamedMat { name: "b".into(), rows: 1, cols: kall, data: b_out });
         res.matrices.push(NamedMat { name: "V".into(), rows: kall, cols: kall, data: scatter_sym(&v, &pos_x, kall) });
+        res.matrices.push(NamedMat { name: "bread".into(), rows: kall, cols: kall, data: scatter_sym(&xpzx_inv, &pos_x, kall) });
         // e(S), e(W) over every instrument sent [inst, exog]; omitted entries are 0.
         let lz = ni + nx;
         res.matrices.push(NamedMat { name: "S".into(), rows: lz, cols: lz, data: scatter_sym(&omega, &pos_z, lz) });

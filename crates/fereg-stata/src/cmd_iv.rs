@@ -23,7 +23,7 @@ pub fn iv(a: &Args) -> Result<(), RfError> {
     let k = est::keys(a, &[("b", "b"), ("V", "V"), ("doft", "dof_table"), ("S", "S"), ("W", "W")])?;
     let lay = Layout { nx: a.num_req("nx")?, nendog: a.num_req("nendog")?, ninst: a.num_req("ninst")? };
     let mut spec = est::spec(a, &k.outputs)?;
-    spec.iv = IvOptions { first: a.flag("first", false)?, ffirst: a.flag("ffirst", false)? };
+    spec.iv = IvOptions { first: a.flag("first", false)?, ffirst: a.flag("ffirst", false)?, ..IvOptions::default() };
     let optional: Vec<(String, &str)> =
         OPTIONAL.iter().filter_map(|(key, name)| a.str_opt(key).map(|s| (s.to_string(), *name))).collect();
     let first_eq: Vec<(String, &str)> =

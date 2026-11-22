@@ -59,6 +59,15 @@ pub(crate) struct IrlsCfg {
     /// fixest / pyfixest collinearity rule, applied in the first iteration (`Ppmlhdfe`: the
     /// columns were checked before IRLS).
     pub collinear: GlmCollinear,
+    /// Partial out constant/fixed effects via the absorber (`false` only for `noabsorb` + `noconstant`).
+    pub partial_out: bool,
+    /// Stata `ml` convergence mode (`Some(ltol)`): skips mu censoring, disables fast normal
+    /// equations, and stops on `|ll_k - ll_{k-1}| / (|ll_k| + 1) <= ltol` with tiny deviance step.
+    pub ml_ltol: Option<f64>,
+    /// Additive constant to turn `-0.5 * dev_raw` into Stata's log-likelihood (`0` for logit).
+    pub ml_ll_const: f64,
+    /// Record `dev0` at the initial `mu` before iteration 1 (used by Stata `logit`).
+    pub init_mean: bool,
 }
 
 pub(crate) struct IrlsOut {
@@ -66,6 +75,8 @@ pub(crate) struct IrlsOut {
     pub subiter: usize,
     /// Deviance on the standardized scale.
     pub deviance: f64,
+    /// Original-scale deviance trace across iterations (`dev * sd_y`; starts at `dev0 * sd_y` when `init_mean`).
+    pub dev_trace: Vec<f64>,
     /// Residualized [z, X] block of the final iteration (row-major, R = 1 + k).
     pub block: Vec<f64>,
     /// IRLS weights of the final iteration (true weight * mu or true weight * mu(1 - mu)).
@@ -366,7 +377,7 @@ pub(crate) fn irls(
     let n = d.n;
     let k = d.k;
     let r = 1 + k;
-    let do_censor = fam == Family::Poisson && !c.fixest;
+    let do_censor = fam == Family::Poisson && !c.fixest && c.ml_ltol.is_none();
     if n <= CHUNK || pool.threads() <= 1 {
         if do_censor {
             censor_mu(mu, &d.y);
@@ -400,7 +411,7 @@ pub(crate) fn irls(
     let mut eps = f64::NAN;
     let mut dev = f64::NAN;
     let mut ok = 0usize;
-    let need_old_eta = c.fixest || fam == Family::Logit;
+    let need_old_eta = c.fixest || fam == Family::Logit || c.ml_ltol.is_some();
     let mut sep = if c.check_sep { vec![false; n] } else { Vec::new() };
     let mut n_sep = 0usize;
     let mut subiter = 0usize;
@@ -430,9 +441,12 @@ pub(crate) fn irls(
             acc
         });
         finish_deviance(parts.iter().fold(0.0, |a, p| a + p), d.n)
+    } else if c.init_mean {
+        update_mu_deviance(fam, d, eta, None, &lny, mu, pool)
     } else {
         f64::NAN
     };
+    let mut dev_trace = if c.init_mean { vec![dev0 * c.sd_y] } else { Vec::new() };
     let mut iter = 0usize;
     loop {
         iter += 1;
@@ -444,7 +458,7 @@ pub(crate) fn irls(
         let predicted = predict_eps(&mut hist, eps);
         // ppmlhdfe `iter_fast_solver` (normal equations while far from convergence).
         // (Mata: a missing prediction compares as +inf, so it allows the fast solver.)
-        let fast = k > 0 && tol_in > c.tol * 11.0 && (predicted.is_nan() || predicted > c.tol);
+        let fast = k > 0 && c.ml_ltol.is_none() && tol_in > c.tol * 11.0 && (predicted.is_nan() || predicted > c.tol);
 
         // (a) weights, (b) working variable, written with X into the [z, X] block (values within
         // ztol of 0 edited to 0, Mata `_edittozerotol`). Fixed chunks of plain loops.
@@ -478,16 +492,21 @@ pub(crate) fn irls(
             });
         }
         crate::solve::log_phase(ctx, &mut t_phase, "irls: weights, working var");
-        abs.set_weights(Some(&w), pool, ctx)?;
-        crate::solve::log_phase(ctx, &mut t_phase, "irls: set weights");
+        let (info_exact, info_iters, info_coefs) = if c.partial_out {
+            abs.set_weights(Some(&w), pool, ctx)?;
+            crate::solve::log_phase(ctx, &mut t_phase, "irls: set weights");
 
-        // (c)-(d) residualize [z, X].
-        let opts = SolveOpts { tol: tol_in, maxiter: c.inner_maxiter, want_coefs: true };
-        let info = abs.residualize(&mut block, r, &opts, warm.as_ref(), pool, ctx)?;
-        edit_to_zero(&mut block, ztol, pool);
-        crate::solve::log_phase(ctx, &mut t_phase, "irls: residualize");
-        subiter += info.iterations;
-        warm = info.coefs;
+            // (c)-(d) residualize [z, X].
+            let opts = SolveOpts { tol: tol_in, maxiter: c.inner_maxiter, want_coefs: true };
+            let info = abs.residualize(&mut block, r, &opts, warm.as_ref(), pool, ctx)?;
+            edit_to_zero(&mut block, ztol, pool);
+            crate::solve::log_phase(ctx, &mut t_phase, "irls: residualize");
+            subiter += info.iterations;
+            (info.exact, info.iterations, info.coefs)
+        } else {
+            (true, 0, None)
+        };
+        warm = info_coefs;
         let mut cached_wgram: Option<Vec<f64>> = None;
         // The first iteration decides the fixest / pyfixest collinearity. The outcome on the
         // residualized X stands unless the solve error could change it; then the block is
@@ -496,7 +515,7 @@ pub(crate) fn irls(
         if let Some((ctol, weighted)) = rule.filter(|_| iter == 1 && k > 0) {
             let wr = weighted.then_some(w.as_slice());
             let (raw, g0) = collin_gram(&block, r, wr, &d.sd_x, c.sd_y, pool);
-            let certain = if info.exact {
+            let certain = if info_exact {
                 Some(chol_collin(&raw, k, ctol).0)
             } else {
                 // Errors in the metric of `raw`; the unweighted norm of a W-norm error is at most
@@ -526,7 +545,7 @@ pub(crate) fn irls(
             xcols = (1..r).filter(|&j| !excluded[j - 1]).collect();
         }
 
-        let beta = if k == 0 {
+        let mut beta = if k == 0 {
             Vec::new()
         } else if xcols.len() < k {
             // Excluded columns: coefficient 0, the kept ones as below.
@@ -667,7 +686,7 @@ pub(crate) fn irls(
         crate::solve::log_phase(ctx, &mut t_phase, "irls: eta, separation");
         // (f) mu, deviance.
         let sep_ref = c.check_sep.then_some(sep.as_slice());
-        let old_dev = if c.fixest && iter == 1 { dev0 } else { dev };
+        let old_dev = if (c.fixest || c.init_mean) && iter == 1 { dev0 } else { dev };
         dev = if fused { finish_deviance(fused_sum, d.n) } else { update_mu_deviance(fam, d, eta, sep_ref, &lny, mu, pool) };
         let mut halved = false;
         if c.fixest {
@@ -686,6 +705,37 @@ pub(crate) fn irls(
                 }
                 halved = true;
             }
+        } else if c.ml_ltol.is_some() && (c.init_mean || iter > 1) {
+            if dev.is_finite() && old_dev.is_finite() && dev <= old_dev {
+                let d_eta: Vec<f64> = eta.iter().zip(&old_eta).map(|(e, o)| e - o).collect();
+                let mut cand_eta = vec![0.0; n];
+                let mut cand_mu = vec![0.0; n];
+                let mut inc = 0.125f64;
+                loop {
+                    for i in 0..n {
+                        cand_eta[i] = eta[i] + inc * d_eta[i];
+                    }
+                    let cdev = update_mu_deviance(fam, d, &cand_eta, None, &lny, &mut cand_mu, pool);
+                    if cdev.is_finite() && cdev < dev {
+                        eta.copy_from_slice(&cand_eta);
+                        mu.copy_from_slice(&cand_mu);
+                        dev = cdev;
+                        inc *= 2.0;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                let mut h = 0;
+                while h < MAX_HALVINGS && (!dev.is_finite() || dev > old_dev) {
+                    for i in 0..n {
+                        eta[i] = 0.5 * (eta[i] + old_eta[i]);
+                    }
+                    dev = update_mu_deviance(fam, d, eta, None, &lny, mu, pool);
+                    h += 1;
+                    halved = true;
+                }
+            }
         } else if fam == Family::Logit && iter > 1 {
             let mut h = 0;
             let worse = |dev: f64| dev.is_nan() || dev > old_dev + 1e-9 * old_dev.abs().max(1.0);
@@ -696,12 +746,81 @@ pub(crate) fn irls(
                 halved = true;
             }
         }
+        dev_trace.push(dev * c.sd_y);
         crate::solve::log_phase(ctx, &mut t_phase, "irls: mu, deviance");
         let mut delta = old_dev - dev;
         if !delta.is_nan() && dev < 0.1 * delta {
             delta = dev;
         }
-        if iter > 1 || c.fixest {
+        if let Some(ltol) = c.ml_ltol {
+            if iter > 1 {
+                let denom = dev.min(old_dev).max(0.1);
+                eps = delta.abs() / denom;
+            }
+            if (c.init_mean || iter > 1) && !halved && dev.is_finite() && old_dev.is_finite() {
+                let ll_cur = c.ml_ll_const - 0.5 * dev * c.sd_y;
+                let ll_prev = c.ml_ll_const - 0.5 * old_dev * c.sd_y;
+                let vdiff = (ll_cur - ll_prev).abs() / (ll_cur.abs() + 1.0);
+                if vdiff <= ltol {
+                    let mut w_new = vec![0.0; n];
+                    let mut z_score = vec![0.0; n];
+                    let mut b_check = vec![0.0; n * r];
+                    let mut wsum_new = 0.0;
+                    let mut wz_sum = 0.0;
+                    for i in 0..n {
+                        let iw = family::irls_weight(fam, mu[i]);
+                        let wn = tw.map_or(1.0, |t| t[i]) * iw;
+                        let zs = (d.y[i] - mu[i]) / iw;
+                        w_new[i] = wn;
+                        z_score[i] = zs;
+                        wsum_new += wn;
+                        wz_sum += wn * zs;
+                        b_check[i * r] = zs;
+                        b_check[i * r + 1..(i + 1) * r].copy_from_slice(&d.x[i * k..(i + 1) * k]);
+                    }
+                    let d0 = if c.partial_out {
+                        abs.set_weights(Some(&w_new), pool, ctx)?;
+                        let sopts = SolveOpts { tol: c.highest, maxiter: c.inner_maxiter, want_coefs: false };
+                        abs.residualize(&mut b_check, r, &sopts, None, pool, ctx)?;
+                        edit_to_zero(&mut b_check, ztol, pool);
+                        wz_sum / wsum_new
+                    } else {
+                        0.0
+                    };
+                    let db = if k == 0 {
+                        Vec::new()
+                    } else {
+                        wls::qr_coefs(&b_check, r, 0, &xcols, Some(&w_new), pool)
+                    };
+                    let mut x_db_sq = 0.0;
+                    for i in 0..n {
+                        let row = &b_check[i * r..];
+                        let fit: f64 = db.iter().zip(&row[1..]).map(|(b, x)| b * x).sum();
+                        x_db_sq += w_new[i] * fit * fit;
+                    }
+                    let nr = c.sd_y * (if c.partial_out { wsum_new * d0 * d0 } else { 0.0 } + x_db_sq);
+                    if nr < 1e-5 {
+                        let off_ref = d.off.as_deref();
+                        let emean = if c.partial_out {
+                            let s: f64 = (0..n).map(|i| w_new[i] * (eta[i] - off_ref.map_or(0.0, |o| o[i]))).sum();
+                            s / wsum_new
+                        } else {
+                            0.0
+                        };
+                        for i in 0..n {
+                            b_check[i * r] = (eta[i] - off_ref.map_or(0.0, |o| o[i])) - emean;
+                        }
+                        if k > 0 {
+                            beta = wls::qr_coefs(&b_check, r, 0, &xcols, Some(&w_new), pool);
+                        }
+                        w = w_new;
+                        block = b_check;
+                        resid = z_score;
+                        ok += 1;
+                    }
+                }
+            }
+        } else if iter > 1 || c.fixest {
             if iter > 1 {
                 let denom = dev.min(old_dev).max(0.1);
                 eps = delta.abs() / denom;
@@ -712,7 +831,7 @@ pub(crate) fn irls(
                 // iteration's FE solve must have been exact or at the final inner tolerance, so
                 // the reported beta is as accurate as a fixest fit at fixef.tol = itol.
                 let crit = if halved { f64::INFINITY } else { ((old_dev - dev) * c.sd_y).abs() / (0.1 + (dev * c.sd_y).abs()) };
-                crit < c.tol && (info.exact || c.exact || tol_in <= 1.1 * c.highest)
+                crit < c.tol && (info_exact || c.exact || tol_in <= 1.1 * c.highest)
             } else {
                 // Exact inner solves (SolveInfo::exact) must not shortcut this: the iterations
                 // ppmlhdfe spends tightening tol_in to `highest` also refine beta beyond eps < tol
@@ -743,7 +862,7 @@ pub(crate) fn irls(
                 "{{txt}}Iteration {iter}:{{col 16}}deviance = {{res}}{:<11}{{col 39}}{{txt}}eps = {{res}}{:<9}{{txt}}{{col 55}}iters = {{res}}{}{{col 68}}{{txt}}tol ={{res}}{:>8}{{col 82}}{{txt}} min(eta) = {{res}}{:>6.2}  {{txt}}{flags}",
                 fmt_e(dev * c.sd_y, 4),
                 fmt_e(eps, 2),
-                info.iterations,
+                info_iters,
                 fmt_e(tol_in, 1),
                 min_eta
             );
@@ -758,6 +877,7 @@ pub(crate) fn irls(
                 iter,
                 subiter,
                 deviance: dev,
+                dev_trace,
                 block,
                 w,
                 beta,

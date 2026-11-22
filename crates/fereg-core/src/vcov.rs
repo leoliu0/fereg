@@ -64,6 +64,60 @@ pub(crate) fn invsym(a: &[f64], k: usize, tol: f64) -> (Vec<f64>, Vec<bool>) {
     (m, dropped)
 }
 
+/// Stata `invsym(A)` without a fixed order: sweeps unvisited pivots in decreasing order of
+/// remaining diagonal (first index on ties). A pivot `<= tol * orig_diag` (or `<= 0` or `NaN`)
+/// is dropped and its row and column zeroed.
+pub(crate) fn invsym_greedy(a: &[f64], k: usize, tol: f64) -> (Vec<f64>, Vec<bool>) {
+    assert_eq!(a.len(), k * k);
+    let mut m = a.to_vec();
+    let diag: Vec<f64> = (0..k).map(|i| a[i * k + i]).collect();
+    let mut visited = vec![false; k];
+    let mut dropped = vec![false; k];
+    for _ in 0..k {
+        let mut p = usize::MAX;
+        for i in 0..k {
+            if !visited[i] && (p == usize::MAX || m[i * k + i] > m[p * k + p]) {
+                p = i;
+            }
+        }
+        visited[p] = true;
+        let d = m[p * k + p];
+        if d.is_nan() || d <= tol * diag[p] || d <= 0.0 {
+            dropped[p] = true;
+            for j in 0..k {
+                m[p * k + j] = 0.0;
+                m[j * k + p] = 0.0;
+            }
+            continue;
+        }
+        for j in 0..k {
+            m[p * k + j] /= d;
+        }
+        for i in 0..k {
+            if i == p {
+                continue;
+            }
+            let b = m[i * k + p];
+            if b == 0.0 {
+                continue;
+            }
+            for j in 0..k {
+                m[i * k + j] -= b * m[p * k + j];
+            }
+            m[i * k + p] = -b / d;
+        }
+        m[p * k + p] = 1.0 / d;
+    }
+    for i in 0..k {
+        for j in 0..i {
+            let v = 0.5 * (m[i * k + j] + m[j * k + i]);
+            m[i * k + j] = v;
+            m[j * k + i] = v;
+        }
+    }
+    (m, dropped)
+}
+
 /// fixest `cpp_cholesky(XtX, tol)` (lm_related.cpp): Cholesky in column order where column j is
 /// excluded when its pivot X_jj - sum_{kept i<j} R_ij^2 is below `tol` (absolute, unscaled).
 /// Returns the exclusion flags and the inverse of the kept block (kept order, row-major).

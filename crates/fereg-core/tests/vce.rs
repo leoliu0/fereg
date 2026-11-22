@@ -218,7 +218,7 @@ fn run(m: &Model, kind: AbsorberKind, threads: usize) -> Result<(Session, EstRes
     let refs: Vec<&[f64]> = cols.iter().map(Vec::as_slice).collect();
     let rows = s.gather(&refs, &ctx)?;
     let lay = Layout { nx: m.exog.len(), nendog: m.endog.len(), ninst: m.inst.len() };
-    let spec = Spec { tol: 1e-14, maxiter: 100_000, iv: IvOptions { first: false, ffirst: false }, ..Spec::default() };
+    let spec = Spec { tol: 1e-14, maxiter: 100_000, iv: IvOptions { first: false, ffirst: false, ..IvOptions::default() }, ..Spec::default() };
     let res = match m.est {
         Est::Ols => s.ols(rows, &lay, &spec, &ctx)?,
         Est::Iv => s.iv(rows, &lay, &spec, &ctx)?,

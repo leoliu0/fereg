@@ -253,10 +253,31 @@ impl Layout {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IvOptions {
     pub first: bool,
     pub ffirst: bool,
+    /// Small-sample df adjustment (`N / (N - K)` or cluster/absorbed df). Defaults to `true`.
+    pub small: bool,
+    /// Include the absorbed/constant term in the reported parameter vector when requested.
+    pub report_constant: bool,
+    /// Explicit small-sample DoF adjustment subtracted from `N - K` (`ivreg2`'s `sdofminus`).
+    pub sdofminus: Option<f64>,
+    /// Large-sample DoF adjustment subtracted from `N` (`ivreg2`'s `dofminus`, e.g. for absorbed FE).
+    pub dofminus: f64,
+}
+
+impl Default for IvOptions {
+    fn default() -> Self {
+        Self {
+            first: false,
+            ffirst: false,
+            small: true,
+            report_constant: false,
+            sdofminus: None,
+            dofminus: 0.0,
+        }
+    }
 }
 
 /// Estimation options shared by OLS and IV (GLM adds [`GlmOptions`]).

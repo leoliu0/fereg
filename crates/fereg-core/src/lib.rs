@@ -18,6 +18,7 @@ pub mod conley;
 mod cores;
 pub mod crv3;
 pub mod dof;
+pub mod engine;
 pub mod error;
 pub mod factor;
 pub mod fe_recovery;

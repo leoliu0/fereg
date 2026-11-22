@@ -194,7 +194,7 @@ fn run(m: &Model, kind: AbsorberKind, threads: usize) -> (Session, Result<EstRes
 }
 
 fn spec() -> Spec {
-    Spec { tol: 1e-14, iv: IvOptions { first: true, ffirst: true }, ..Spec::default() }
+    Spec { tol: 1e-14, iv: IvOptions { first: true, ffirst: true, ..IvOptions::default() }, ..Spec::default() }
 }
 
 // ---------------------------------------------------------------------------------------------

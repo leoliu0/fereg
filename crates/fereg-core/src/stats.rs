@@ -80,15 +80,30 @@ fn col_stats_chunk_inner<const R: usize, const W: bool>(rows: &[f64], r: usize, 
     let (wsx_s, rest) = rest.split_at_mut(r);
     let (wmean_s, rest) = rest.split_at_mut(r);
     let (wm2_s, wsumsq_s) = rest.split_at_mut(r);
+    if range.is_empty() {
+        return Part {
+            n: 0.0,
+            mean: vec![0.0; r],
+            m2: vec![0.0; r],
+            sumsq: vec![0.0; r],
+            w: 0.0,
+            wmean: vec![0.0; r],
+            wm2: vec![0.0; r],
+            wsumsq: vec![0.0; r],
+        };
+    }
+    let base = &rows[..r];
     if !W {
         for row in rows.chunks_exact(r) {
             for j in 0..r {
                 let x = row[j];
-                mean_s[j] += x;
+                mean_s[j] += x - base[j];
                 sumsq_s[j] += x * x;
             }
         }
-        mean_s.iter_mut().for_each(|v| *v /= cn);
+        for j in 0..r {
+            mean_s[j] = base[j] + mean_s[j] / cn;
+        }
         for row in rows.chunks_exact(r) {
             for j in 0..r {
                 let d = row[j] - mean_s[j];
@@ -104,15 +119,16 @@ fn col_stats_chunk_inner<const R: usize, const W: bool>(rows: &[f64], r: usize, 
         pw += wi;
         for j in 0..r {
             let x = row[j];
-            mean_s[j] += x;
+            let dx = x - base[j];
+            mean_s[j] += dx;
             sumsq_s[j] += x * x;
-            wsx_s[j] += wi * x;
+            wsx_s[j] += wi * dx;
             wsumsq_s[j] += wi * x * x;
         }
     }
     for j in 0..r {
-        mean_s[j] /= cn;
-        wmean_s[j] = wsx_s[j] / pw;
+        mean_s[j] = base[j] + mean_s[j] / cn;
+        wmean_s[j] = base[j] + wsx_s[j] / pw;
     }
     for (row, &wi) in rows.chunks_exact(r).zip(w) {
         for j in 0..r {

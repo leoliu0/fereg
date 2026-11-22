@@ -579,7 +579,7 @@ impl Session {
         let mut f_stat = f64::NAN;
         if k > 0 {
             let vkk = sub_block(&v_s, msize, &(0..k).collect::<Vec<_>>());
-            let (inv_v, dropped_v) = vcov::invsym(&vkk, k, INVSYM_TOL);
+            let (inv_v, dropped_v) = vcov::invsym_greedy(&vkk, k, 1e-9);
             if dropped_v.iter().any(|&d| d) {
                 notes.push("warning: missing F statistic; dropped variables due to collinearity or too few clusters".to_string());
             } else {

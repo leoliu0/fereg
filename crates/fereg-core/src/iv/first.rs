@@ -43,11 +43,14 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     let ycols: Vec<usize> = std::iter::once(0).chain(m.en.iter().copied()).collect();
     let sz = selector(r, &zcols);
     let robust = m.mode != Mode::Iid;
-    let nl = n - l as f64 - m.sdof;
+    let nl = n - l as f64 - m.sdof - m.dofm;
+    let nl_clus = n - l as f64 - m.sdof;
+    let non_cluster = !matches!(m.mode, Mode::Cluster { .. });
+    let n_eff = if non_cluster { n - m.dofm } else { n };
     let (fdf_r, scale_f) = match m.mode {
         // F = Wald/N*df_r/df, or Wald/(N-1)*(N-L-sdof)*(G-1)/G/df when clustered.
-        Mode::Cluster { g } => (g - 1.0, (nl) * (g - 1.0) / g / (n - 1.0)),
-        _ => (nl, nl / n),
+        Mode::Cluster { g } => (g - 1.0, nl_clus * (g - 1.0) / g / (n - 1.0)),
+        _ => (nl, nl / n_eff),
     };
 
     // Reduced form (col 0) and first stages: bz = (Z'Z)^-1 Z'[y, X1].
@@ -64,11 +67,14 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
         }
     }
     let ee = passes.cross(&call);
-    let sigmasqall = ee.scale(1.0 / n);
+    let sigmasqall = ee.scale(1.0 / n_eff);
     let rmseall: Vec<f64> = ee.diag().iter().map(|v| (v / nl).sqrt()).collect();
-    // Vr: (I (x) (Z'Z)^-1)*S*(I (x) (Z'Z)^-1), S the (robust) meat of eall (x) z; iid: (ee/N) (x) (Z'Z)^-1.
+    // Vr: (I (x) (Z'Z)^-1)*S*(I (x) (Z'Z)^-1), S the (robust) meat of eall (x) z; iid: (ee/n_eff) (x) (Z'Z)^-1.
     let vr = if robust {
-        let s = passes.meat(&call, &sz)?;
+        let mut s = passes.meat(&call, &sz)?;
+        if non_cluster && m.dofm != 0.0 {
+            s = s.scale(n / n_eff);
+        }
         let kz = M::eye(m1).kron(&zzinv);
         let mut v = kz.mul(&s).mul(&kz);
         v.symmetrize();
@@ -83,8 +89,8 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     let archi2 = wald(&rb, &vblock(0, l1));
     let ardf = l1 as f64;
     let (ardf_r, arf) = match m.mode {
-        Mode::Cluster { g } => (g - 1.0, archi2 / (n - 1.0) * nl / g * (g - 1.0) / ardf),
-        _ => (nl, archi2 / n * nl / ardf),
+        Mode::Cluster { g } => (g - 1.0, archi2 / (n - 1.0) * nl_clus / g * (g - 1.0) / ardf),
+        _ => (nl, archi2 / n_eff * nl / ardf),
     };
 
     // Stock-Wright S: J of the model with zero endog coefficients, exog partialled out.
@@ -97,17 +103,20 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
     };
     let ze: Vec<f64> = (0..l).map(|a| (0..r).map(|j| g.at(zcols[a], j) * cs.d[j]).sum()).collect();
     let sstat = if robust {
-        let s = passes.meat(&cs, &sz)?;
+        let mut s = passes.meat(&cs, &sz)?;
+        if non_cluster && m.dofm != 0.0 {
+            s = s.scale(n / n_eff);
+        }
         dense::spd_inv(&s).quad(&ze)
     } else {
         let es = passes.cross(&cs).d[0];
-        n * zzinv.quad(&ze) / es
+        n_eff * zzinv.quad(&ze) / es
     };
 
     // Per endogenous regressor.
     let shea = |i: usize| xxinv.at(i, i) / xpzx_inv.at(i, i);
     let zzinv_l1 = zzinv.block(0, l1, 0, l1);
-    let r2_of = |w: f64| (w / n) / (1.0 + w / n);
+    let r2_of = |w: f64| (w / n_eff) / (1.0 + w / n_eff);
     let mut firstmat = M::zeros(21, k1);
     let mut eqs = Vec::with_capacity(k1);
     for i in 0..k1 {
@@ -152,12 +161,15 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
             let sw_rb = &sb2[..l1];
             let both = M::from_fn(r, 2, |j, cc| if cc == 0 { ap_e.d[j] } else { sw_e.d[j] });
             let ee2 = passes.cross(&both);
-            let ap_cls = wald(ap_rb, &zzinv_l1.scale(ee2.at(0, 0) / n));
-            let sw_cls = wald(sw_rb, &zzinv_l1.scale(ee2.at(1, 1) / n));
+            let ap_cls = wald(ap_rb, &zzinv_l1.scale(ee2.at(0, 0) / n_eff));
+            let sw_cls = wald(sw_rb, &zzinv_l1.scale(ee2.at(1, 1) / n_eff));
             let (ap_r2, sw_r2) = (r2_of(ap_cls), r2_of(sw_cls));
             let (ap_w, sw_w) = if robust {
                 let rob = |e: &M, rb: &[f64]| -> Result<f64, RfError> {
-                    let s = passes.meat(e, &sz)?;
+                    let mut s = passes.meat(e, &sz)?;
+                    if non_cluster && m.dofm != 0.0 {
+                        s = s.scale(n / n_eff);
+                    }
                     let mut vi = zzinv.mul(&s).mul(&zzinv);
                     vi.symmetrize();
                     Ok(wald(rb, &vi.block(0, l1, 0, l1)))
@@ -200,8 +212,8 @@ pub(crate) fn first_stage(m: &Model, passes: &Passes, xxinv: &M, xpzx_inv: &M) -
 
         // Posted first-stage regression (PostFirstRF small-sample adjustment).
         let adj = match m.mode {
-            Mode::Cluster { g } => (n - 1.0) / nl * g / (g - 1.0),
-            _ => n / nl,
+            Mode::Cluster { g } => (n - 1.0) / nl_clus * g / (g - 1.0),
+            _ => n_eff / nl,
         };
         eqs.push(FirstEq { b, v: vblock(i + 1, l).scale(adj), stats: [rmseall[i + 1], nl, l as f64, n] });
     }
