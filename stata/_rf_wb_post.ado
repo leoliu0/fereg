@@ -1,4 +1,4 @@
-*! version 0.5.0  fereg: post wild bootstrap scalars, macros, CI matrix, and savet vector
+*! version 0.5.1  fereg: post wild bootstrap scalars, macros, CI matrix, and savet vector
 program _rf_wb_post, eclass
 	version 16
 	syntax , Level(real) Method(string) Boottype(string) Weights(string) ///

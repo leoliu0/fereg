@@ -1,4 +1,4 @@
-*! version 0.5.0  fereg: display wild bootstrap results block from e(wb_*)
+*! version 0.5.1  fereg: display wild bootstrap results block from e(wb_*)
 program _rf_wb_table
 	version 16
 	if (`"`e(wb_method)'"' == "") exit

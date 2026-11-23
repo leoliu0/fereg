@@ -1,4 +1,4 @@
-*! version 0.5.0  fereg: parse wildboot(...) option and build plugin wb_* keys
+*! version 0.5.1  fereg: parse wildboot(...) option and build plugin wb_* keys
 program _rf_parse_wildboot, rclass
 	version 16
 	syntax , Step(string) [raw(string) spec(string) Rmat(string) Rvec(string) ///
