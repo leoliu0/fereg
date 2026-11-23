@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.5.0}{...}
+{* *! version 0.5.1}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "feppml" "help feppml"}{...}
 {vieweralsosee "felogit" "help felogit"}{...}
@@ -69,6 +69,7 @@ supported.
 {synopt :{opt res:iduals}}save the residuals in {it:_reghdfe_resid} (overwritten if it exists){p_end}
 {synopt :{opt nocons:tant}}do not report the constant{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups (not recommended){p_end}
+{synopt :{opt wild:boot(spec)}}wild bootstrap inference ({help fereg##wildboot:syntax and options}){p_end}
 
 {syntab:Kernel (HAC) variances, as ivreghdfe}
 {synopt :{opt bw(#|auto)}}kernel bandwidth; with {cmd:vce(robust)} heteroskedasticity- and autocorrelation-consistent (HAC), without it autocorrelation-consistent (AC){p_end}
@@ -179,6 +180,19 @@ constant (the mean of the fixed effects) whenever a fixed effect has an intercep
 
 {phang}
 {opt keepsingletons} keeps singleton groups; they do not change the estimates but bias the standard errors.
+
+{marker wildboot}{...}
+{phang}
+{opt wildboot(spec[, wb_options])} computes wild bootstrap inference (cluster WCR/WCU, MacKinnon-Nielsen-Webb
+{cmd:11}/{cmd:13}/{cmd:31}/{cmd:33}, heteroskedastic {cmd:11}/{cmd:21}/{cmd:31}/{cmd:13}/{cmd:33}, IV WRE/score,
+or GLM score bootstrap) for linear restrictions {it:R * beta = r} on the estimated coefficients. {it:spec} can
+be a regressor name ({cmd:tenure}), an equality or linear combination ({cmd:2*x1 - x2 = 0.5}), or parenthesized
+joint equations ({cmd:(x1 = 0) (x2 = 0)}). Options inside {opt wildboot()} are {opt reps(#)} (default {cmd:999}),
+{opt weights(rademacher|webb|mammen|normal)} (default {cmd:rademacher}), {opt boottype(11|21|31|13|33)} (default
+{cmd:11}), {opt method(auto|wild|score|wre|hetero)} (default {cmd:auto}), {opt imposenull}|{opt noimposenull}
+(default imposed), {opt pvaltype(twotailed|equal|greater|less)}, {opt bootcluster(varlist)}, {opt level(#)},
+{opt noci}, {opt seed(#)}, {opt tol(#)}, {opt maxiter(#)}, {opt savet(matname)}, and {opt rmat(R)} / {opt rvec(r)}.
+Results are stored in {cmd:e(wb_*)} and {cmd:e(wb_ci)}.
 
 {marker dof}{...}
 {dlgtab:Degrees of freedom}
@@ -367,6 +381,7 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {phang2}{cmd:. fereg ln_wage age (tenure = union south), absorb(idcode) vce(robust) bw(3) kernel(parzen)}{p_end}
 {phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(hc3)}{p_end}
 {phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(crv3 ind_code)}{p_end}
+{phang2}{cmd:. fereg ln_wage age ttl_exp tenure, absorb(idcode year) vce(cluster idcode) wildboot(tenure = 0, reps(999) seed(42))}{p_end}
 
 
 {marker results}{...}
@@ -413,6 +428,10 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {synopt:{cmd:e(bw)}}kernel bandwidth used (also the result of {cmd:bw(auto)} and of {cmd:kiefer}){p_end}
 {synopt:{cmd:e(conley_cutoff)}}Conley cutoff (km) used{p_end}
 {synopt:{cmd:e(conley_pixel)}}Conley pixel size (km){p_end}
+{synopt:{cmd:e(wb_stat)}, {cmd:e(wb_p)}}wild bootstrap test statistic and p-value{p_end}
+{synopt:{cmd:e(wb_reps)}, {cmd:e(wb_reps_feasible)}, {cmd:e(wb_q)}}bootstrap replications, feasible count, and restrictions count{p_end}
+{synopt:{cmd:e(wb_full_enum)}, {cmd:e(wb_impose_null)}, {cmd:e(wb_ssc)}, {cmd:e(wb_level)}}full-enumeration flag, null-imposed flag, small-sample factor, and CI level{p_end}
+{synopt:{cmd:e(wb_n_clust)}, {cmd:e(wb_point)}, {cmd:e(wb_se)}, {cmd:e(wb_ci_lo)}, {cmd:e(wb_ci_hi)}}bootstrap clusters, point estimate, bootstrap SE, and CI endpoints ({cmd:q = 1}){p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
@@ -445,12 +464,14 @@ e(df_m) + 1 parameters). Typing {cmd:fereg} without arguments replays the result
 {synopt:{cmd:e(footnote)}}{cmd:_rf_footnote}{p_end}
 {synopt:{cmd:e(marginsnotok)}}predictions not allowed by {cmd:margins}{p_end}
 {synopt:{cmd:e(properties)}}{cmd:b V}{p_end}
+{synopt:{cmd:e(wb_method)}, {cmd:e(wb_boottype)}, {cmd:e(wb_weights)}, {cmd:e(wb_pvaltype)}, {cmd:e(wb_stattype)}, {cmd:e(wb_bootcluster)}}wild bootstrap method, type, weights, p-value type, statistic type, and bootcluster{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Matrices}{p_end}
 {synopt:{cmd:e(b)}}coefficient vector{p_end}
 {synopt:{cmd:e(V)}}variance-covariance matrix of the estimators{p_end}
 {synopt:{cmd:e(dof_table)}}absorbed degrees of freedom: categories, redundant, coefficients, inexact, nested{p_end}
+{synopt:{cmd:e(wb_ci)}}1 x 2 wild bootstrap confidence interval ({cmd:q = 1}){p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Functions}{p_end}
