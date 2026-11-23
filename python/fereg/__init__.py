@@ -14,6 +14,7 @@ from .estimation import feglm, feols, fepois, ssc
 from .etable import etable
 from .results import Fegaussian, Feglm, Feiv, Felogit, Feols, Fepois, FixestMulti
 from .summary import summary
+from .wildboot import WildBootResult, wildboottest
 
 __all__ = [
     "__version__",
@@ -23,6 +24,8 @@ __all__ = [
     "ssc",
     "etable",
     "summary",
+    "wildboottest",
+    "WildBootResult",
     "Feols",
     "Feiv",
     "Fepois",

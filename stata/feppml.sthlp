@@ -54,6 +54,7 @@ separation checks, same output and the same stored results, computed by a parall
 {synopt :{opth exp:osure(varname)}}include ln({it:varname}) in the model with coefficient constrained to 1{p_end}
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups (not recommended){p_end}
+{synopt :{opt wild:boot(spec)}}wild score bootstrap inference ({help fereg##wildboot:syntax and options}){p_end}
 
 {syntab:Separation}
 {synopt :{opt sep:aration(list)}}methods used to detect and drop separated observations; default {cmd:fe simplex relu}{p_end}
@@ -143,6 +144,11 @@ predictor with coefficient 1. The exposure must be positive. Only one of them ma
 {phang}
 {opt keepsingletons} keeps singleton groups (and, as in {cmd:ppmlhdfe}, disables the {cmd:fe} separation rule);
 a warning is printed.
+
+{phang}
+{opt wildboot(spec[, wb_options])} computes the wild score bootstrap (or heteroskedastic score bootstrap when
+unclustered); see {help fereg##wildboot:fereg} for option syntax and stored {cmd:e(wb_*)} results. Mutually
+exclusive with {opt tagsep()}.
 
 {marker separation}{...}
 {dlgtab:Separation}
@@ -298,6 +304,7 @@ All statistics except {opt xb} and {opt stdp} require {opt d()} when fixed effec
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
 {phang2}{cmd:. feppml hours age ttl_exp tenure, absorb(idcode year occ_code) vce(cluster idcode)}{p_end}
 {phang2}{cmd:. feppml hours age ttl_exp, absorb(fe1=idcode fe2=year) d(dsum) threads(8)}{p_end}
+{phang2}{cmd:. feppml hours age ttl_exp tenure, absorb(idcode year) vce(cluster idcode) wildboot(tenure = 0, reps(499) seed(7))}{p_end}
 
 
 {marker results}{...}
@@ -339,6 +346,7 @@ remain in the sample{p_end}
 {synopt:{cmd:e(N_clust#)}}number of clusters of the #th cluster variable{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster variables{p_end}
 {synopt:{cmd:e(dkraay_bw)}, {cmd:e(bw)}, {cmd:e(conley_cutoff)}, {cmd:e(conley_pixel)}}as {help fereg##results:fereg}{p_end}
+{synopt:{cmd:e(wb_*)} scalars, macros, and {cmd:e(wb_ci)}}wild score bootstrap results, as {help fereg##results:fereg}{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}

@@ -22,6 +22,7 @@ mod est;
 mod io;
 mod spi;
 mod store;
+mod wb;
 
 use args::{Args, Common};
 

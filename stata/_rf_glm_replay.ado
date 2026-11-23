@@ -29,6 +29,7 @@ program _rf_glm_replay, rclass
 		return add
 	}
 	if ("`footnote'" == "") _rf_footnote
+	if ("`table'" == "" & `"`e(wb_method)'"' != "") _rf_wb_table
 end
 
 

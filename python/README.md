@@ -62,6 +62,9 @@ lg.get_apes(n_pop=10**6).summary()            # APEs: delta method + sampling of
 bc.get_apes().tidy()                          # bias-corrected APEs
 # network (trade) panels: two or three fixed effects (exporter-time, importer-time, pair) and
 # bias_corr(panel_structure="network")
+
+wb = m.wildboottest("x1", reps=999, seed=1)   # WCR11 / WCU / MNW (13, 31, 33), WRE for IV, score for GLM
+wb.summary()
 ```
 
 `bias_corr()` returns a logit result at the corrected coefficients (fixed effects re-estimated
@@ -71,8 +74,14 @@ corrections use alpaca's sample (all-one groups, which pyfixest keeps at the bou
 in n; APEs average over every observation before the fixed-effect based drops). The docstring of
 `fereg.bias` lists the differences from alpaca and logitfe.
 
-Not implemented: probit; `nid` variances (raise `NotImplementedError`); wild bootstrap,
-`ccv`, `decompose`, `ritest`, plotting and DiD helpers.
+Wild bootstrap inference (`wildboottest(model, ...)` or `model.wildboottest(...)`) covers OLS
+(clustered WCR/WCU, MacKinnon–Nielsen–Webb `11`/`13`/`31`/`33`, non-nested fixed effects,
+unclustered HC1/HC2/HC3 `11`/`21`/`31`/`13`/`33`), IV/2SLS (Davidson–MacKinnon WRE and score),
+Poisson/logit (wild score bootstrap), multiway clustering with `bootcluster` overrides, full
+enumeration, and confidence interval inversion.
+
+Not implemented: probit; `nid` variances (raise `NotImplementedError`); `ccv`, `decompose`,
+`ritest`, plotting and DiD helpers.
 
 Formulas can use functions and objects from the caller through pyfixest's `context=`
 (`context=0`: the calling frame; an int `k`: `k` frames further up; a mapping: the names it

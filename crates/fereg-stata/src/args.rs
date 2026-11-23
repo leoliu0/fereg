@@ -312,6 +312,11 @@ pub fn parse_family(s: &str) -> Result<Family, RfError> {
     }
 }
 
+/// Parses optional `wb_cluster=<1-based factor indices joined by *>` into 0-based indices.
+pub fn parse_wb_cluster(a: &Args, nfac: usize) -> Result<Option<Vec<usize>>, RfError> {
+    a.str_opt("wb_cluster").map(|s| index_list(s, nfac, "wb_cluster factor")).transpose()
+}
+
 /// `dof=` value: `none` or a comma list of pairwise,clusters,continuous,firstpair.
 pub fn parse_dof(s: &str) -> Result<DofOptions, RfError> {
     if s == "none" {

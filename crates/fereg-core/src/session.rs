@@ -92,6 +92,7 @@ pub struct Session {
     pub(crate) kept_index: Vec<u32>,
     pub(crate) terms: Vec<Term>,
     pub(crate) clusters: Vec<ClusterDim>,
+    pub(crate) wb_cluster: Option<ClusterDim>,
     pub(crate) vce: Vce,
     pub(crate) weight_kind: WeightKind,
     /// Raw weights per kept observation (kept order).
@@ -228,6 +229,31 @@ impl Session {
         self.absorber.as_mut()
     }
 
+    /// Sets or clears the override bootstrap cluster variable(s) (raw input-length slices).
+    /// Passing an empty slice clears any override.
+    pub fn set_wb_cluster(&mut self, factors: &[FactorValues], ctx: &Ctx) -> Result<(), RfError> {
+        if factors.is_empty() {
+            self.wb_cluster = None;
+            return Ok(());
+        }
+        if factors.iter().any(|f| f.len() != self.n_input) {
+            return Err(RfError::InvalidInput("wb_cluster length differs from n_input".into()));
+        }
+        let cd = par::with_pool(par::threads_for(ctx.threads, self.n_input), |pool| {
+            let codes: Vec<Codes> = factors.iter().map(|f| factor::factorize(f, pool)).collect::<Result<_, _>>()?;
+            let combined = if codes.len() == 1 {
+                codes.into_iter().next().expect("non-empty")
+            } else {
+                let refs: Vec<&Codes> = codes.iter().collect();
+                factor::combine(&refs, pool)?
+            };
+            let restricted = factor::restrict(&combined, &self.kept_index, pool)?;
+            Ok::<_, RfError>(ClusterDim { factors: Vec::new(), codes: restricted.codes, g: restricted.n as usize })
+        })??;
+        self.wb_cluster = Some(cd);
+        Ok(())
+    }
+
     /// Drops the kept observations flagged in `drop` (kept order), then re-runs singleton removal
     /// and the `fe` rule, compacts, and rebuilds the absorber. Row order may change.
     pub fn drop_obs(&mut self, drop: &[bool], ctx: &Ctx) -> Result<DropReport, RfError> {
@@ -265,6 +291,11 @@ impl Session {
             }
         }
         for cd in &mut self.clusters {
+            let c = factor::compact(&Codes { codes: std::mem::take(&mut cd.codes), n: cd.g as u32 }, &alive);
+            cd.codes = c.codes;
+            cd.g = c.n as usize;
+        }
+        if let Some(cd) = &mut self.wb_cluster {
             let c = factor::compact(&Codes { codes: std::mem::take(&mut cd.codes), n: cd.g as u32 }, &alive);
             cd.codes = c.codes;
             cd.g = c.n as usize;
@@ -555,6 +586,7 @@ impl Session {
             kept_index,
             terms,
             clusters,
+            wb_cluster: None,
             vce,
             weight_kind,
             weights,

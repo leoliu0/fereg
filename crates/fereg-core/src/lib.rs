@@ -42,6 +42,7 @@ pub mod stats;
 pub mod structure;
 pub mod timing;
 pub mod vcov;
+pub mod wildboot;
 
 pub use api::*;
 pub use session::{AbsorberKind, ClusterDim, DropReport, Session, Term};

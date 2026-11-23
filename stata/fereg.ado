@@ -53,6 +53,7 @@ program Replay, rclass
 	return add // adds r(level), r(table), etc.
 	if ("`footnote'" == "") _rf_footnote
 	ExactFitNote
+	if ("`table'" == "" & `"`e(wb_method)'"' != "") _rf_wb_table
 end
 
 
@@ -104,6 +105,7 @@ program Estimate, eclass
 		PREConditioner(string) COMPACT
 		Individual_id(string) Group_id(string) AGgregation(string)
 		ABSORBER(string)
+		WILDboot(string asis)
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -271,6 +273,31 @@ program Estimate, eclass
 	}
 	local base_clustervars : list uniq base_clustervars
 
+	if (`"`wildboot'"' != "") {
+		if ("`vcetype'" == "conley" | "`vcetype'" == "dkraay" | `hac') {
+			di as err "wildboot() is not supported with dkraay, conley, or kernel/HAC variances"
+			exit 198
+		}
+		_rf_parse_wildboot, step(pre) raw(`"`wildboot'"')
+		local wb_spec `"`r(spec)'"'
+		local wb_rmat "`r(rmat)'"
+		local wb_rvec "`r(rvec)'"
+		local wb_weights "`r(weights)'"
+		local wb_boottype "`r(boottype)'"
+		local wb_method "`r(method)'"
+		local wb_pvaltype "`r(pvaltype)'"
+		local wb_seed "`r(seed)'"
+		local wb_savet "`r(savet)'"
+		local wb_bc_vars "`r(bc_vars)'"
+		local wb_bootcluster "`r(bootcluster)'"
+		local wb_reps = r(reps)
+		local wb_imposenull = r(imposenull)
+		local wb_wantci = r(wantci)
+		local wb_level = r(level)
+		local wb_tol = r(tol)
+		local wb_maxiter = r(maxiter)
+	}
+
 	capture drop __hdfe* // previously saved FEs (as reghdfe)
 	_rf_parse_absorb `absorb'
 	local G `s(G)'
@@ -333,7 +360,7 @@ program Estimate, eclass
 	* Factor variables sent to the plugin: absorbed factors first, then cluster-only variables,
 	* then the tsset time and panel variables of the time-series variances
 	local factors `absfactors'
-	foreach v in `base_clustervars' `tvar' `ivar' {
+	foreach v in `base_clustervars' `tvar' `ivar' `wb_bc_vars' {
 		if (!`: list v in factors') local factors `factors' `v'
 	}
 	local nfac : word count `factors'
@@ -406,6 +433,14 @@ program Estimate, eclass
 	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=gaussian""'
 	local args `"`args' `rf_vceargs'"'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
+	if ("`wb_bc_vars'" != "") {
+		local wb_clpos
+		foreach v of local wb_bc_vars {
+			local k : list posof "`v'" in factors
+			local wb_clpos = cond("`wb_clpos'" == "", "`k'", "`wb_clpos'*`k'")
+		}
+		local args `"`args' "wb_cluster=`wb_clpos'""'
+	}
 	* No if, in, weight or markout: touse is 1 everywhere and the plugin does not read it
 	if (`"`if'`in'`weight'`rf_markvars'"' == "") local args `"`args' "sample=all""'
 	local _rf_token
@@ -536,7 +571,21 @@ program Estimate, eclass
 		local args `"`args' "first=`=("`first'" != "")'" "ffirst=`=("`ffirst'" != "")'""'
 		_rf_model cached `yvar' `xvars' `endog_revars' `inst_revars' : `modelvars'
 		local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" "cached=`rf_cached'" `matargs'"'
+		tempname wb_cimat
+		if (`"`wildboot'"' != "") {
+			_rf_parse_wildboot, step(hyp) spec(`"`wb_spec'"') rmat(`"`wb_rmat'"') rvec(`"`wb_rvec'"') ///
+				fullnames(`"`endog_full' `fullvarlist'"') sentmask(`"`endog_mask' `mask'"') ///
+				reps(`wb_reps') weights(`wb_weights') boottype(`wb_boottype') method(`wb_method') ///
+				imposenull(`wb_imposenull') pvaltype(`wb_pvaltype') wantci(`wb_wantci') level(`wb_level') ///
+				seed(`wb_seed') tol(`wb_tol') maxiter(`wb_maxiter') savet(`"`wb_savet'"') cimat(`wb_cimat')
+			local args `"`args' `r(args)'"'
+		}
 		local _rf_status
+		local _rf_wb_method
+		local _rf_wb_boottype
+		local _rf_wb_weights
+		local _rf_wb_pvaltype
+		local _rf_wb_stattype
 		capture noisily _rf_load `yvar' `xvars' `endog_revars' `inst_revars' `touse' `outvars', iv `args' `common'
 		if (_rc) {
 			local rc = _rc
@@ -811,6 +860,11 @@ program Estimate, eclass
 
 		PostTail, doft(`doft') nslots(`num_slots') dofrows(`dof_rownames') fevars(`fevars') ///
 			felabels(`fevar_labels') groupvar(`groupvar') intercepts(`intercepts') ivars(`all_ivars')
+		if (`"`wildboot'"' != "") {
+			_rf_wb_post, level(`wb_level') bootcluster(`wb_bootcluster') cimat(`wb_cimat') savet(`wb_savet') ///
+				method(`_rf_wb_method') boottype(`_rf_wb_boottype') weights(`_rf_wb_weights') ///
+				pvaltype(`_rf_wb_pvaltype') stattype(`_rf_wb_stattype')
+		}
 		Replay, `diopts' `header' `table' `footnote' `first' `ffirst'
 		exit
 	}
@@ -830,7 +884,27 @@ program Estimate, eclass
 	local args `""token=`token'" "nx=`nx'" "nout=`nout'" "tol=`tolstr'" "maxiter=`iterate'" "dof=`dofkey'" "noconstant=`=("`constant'" == "noconstant")'""'
 	_rf_model cached `yvar' `xvars' : `modelvars'
 	local args `"`args' "resid=`pos_resid'" "d=0" "groupvar=`pos_group'" "fe=`pos_fe'" "cached=`rf_cached'" `matargs'"'
+	tempname wb_cimat
+	if (`"`wildboot'"' != "") {
+		local wb_full `fullvarlist'
+		local wb_smask `mask'
+		if (`report_constant') {
+			local wb_full `wb_full' _cons
+			local wb_smask `wb_smask' 1
+		}
+		_rf_parse_wildboot, step(hyp) spec(`"`wb_spec'"') rmat(`"`wb_rmat'"') rvec(`"`wb_rvec'"') ///
+			fullnames(`"`wb_full'"') sentmask(`"`wb_smask'"') ///
+			reps(`wb_reps') weights(`wb_weights') boottype(`wb_boottype') method(`wb_method') ///
+			imposenull(`wb_imposenull') pvaltype(`wb_pvaltype') wantci(`wb_wantci') level(`wb_level') ///
+			seed(`wb_seed') tol(`wb_tol') maxiter(`wb_maxiter') savet(`"`wb_savet'"') cimat(`wb_cimat')
+		local args `"`args' `r(args)'"'
+	}
 	local _rf_status
+	local _rf_wb_method
+	local _rf_wb_boottype
+	local _rf_wb_weights
+	local _rf_wb_pvaltype
+	local _rf_wb_stattype
 	capture noisily _rf_load `yvar' `xvars' `touse' `outvars', ols `args' `common'
 	if (_rc) {
 		local rc = _rc
@@ -998,6 +1072,11 @@ program Estimate, eclass
 
 	PostTail, doft(`doft') nslots(`num_slots') dofrows(`dof_rownames') fevars(`fevars') ///
 		felabels(`fevar_labels') groupvar(`groupvar') intercepts(`intercepts') ivars(`all_ivars')
+	if (`"`wildboot'"' != "") {
+		_rf_wb_post, level(`wb_level') bootcluster(`wb_bootcluster') cimat(`wb_cimat') savet(`wb_savet') ///
+			method(`_rf_wb_method') boottype(`_rf_wb_boottype') weights(`_rf_wb_weights') ///
+			pvaltype(`_rf_wb_pvaltype') stattype(`_rf_wb_stattype')
+	}
 
 	Replay, `diopts' `header' `table' `footnote'
 end
@@ -1181,6 +1260,7 @@ program ReplayIV, rclass
 		DispFooterIV
 		_rf_footnote
 	}
+	if ("`table'" == "" & `"`e(wb_method)'"' != "") _rf_wb_table
 end
 
 

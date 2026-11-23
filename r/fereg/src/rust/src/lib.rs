@@ -12,7 +12,9 @@ use fereg_core::fit::{
     self, ApeAt, ApeOptions, BiasMethod, BiasOptions, CoefSource, FactorCol, FeTerm, FitInput, FitOutput, FixefValues,
     FitSpec, FitState, FixefNorm, FixefRm, Flavor, GDf, JackknifeOptions, KFixef, Model, Normalization, Permutation,
     Sampling, Ssc, Structure, TDf, TestStat, Variant, VcovKind, VcovOutput, WeightsType, WhichBias,
+    WildBootOptions,
 };
+use fereg_core::wildboot::{BootMethod, BootType, BootWeights, Hypothesis, PvalType, WildBootSpec};
 use fereg_core::{Ctx, RfError, par};
 use rayon::prelude::*;
 
@@ -751,6 +753,108 @@ fn fereg_apes(input: List, spec: List, at: Robj, ape: List, nthreads: i32) -> Re
     ]))
 }
 
+/// Wild bootstrap inference. `wb` is list(r_mat = row-major q x k double vector, r_vec = length-q
+/// double vector, q, k, reps, weights, boot_type, method, impose_null, pval_type, conf_int,
+/// level, seed, tol, maxiter, bootcluster = NULL or 1-based factor indices).
+#[extendr]
+fn fereg_wildboot(input: List, spec: List, wb: List, nthreads: i32) -> Result<Robj> {
+    let inp = InputR::read(&input)?;
+    let r_mat_robj = field(&wb, "r_mat");
+    let r_mat = real_slice(&r_mat_robj, "r_mat")?.to_vec();
+    let r_vec_robj = field(&wb, "r_vec");
+    let r_vec = real_slice(&r_vec_robj, "r_vec")?.to_vec();
+    let q = get_usize(&wb, "q")?;
+    let k = get_usize(&wb, "k")?;
+    let hyp = Hypothesis::new(r_mat, r_vec, q, k).map_err(core_err)?;
+
+    let weights = match get_str(&wb, "weights")? {
+        "rademacher" => BootWeights::Rademacher,
+        "webb" => BootWeights::Webb,
+        "mammen" => BootWeights::Mammen,
+        "normal" => BootWeights::Normal,
+        w => return Err(invalid(format!("fereg: unknown wildboot `type` `{w}`"))),
+    };
+    let boot_type = match get_str(&wb, "boot_type")? {
+        "11" => BootType::T11,
+        "13" => BootType::T13,
+        "31" => BootType::T31,
+        "33" => BootType::T33,
+        "21" => BootType::T21,
+        t => return Err(invalid(format!("fereg: unknown `bootstrap_type` `{t}`"))),
+    };
+    let method = match get_str(&wb, "method")? {
+        "auto" => BootMethod::Auto,
+        "wildcluster" => BootMethod::WildCluster,
+        "score" => BootMethod::Score,
+        "wre" => BootMethod::Wre,
+        "hetero" => BootMethod::Hetero,
+        m => return Err(invalid(format!("fereg: unknown wildboot `method` `{m}`"))),
+    };
+    let pval_type = match get_str(&wb, "pval_type")? {
+        "two-tailed" => PvalType::TwoTailed,
+        "equal-tailed" => PvalType::EqualTailed,
+        ">" => PvalType::Greater,
+        "<" => PvalType::Less,
+        p => return Err(invalid(format!("fereg: unknown `p_val_type` `{p}`"))),
+    };
+    let seed_f = get_f64(&wb, "seed")?;
+    if !seed_f.is_finite() || seed_f < 0.0 || seed_f.fract() != 0.0 || seed_f > 9_007_199_254_740_992.0 {
+        return Err(invalid("fereg: `seed` must be a non-negative integer"));
+    }
+    let wb_spec = WildBootSpec {
+        reps: get_usize(&wb, "reps")?,
+        weights,
+        boot_type,
+        method,
+        impose_null: get_bool(&wb, "impose_null")?,
+        pval_type,
+        conf_int: get_bool(&wb, "conf_int")?,
+        level: get_f64(&wb, "level")?,
+        seed: seed_f as u64,
+        tol: get_f64(&wb, "tol")?,
+        maxiter: get_usize(&wb, "maxiter")?,
+    };
+    let bc_r = field(&wb, "bootcluster");
+    let bootcluster = if bc_r.is_null() { None } else { Some(indices(&bc_r, "bootcluster")?) };
+    let opts = WildBootOptions { hyp, spec: wb_spec, bootcluster };
+
+    let out = fit::wildboot(&inp.fit_input()?, &spec_of(&spec)?, &opts, &ctx(nthreads)).map_err(core_err)?;
+    let r = out.result;
+    let ci: Robj = match r.conf_int {
+        Some((lo, hi)) => reals(&[lo, hi]),
+        None => ().into(),
+    };
+    let n_clusters: Robj = match r.n_clusters {
+        Some(g) => int(g),
+        None => ().into(),
+    };
+    Ok(named(vec![
+        ("coef_source", sources(&out.coef_source)),
+        ("collinear", sources(&out.collinear)),
+        ("nobs_origin", int(out.nobs_origin)),
+        ("stat", real(r.stat)),
+        ("p_val", real(r.p_val)),
+        ("stat_type", r.stat_type.name().into()),
+        ("point_estimate", real(r.point_estimate.unwrap_or(f64::NAN))),
+        ("se", real(r.se.unwrap_or(f64::NAN))),
+        ("conf_int", ci),
+        ("t_boot", reals(&r.t_boot)),
+        ("reps", int(r.reps)),
+        ("reps_feasible", int(r.reps_feasible)),
+        ("nobs", int(r.nobs)),
+        ("n_clusters", n_clusters),
+        ("q", int(r.q)),
+        ("full_enumeration", r.full_enumeration.into()),
+        ("method", r.method.name().into()),
+        ("boot_type", r.boot_type.name().into()),
+        ("weights", r.weights.name().into()),
+        ("impose_null", r.impose_null.into()),
+        ("pval_type", r.pval_type.name().into()),
+        ("ssc", real(r.ssc)),
+        ("notes", notes(&r.notes)),
+    ]))
+}
+
 /// Variance matrix of a fitted model under another estimator / small-sample correction. `vars` is
 /// list(time, panel, lat, lon) over the original input rows (as in `fereg_fit`'s input).
 #[extendr]
@@ -824,5 +928,6 @@ extendr_module! {
     fn fereg_bias_dims;
     fn fereg_bias_corr;
     fn fereg_apes;
+    fn fereg_wildboot;
     fn fereg_core_version;
 }

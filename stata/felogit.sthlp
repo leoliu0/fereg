@@ -54,6 +54,7 @@ As with {cmd:logit}, a nonzero, nonmissing {it:depvar} counts as a success.
 {synopt :{opth off:set(varname)}}include {it:varname} in the model with coefficient constrained to 1{p_end}
 {synopt :{opt keepsin:gletons}}do not drop singleton groups{p_end}
 {synopt :{opt sep:aration(list)}}{cmd:fe} (default), {cmd:fe mu}, {cmd:mu} or {cmd:none}{p_end}
+{synopt :{opt wild:boot(spec)}}wild score bootstrap inference ({help fereg##wildboot:syntax and options}){p_end}
 
 {syntab:Optimization and performance}
 {synopt :{opt tol:erance(#)}}IRLS convergence tolerance; default {cmd:1e-8}{p_end}
@@ -150,6 +151,11 @@ N/(N-1)). The header adds the lines of {cmd:fereg} (DK bandwidth, Conley cutoff,
 
 {phang}
 {opt keepsingletons} keeps singleton groups.
+
+{phang}
+{opt wildboot(spec[, wb_options])} computes the wild score bootstrap (or heteroskedastic score bootstrap when
+unclustered); see {help fereg##wildboot:fereg} for option syntax and stored {cmd:e(wb_*)} results. Cannot be
+combined with bias correction or {opt ape}.
 
 {phang}
 {opt separation(list)}: {cmd:fe} (the default; also {cmd:default}) drops, iteratively together with singletons,
@@ -387,6 +393,7 @@ uncorrected fit. Replay ({cmd:felogit} alone) shows the table of average partial
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
 {phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year)}{p_end}
 {phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year) vce(cluster idcode) or}{p_end}
+{phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year) vce(cluster idcode) wildboot(ttl_exp = 0, reps(499) seed(7))}{p_end}
 {phang2}{cmd:. felogit union age ttl_exp, absorb(idcode year) d(dsum)}{p_end}
 {phang2}{cmd:. predict double phat, pr}{p_end}
 
@@ -438,6 +445,7 @@ certifying its result (a note is printed){p_end}
 {synopt:{cmd:e(N_clust#)}}number of clusters of the #th cluster variable{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster variables{p_end}
 {synopt:{cmd:e(dkraay_bw)}, {cmd:e(bw)}, {cmd:e(conley_cutoff)}, {cmd:e(conley_pixel)}}as {help fereg##results:fereg}{p_end}
+{synopt:{cmd:e(wb_*)} scalars, macros, and {cmd:e(wb_ci)}}wild score bootstrap results, as {help fereg##results:fereg}{p_end}
 
 {pstd}
 With {opt analytical}, {opt jackknife} or {opt ape} also:

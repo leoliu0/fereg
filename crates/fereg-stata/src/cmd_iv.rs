@@ -12,7 +12,7 @@
 use fereg_core::{EstResult, IvOptions, Layout, RfError};
 
 use crate::args::Args;
-use crate::{Phases, check_nvars, est, io, with_ctx};
+use crate::{Phases, check_nvars, est, io, wb, with_ctx};
 
 /// Optional matrices: (key, EstResult matrix name).
 const OPTIONAL: [(&str, &str); 3] = [("firstm", "first"), ("ccev", "ccev"), ("cdev", "cdev")];
@@ -28,6 +28,7 @@ pub fn iv(a: &Args) -> Result<(), RfError> {
         OPTIONAL.iter().filter_map(|(key, name)| a.str_opt(key).map(|s| (s.to_string(), *name))).collect();
     let first_eq: Vec<(String, &str)> =
         FIRST_EQ.iter().filter_map(|(key, stem)| a.str_opt(key).map(|s| (s.to_string(), *stem))).collect();
+    let wb_req = wb::parse(a)?;
     a.finish()?;
     let r = lay.ncols();
     check_nvars(r + 1 + k.nout)?;
@@ -38,10 +39,19 @@ pub fn iv(a: &Args) -> Result<(), RfError> {
         let mut ph = Phases::new(ctx.verbose);
         let rows = io::read_block(&mut stored, &vars, &k.cached, k.mode, !k.common.serialio, ctx)?;
         ph.mark(&format!("iv: read {} x {r}", stored.session.n()));
-        let res = stored.session.iv(rows, &lay, &spec, ctx)?;
+        let (res, wb_out) = match &wb_req {
+            Some(req) => {
+                let (r, w) = stored.session.iv_with_wildboot(rows, &lay, &spec, &req.hyp, &req.spec, ctx)?;
+                (r, Some(w))
+            }
+            None => (stored.session.iv(rows, &lay, &spec, ctx)?, None),
+        };
         ph.mark("iv: estimate");
         est::finish(&res, &k, &stored, r + 1)?;
         store_optional(&res, &optional, &first_eq, lay.nendog)?;
+        if let (Some(req), Some(w)) = (&wb_req, &wb_out) {
+            wb::store_extra(w, req)?;
+        }
         ph.mark("iv: store");
         Ok(())
     })

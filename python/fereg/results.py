@@ -331,6 +331,54 @@ class Feols:
             return pd.Series({"statistic": w, "pvalue": self._p_value})
         raise ValueError("Distribution must be F or chi2")
 
+    def wildboottest(
+        self,
+        param=None,
+        *,
+        R=None,
+        r=None,
+        reps: int = 999,
+        weights: str = "rademacher",
+        boot_type: str = "11",
+        bootstrap_type: str | None = None,
+        method: str = "auto",
+        impose_null: bool = True,
+        pval_type: str = "two-tailed",
+        conf_int: bool = True,
+        level: float = 0.95,
+        seed: int | None = None,
+        cluster=None,
+        bootcluster=None,
+        tol: float = 1e-6,
+        maxiter: int = 50,
+        threads: int | None = None,
+    ):
+        """Wild bootstrap test of a coefficient, subset of coefficients, or linear hypothesis
+        ``R * beta = r``. See :func:`fereg.wildboottest`."""
+        from .wildboot import wildboottest
+
+        return wildboottest(
+            self,
+            param=param,
+            R=R,
+            r=r,
+            reps=reps,
+            weights=weights,
+            boot_type=boot_type,
+            bootstrap_type=bootstrap_type,
+            method=method,
+            impose_null=impose_null,
+            pval_type=pval_type,
+            conf_int=conf_int,
+            level=level,
+            seed=seed,
+            cluster=cluster,
+            bootcluster=bootcluster,
+            tol=tol,
+            maxiter=maxiter,
+            threads=threads,
+        )
+
     # ----------------------------------------------------------------- accessors
 
     def tidy(self, alpha: float = 0.05) -> pd.DataFrame:

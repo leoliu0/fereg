@@ -197,16 +197,49 @@ pub(crate) fn shift_constant(m: &[f64], msize: usize, xbar: &[f64]) -> Vec<f64> 
 impl Session {
     /// OLS on `rows` (N x R row-major in [`Session::row_order`], layout `[y, x...]`).
     pub fn ols(&mut self, rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx) -> Result<EstResult, RfError> {
+        self.ols_with_opt_wb(rows, lay, s, None, ctx).map(|(res, _)| res)
+    }
+
+    /// OLS on `rows` paired with wild bootstrap inference.
+    pub fn ols_with_wildboot(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        s: &Spec,
+        hyp: &crate::wildboot::Hypothesis,
+        wb_spec: &crate::wildboot::WildBootSpec,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, crate::wildboot::WildBootResult), RfError> {
+        let (res, wb) = self.ols_with_opt_wb(rows, lay, s, Some((hyp, wb_spec)), ctx)?;
+        Ok((res, wb.expect("wb computed")))
+    }
+
+    fn ols_with_opt_wb(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        s: &Spec,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>), RfError> {
         if lay.nendog != 0 || lay.ninst != 0 {
             return Err(RfError::InvalidInput("ols: layout has endogenous variables or instruments".into()));
         }
         if rows.len() != self.n() * lay.ncols() {
             return Err(RfError::InvalidInput("ols: data block size differs from N*R".into()));
         }
-        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.ols_in_pool(rows, lay.nx, s, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.ols_in_pool(rows, lay.nx, s, wb, ctx, pool))?
     }
 
-    fn ols_in_pool(&mut self, mut rows: Vec<f64>, nx: usize, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {
+    fn ols_in_pool(
+        &mut self,
+        mut rows: Vec<f64>,
+        nx: usize,
+        s: &Spec,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
+        ctx: &Ctx,
+        pool: &Pool,
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>), RfError> {
         let n = self.n();
         let mut t = std::time::Instant::now();
         let r = 1 + nx;
@@ -288,7 +321,7 @@ impl Session {
         let beta: Vec<f64> = (0..k).map(|a| b_s[a] * sd_y / sd[kept[a]]).collect();
 
         // Pass C: residuals e = y~ - X~beta (materialized only when needed) and rss = sum w_v e^2.
-        let need_e = s.want_resid || !matches!(vce, Vce::Unadjusted);
+        let need_e = s.want_resid || !matches!(vce, Vce::Unadjusted) || wb.is_some();
         let resid_of = |i: usize| -> f64 {
             let row = &rows[i * r..(i + 1) * r];
             let mut e = row[0];
@@ -693,6 +726,91 @@ impl Session {
                 None => vec![f64::NAN; n],
             });
         }
-        Ok(res)
+        let wb_out = if let Some((wb_hyp, wb_spec)) = wb {
+            let err_clusters = if matches!(self.vce, Vce::Cluster(_) | Vce::Crv3(_)) { &self.clusters[..] } else { &[][..] };
+            let explicit_cons = self.terms.is_empty() && report_constant;
+            let k_eff = k + usize::from(explicit_cons);
+            if !self.terms.is_empty() && report_constant {
+                crate::wildboot::reject_absorbed_cons(wb_hyp, nx)?;
+            }
+            let kept_pos: Vec<usize> = kept.iter().map(|&j| j - 1).chain(explicit_cons.then_some(nx)).collect();
+            let hyp_kept = crate::wildboot::filter_hypothesis_by_kept(wb_hyp, &kept_pos, k_all)?;
+
+            let mut x_wb = par::alloc_vec(n * k_eff, 0.0)?;
+            for i in 0..n {
+                let src = &rows[i * r..(i + 1) * r];
+                for (p, &j) in kept.iter().enumerate() {
+                    x_wb[i * k_eff + p] = src[j] + if explicit_cons { xbar[p] } else { 0.0 };
+                }
+                if explicit_cons {
+                    x_wb[i * k_eff + k] = 1.0;
+                }
+            }
+            let mut inv_raw = vec![0.0; k * k];
+            for a in 0..k {
+                for b in 0..k {
+                    inv_raw[a * k + b] = inv_s[a * k + b] / (sd[kept[a]] * sd[kept[b]]);
+                }
+            }
+            let bread_wb = if explicit_cons { vcov::inv_ext(&inv_raw, k, &xbar, w.n_const()) } else { inv_raw };
+            let beta_wb: Vec<f64> = beta.iter().copied().chain(explicit_cons.then_some(b0)).collect();
+            let synth_const: Vec<crate::session::Term> = if self.terms.is_empty() && !report_constant {
+                vec![crate::session::Term {
+                    factors: Vec::new(),
+                    codes: vec![0u32; n],
+                    g: 1,
+                    intercept: true,
+                    slopes: Vec::new(),
+                    slope_vars: Vec::new(),
+                    save: false,
+                }]
+            } else {
+                Vec::new()
+            };
+            let terms_wb: &[crate::session::Term] = if self.terms.is_empty() {
+                if report_constant { &[] } else { &synth_const }
+            } else {
+                &self.terms
+            };
+            let row_order_wb = row_order.to_vec();
+            let cl_setup = crate::wildboot::OwnedClusterSetup::from_dims(
+                err_clusters,
+                self.wb_cluster.as_ref(),
+                &row_order_wb,
+                q_cluster,
+                false,
+                pool,
+            )?;
+            let cl_cfg = cl_setup.as_ref().map(crate::wildboot::OwnedClusterSetup::as_config);
+            let e_ref = e.as_deref().expect("residuals materialized for wildboot");
+            let wb_res = crate::wildboot::ols::run(
+                crate::wildboot::ols::OlsBootInput {
+                    n,
+                    k: k_eff,
+                    x: &x_wb,
+                    resid: e_ref,
+                    beta: &beta_wb,
+                    bread: &bread_wb,
+                    w_rows: w.wv.as_deref(),
+                    is_fweight: w.kind == WeightKind::Fweight,
+                    terms: terms_wb,
+                    row_order: &row_order_wb,
+                    ssc_hetero: big_n / (big_n - df_a - k as f64),
+                    hyp: &hyp_kept,
+                    spec: wb_spec,
+                    cluster: cl_cfg.as_ref(),
+                    fixef_tol: s.tol,
+                    fixef_maxiter: s.maxiter,
+                },
+                (!terms_wb.is_empty()).then_some(self.absorber.as_mut()),
+                ctx,
+                pool,
+            )?;
+            crate::wildboot::attach_wildboot_result(&mut res, &wb_res);
+            Some(wb_res)
+        } else {
+            None
+        };
+        Ok((res, wb_out))
     }
 }

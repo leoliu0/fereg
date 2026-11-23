@@ -170,7 +170,7 @@ fn plural(n: usize) -> &'static str {
 /// realized accuracy is at machine precision). A single term (reghdfe `G == 1`) is the trivial
 /// case; redundant terms nested in another (`absorb(firm industry)`, `absorb(i##c.t c)`) are the
 /// others.
-fn map_exact(terms: &[Term]) -> bool {
+pub(crate) fn map_exact(terms: &[Term]) -> bool {
     terms.len() <= 1 || terms.iter().enumerate().any(|(a, ta)| terms.iter().enumerate().all(|(b, tb)| a == b || spans(ta, tb)))
 }
 
@@ -230,7 +230,24 @@ impl Session {
     /// [`Session::keep`]); per-observation outputs refer to the final kept sample. ppmlhdfe /
     /// Stata `logit` conventions ([`GlmConvention::Ppmlhdfe`]).
     pub fn glm(&mut self, rows: Vec<f64>, lay: &Layout, offset: Option<Vec<f64>>, s: &Spec, g: &GlmOptions, ctx: &Ctx) -> Result<EstResult, RfError> {
-        self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, OutMode::ResultOnly, ctx).map(|(res, _)| res)
+        self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, OutMode::ResultOnly, None, ctx).map(|(res, _, _)| res)
+    }
+
+    /// GLM estimation paired with wild score bootstrap inference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn glm_with_wildboot(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        offset: Option<Vec<f64>>,
+        s: &Spec,
+        g: &GlmOptions,
+        hyp: &crate::wildboot::Hypothesis,
+        wb_spec: &crate::wildboot::WildBootSpec,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, crate::wildboot::WildBootResult), RfError> {
+        let (res, wb, _) = self.glm_checked(rows, lay, offset, s, g, GlmConvention::Ppmlhdfe, OutMode::ResultOnly, Some((hyp, wb_spec)), ctx)?;
+        Ok((res, wb.expect("wb computed")))
     }
 
     /// [`Session::glm`] under convention `conv`, also returning the per-observation [`GlmParts`].
@@ -245,7 +262,7 @@ impl Session {
         conv: GlmConvention,
         ctx: &Ctx,
     ) -> Result<(EstResult, GlmParts), RfError> {
-        let (res, parts) = self.glm_checked(rows, lay, offset, s, g, conv, OutMode::Both, ctx)?;
+        let (res, _, parts) = self.glm_checked(rows, lay, offset, s, g, conv, OutMode::Both, None, ctx)?;
         Ok((res, parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))?))
     }
 
@@ -272,8 +289,8 @@ impl Session {
             }
         };
         let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &timings };
-        let (_, parts, _) =
-            self.glm_in_pool(rows, lay.nx, offset, s, g, GlmConvention::Fixest, OutMode::FitPartsOnly, false, (false, None, 0.0, None), &muted, pool)?;
+        let (_, _, parts, _) =
+            self.glm_in_pool(rows, lay.nx, offset, s, g, GlmConvention::Fixest, OutMode::FitPartsOnly, false, (false, None, 0.0, None), None, &muted, pool)?;
         parts.ok_or_else(|| RfError::Internal("glm: parts were not computed".into()))
     }
 
@@ -325,16 +342,17 @@ impl Session {
         g: &GlmOptions,
         conv: GlmConvention,
         mode: OutMode,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
         ctx: &Ctx,
-    ) -> Result<(EstResult, Option<GlmParts>), RfError> {
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>, Option<GlmParts>), RfError> {
         validate(self, &rows, lay, offset.as_deref(), s, g)?;
         // The iteration log and drop messages are SMCL for the Stata plugin; fixest mode reports
         // through EstResult::notes and the returned counts instead.
         let muted = Ctx { threads: ctx.threads, verbose: ctx.verbose, interrupt: ctx.interrupt, log: &|_: &str| {} };
         let ctx = if conv == GlmConvention::Fixest { &muted } else { ctx };
-        let (res, parts, _) =
-            par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, conv, mode, false, (false, None, 0.0, None), ctx, pool))??;
-        Ok((res, parts))
+        let (res, wb_res, parts, _) =
+            par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.glm_in_pool(rows, lay.nx, offset, s, g, conv, mode, false, (false, None, 0.0, None), wb, ctx, pool))??;
+        Ok((res, wb_res, parts))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -351,8 +369,8 @@ impl Session {
         ctx: &Ctx,
     ) -> Result<(EstResult, GlmEngineExtra), RfError> {
         validate_with(self, &rows, lay, offset.as_deref(), s, g, true)?;
-        let (res, _, extra) = par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| {
-            self.glm_in_pool(rows, lay.nx, offset, s, g, conv, OutMode::Engine, keep_unadjusted_vce, ml, ctx, pool)
+        let (res, _, _, extra) = par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| {
+            self.glm_in_pool(rows, lay.nx, offset, s, g, conv, OutMode::Engine, keep_unadjusted_vce, ml, None, ctx, pool)
         })??;
         let extra = extra.ok_or_else(|| RfError::Internal("glm_for_engine: missing engine outputs".into()))?;
         Ok((res, extra))
@@ -722,9 +740,10 @@ impl Session {
         mode: OutMode,
         keep_unadjusted_vce: bool,
         ml: (bool, Option<f64>, f64, Option<&[f64]>),
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
         ctx: &Ctx,
         pool: &Pool,
-    ) -> Result<(EstResult, Option<GlmParts>, Option<GlmEngineExtra>), RfError> {
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>, Option<GlmParts>, Option<GlmEngineExtra>), RfError> {
         let fam = g.family;
         let inner_maxiter = s.maxiter;
         let has_const = !(s.noconstant && self.terms.is_empty());
@@ -858,7 +877,7 @@ impl Session {
         ctx.log(&format!("{{txt}}Converged in {iter} iterations and {subiter} HDFE sub-iterations (tol = {})", fmt_e(g.tol, 1)));
         ctx.check()?;
         let fin = Finish { d: &d, out: &out, mu: &mu, eta: &eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, mode, has_const, keep_unadjusted_vce };
-        self.glm_finish(&fin, status, s, g, pool, ctx)
+        self.glm_finish(&fin, status, s, g, wb, pool, ctx)
     }
 
     /// ppmlhdfe `guess(ols)`: OLS of ln(y + ybar/100) on X and the fixed effects (true weights,
@@ -891,15 +910,17 @@ impl Session {
     }
 
     /// Final beta, VCE, statistics and outputs (ppmlhdfe `GLM::solve` after IRLS).
+    #[allow(clippy::too_many_arguments)]
     fn glm_finish(
         &mut self,
         f: &Finish,
         mut status: Vec<u8>,
         s: &Spec,
         g: &GlmOptions,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
         pool: &Pool,
         ctx: &Ctx,
-    ) -> Result<(EstResult, Option<GlmParts>, Option<GlmEngineExtra>), RfError> {
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>, Option<GlmParts>, Option<GlmEngineExtra>), RfError> {
         let Finish { d, out, mu, eta, nx, sd_y, num_sep, sep_complete, iter, subiter, conv, mode, has_const, keep_unadjusted_vce } = *f;
         let fam = d.family;
         let n = d.n;
@@ -1026,7 +1047,7 @@ impl Session {
         if mode == OutMode::FitPartsOnly {
             let cons = b0_s + if has_const && fam == Family::Poisson { sd_y.ln() } else { 0.0 };
             let parts = self.glm_parts_out(f, &beta, &dropped, e, &status, cons, false, pool)?;
-            return Ok((EstResult::default(), Some(parts), None));
+            return Ok((EstResult::default(), None, Some(parts), None));
         }
         let wv = wv_opt.as_deref().expect("allocated for full result");
         let dof = dof::estimate_dof(&self.terms, &self.clusters, n, &s.dof, s.want_groupvar, true, pool);
@@ -1439,7 +1460,93 @@ impl Session {
         } else {
             None
         };
-        Ok((res, parts, engine_extra))
+        let wb_out = if let Some((wb_hyp, wb_spec)) = wb {
+            let kept_idxs: Vec<usize> = (0..k).filter(|&j| !dropped[j] && !out.excluded[j]).collect();
+            let kk_wb = kept_idxs.len();
+            if !self.terms.is_empty() && has_const {
+                crate::wildboot::reject_absorbed_cons(wb_hyp, nx)?;
+            }
+            let explicit_cons = self.terms.is_empty() && has_const;
+            let kept_pos: Vec<usize> = kept_idxs.iter().map(|&j| d.cols[j]).chain(explicit_cons.then_some(nx)).collect();
+            let hyp_kept = crate::wildboot::filter_hypothesis_by_kept(wb_hyp, &kept_pos, k_all)?;
+
+            let k_eff = kk_wb + usize::from(explicit_cons);
+            let mut x_raw_wb = par::alloc_vec(n * k_eff, 0.0)?;
+            let mut x_tilde_wb = par::alloc_vec(n * k_eff, 0.0)?;
+            for i in 0..n {
+                let dx_row = &d.x[i * k..(i + 1) * k];
+                let bl_row = &block[i * r + 1..(i + 1) * r];
+                for (p, &j) in kept_idxs.iter().enumerate() {
+                    let sdx = d.sd_x[j];
+                    let xraw = dx_row[j] * sdx;
+                    x_raw_wb[i * k_eff + p] = xraw;
+                    x_tilde_wb[i * k_eff + p] = if explicit_cons { xraw } else { bl_row[j] * sdx };
+                }
+                if explicit_cons {
+                    x_raw_wb[i * k_eff + kk_wb] = 1.0;
+                    x_tilde_wb[i * k_eff + kk_wb] = 1.0;
+                }
+            }
+            let bread_idx: Vec<usize> = kept_idxs.iter().copied().chain(explicit_cons.then_some(k)).collect();
+            let mut bread_wb = vec![0.0; k_eff * k_eff];
+            for (a, &ia) in bread_idx.iter().enumerate() {
+                for (b_i, &ib) in bread_idx.iter().enumerate() {
+                    bread_wb[a * k_eff + b_i] = oim_raw[ia * msize + ib];
+                }
+            }
+            let beta_wb: Vec<f64> = bread_idx.iter().map(|&i| b_raw[i]).collect();
+            let y_raw_wb: Vec<f64> = d.y.iter().map(|&v| v * sd_y).collect();
+            let mu_wb: Vec<f64> = mu.iter().map(|&v| v * sd_y).collect();
+            let w_irls_wb: Vec<f64> = w.iter().map(|&v| v * sd_y).collect();
+
+            let err_clusters = if matches!(self.vce, Vce::Cluster(_) | Vce::Crv3(_)) { &self.clusters[..] } else { &[][..] };
+            let g_cl = err_clusters
+                .iter()
+                .map(|c| c.g)
+                .min()
+                .or_else(|| self.wb_cluster.as_ref().map(|c| c.g))
+                .unwrap_or(2) as f64;
+            let cl_ssc = if g_cl > 1.0 { g_cl / (g_cl - 1.0) } else { 1.0 };
+            let row_order_wb = row_order.to_vec();
+            let cl_setup = crate::wildboot::OwnedClusterSetup::from_dims(err_clusters, self.wb_cluster.as_ref(), &row_order_wb, cl_ssc, false, pool)?;
+            let cl_cfg = cl_setup.as_ref().map(crate::wildboot::OwnedClusterSetup::as_config);
+            let ssc_hetero = big_n / (big_n - 1.0);
+            let wb_res = crate::wildboot::score::glm_score(
+                crate::wildboot::score::GlmScoreInput {
+                    family: fam,
+                    n,
+                    k: k_eff,
+                    y_raw: &y_raw_wb,
+                    x_raw: &x_raw_wb,
+                    x_tilde_u: &x_tilde_wb,
+                    beta_u: &beta_wb,
+                    e_work_u: e,
+                    w_irls_u: &w_irls_wb,
+                    bread_u: &bread_wb,
+                    mu_u: &mu_wb,
+                    offset: d.off.as_deref(),
+                    tw,
+                    terms: &self.terms,
+                    row_order: &row_order_wb,
+                    cluster: cl_cfg.as_ref(),
+                    ssc_hetero,
+                    glm_tol: g.tol,
+                    glm_maxiter: g.maxiter,
+                    fixef_tol: s.tol,
+                    fixef_maxiter: s.maxiter,
+                    hyp: &hyp_kept,
+                    spec: wb_spec,
+                },
+                Some(self.absorber.as_mut()),
+                ctx,
+                pool,
+            )?;
+            crate::wildboot::attach_wildboot_result(&mut res, &wb_res);
+            Some(wb_res)
+        } else {
+            None
+        };
+        Ok((res, wb_out, parts, engine_extra))
     }
 
     /// [`GlmParts`] in kept order on the original scale (see its field docs). `beta` and `dropped`

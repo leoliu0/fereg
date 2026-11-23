@@ -32,6 +32,9 @@ f _rf_model.ado
 f _rf_parse_absorb.ado
 f _rf_parse_vce.ado
 f _rf_parse_hac.ado
+f _rf_parse_wildboot.ado
+f _rf_wb_post.ado
+f _rf_wb_table.ado
 f _rf_vce_args.ado
 f _rf_hac_gaps.ado
 f _rf_hac_post.ado

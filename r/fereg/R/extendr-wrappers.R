@@ -35,3 +35,7 @@ fereg_bias_corr <- function(input, spec, bias, nthreads) {
 fereg_apes <- function(input, spec, at, ape, nthreads) {
   rust_result(.Call(wrap__fereg_apes, input, spec, at, ape, as.integer(nthreads)))
 }
+
+fereg_wildboot <- function(input, spec, wb, nthreads) {
+  rust_result(.Call(wrap__fereg_wildboot, input, spec, wb, as.integer(nthreads)))
+}

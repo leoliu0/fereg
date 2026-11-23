@@ -8,9 +8,10 @@ use fereg_core::api::{Ctx, RfError, Separation};
 use fereg_core::fit as cf;
 use fereg_core::fit::{
     CoefSource, FactorCol, FeTerm, FitInput, FitSpec, FixefNorm, FixefRm, Flavor, GDf, KFixef, Model,
-    Ssc, TDf, TestStat, VcovKind, VcovOutput, WeightsType,
+    Ssc, TDf, TestStat, VcovKind, VcovOutput, WeightsType, WildBootOptions,
 };
-use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArrayDyn};
+use fereg_core::wildboot::{BootMethod, BootType, BootWeights, Hypothesis, PvalType, WildBootSpec};
+use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -842,6 +843,97 @@ model_fn! {
     }
 }
 
+fn parse_wb_options(wb: &Bound<'_, PyDict>) -> PyResult<WildBootOptions> {
+    let r_arr = item(wb, "r_mat")?.extract::<PyReadonlyArray2<'_, f64>>()?;
+    let r_view = r_arr.as_array();
+    let shape = r_view.shape();
+    let (q, k) = (shape[0], shape[1]);
+    let r_mat: Vec<f64> = r_view.iter().copied().collect();
+    let r_vec_arr = item(wb, "r_vec")?.extract::<PyReadonlyArray1<'_, f64>>()?;
+    let r_vec: Vec<f64> = r_vec_arr.as_array().iter().copied().collect();
+    let hyp = Hypothesis::new(r_mat, r_vec, q, k).map_err(to_pyerr)?;
+    let weights = match item(wb, "weights")?.extract::<String>()?.as_str() {
+        "rademacher" => BootWeights::Rademacher,
+        "webb" => BootWeights::Webb,
+        "mammen" => BootWeights::Mammen,
+        "normal" => BootWeights::Normal,
+        w => return Err(PyValueError::new_err(format!("wildboot: unknown weights '{w}'"))),
+    };
+    let boot_type = match item(wb, "boot_type")?.extract::<String>()?.as_str() {
+        "11" => BootType::T11,
+        "13" => BootType::T13,
+        "31" => BootType::T31,
+        "33" => BootType::T33,
+        "21" => BootType::T21,
+        t => return Err(PyValueError::new_err(format!("wildboot: unknown boot_type '{t}'"))),
+    };
+    let method = match item(wb, "method")?.extract::<String>()?.as_str() {
+        "auto" => BootMethod::Auto,
+        "wildcluster" => BootMethod::WildCluster,
+        "score" => BootMethod::Score,
+        "wre" => BootMethod::Wre,
+        "hetero" => BootMethod::Hetero,
+        m => return Err(PyValueError::new_err(format!("wildboot: unknown method '{m}'"))),
+    };
+    let pval_type = match item(wb, "pval_type")?.extract::<String>()?.as_str() {
+        "two-tailed" => PvalType::TwoTailed,
+        "equal-tailed" => PvalType::EqualTailed,
+        ">" => PvalType::Greater,
+        "<" => PvalType::Less,
+        p => return Err(PyValueError::new_err(format!("wildboot: unknown pval_type '{p}'"))),
+    };
+    let spec = WildBootSpec {
+        reps: item(wb, "reps")?.extract()?,
+        weights,
+        boot_type,
+        method,
+        impose_null: item(wb, "impose_null")?.extract()?,
+        pval_type,
+        conf_int: item(wb, "conf_int")?.extract()?,
+        level: item(wb, "level")?.extract()?,
+        seed: item(wb, "seed")?.extract()?,
+        tol: item(wb, "tol")?.extract()?,
+        maxiter: item(wb, "maxiter")?.extract()?,
+    };
+    let bootcluster: Option<Vec<usize>> = item(wb, "bootcluster")?.extract()?;
+    Ok(WildBootOptions { hyp, spec, bootcluster })
+}
+
+model_fn! {
+    /// Wild bootstrap inference (`fereg_core::fit::wildboot`).
+    fn wildboot(wb: &Bound<'py, PyDict>) -> Py<PyDict>;
+    |py, input, spec, threads, verbose| {
+        let opts = parse_wb_options(wb)?;
+        let out = py.detach(|| with_ctx(threads, verbose, |ctx| cf::wildboot(input, spec, &opts, ctx))).map_err(to_pyerr)?;
+        let r = out.result;
+        let d = PyDict::new(py);
+        d.set_item("coef_source", sources(py, &out.coef_source)?)?;
+        d.set_item("collinear", sources(py, &out.collinear)?)?;
+        d.set_item("nobs_origin", out.nobs_origin)?;
+        d.set_item("stat", r.stat)?;
+        d.set_item("p_val", r.p_val)?;
+        d.set_item("stat_type", r.stat_type.name())?;
+        d.set_item("point_estimate", r.point_estimate)?;
+        d.set_item("se", r.se)?;
+        d.set_item("conf_int", r.conf_int)?;
+        d.set_item("t_boot", r.t_boot.into_pyarray(py))?;
+        d.set_item("reps", r.reps)?;
+        d.set_item("reps_feasible", r.reps_feasible)?;
+        d.set_item("nobs", r.nobs)?;
+        d.set_item("n_clusters", r.n_clusters)?;
+        d.set_item("q", r.q)?;
+        d.set_item("full_enumeration", r.full_enumeration)?;
+        d.set_item("method", r.method.name())?;
+        d.set_item("boot_type", r.boot_type.name())?;
+        d.set_item("weights", r.weights.name())?;
+        d.set_item("impose_null", r.impose_null)?;
+        d.set_item("pval_type", r.pval_type.name())?;
+        d.set_item("ssc", r.ssc)?;
+        d.set_item("notes", r.notes)?;
+        Ok(d.unbind())
+    }
+}
+
 macro_rules! dist_fn {
     ($name:ident, $f:path, ($($p:ident),*), $doc:literal) => {
         #[doc = $doc]
@@ -870,5 +962,5 @@ mod _core {
     const __version__: &str = fereg_core::VERSION;
 
     #[pymodule_export]
-    use super::{FitResult, FitState, apes, bias_corr, bias_dims, fit, pchisq_upper, pf_upper, pnorm, pt, qnorm, qt};
+    use super::{FitResult, FitState, apes, bias_corr, bias_dims, fit, pchisq_upper, pf_upper, pnorm, pt, qnorm, qt, wildboot};
 }

@@ -23,11 +23,13 @@ mod input;
 mod ols;
 mod state;
 mod vcov;
+mod wildboot;
 
 pub use bias::{
     ApeAt, ApeOptions, ApeOutput, BiasDims, BiasFit, BiasMethod, BiasOptions, BiasReport, JackknifeOptions, Normalization, Permutation, Sampling, Structure,
     Variant, WhichBias, apes, bias_corr, bias_dims,
 };
+pub use wildboot::{WildBootOptions, WildBootOutput, wildboot};
 
 /// A categorical column over the input rows.
 #[derive(Clone, Copy, Debug)]

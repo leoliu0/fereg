@@ -17,6 +17,7 @@ __all__ = [
     "bias_dims_design",
     "bias_corr_design",
     "apes_design",
+    "wildboot_design",
     "factor_arg",
     "core_ssc",
     "pnorm",
@@ -160,6 +161,13 @@ def apes_design(design: Any, *, ape: dict, **options: Any) -> dict:
     corrected coefficients, ape_jackknife: jackknife APEs | None}}`` (``at=None``: uncorrected)."""
     args, kwargs = _fit_call(design, **options)
     return _core.apes(*args, **kwargs, ape=ape)
+
+
+def wildboot_design(design: Any, *, wb: dict, **options: Any) -> dict:
+    """``fereg_core::fit::wildboot``: wild bootstrap hypothesis test result dict."""
+    options = {**options, "keep_resid": False, "keep_fixef": False, "keep_state": False}
+    args, kwargs = _fit_call(design, **options)
+    return _core.wildboot(*args, **kwargs, wb=wb)
 
 
 def _vectorized(f, x, *params):

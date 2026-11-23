@@ -12,8 +12,8 @@ Each front end follows the syntax, defaults, small-sample corrections and output
 it mirrors, so results match that package's to numerical precision. All three cover OLS, IV/2SLS,
 Poisson and logit with any number of fixed effects, interactions of fixed effects, varying slopes,
 weights, and iid, heteroskedasticity-robust (HC1; HC2/HC3 except for IV), multiway clustered
-(CRV1, CRV3), Newey–West, Driscoll–Kraay and Conley standard errors, plus residuals, `predict`
-and fixed-effect values.
+(CRV1, CRV3), Newey–West, Driscoll–Kraay and Conley standard errors, wild bootstrap inference,
+plus residuals, `predict` and fixed-effect values.
 
 For fixed-effects logit, all three also correct the incidental-parameter bias (Fernández-Val and
 Weidner 2016; for trade networks, Hinz, Stammann and Wanner 2020), analytically or with
@@ -64,6 +64,7 @@ rerun with `cd bench && uv run python run.py --grid gate`.
 net install fereg, from("https://leoliu0.github.io/fereg/stata") replace
 
 fereg y x1 x2, absorb(firm year) cluster(firm)
+fereg y x1 x2, absorb(firm year) cluster(firm year) wildboot(x1 = 0, bootcluster(firm) reps(999))
 fereg y x1 (x2 = z), absorb(firm year) vce(robust)
 feppml trade dist, absorb(exporter#year importer#year) cluster(pair)
 felogit default x1, absorb(firm year)
@@ -79,7 +80,9 @@ Variances follow reghdfe and ivreghdfe: `vce(unadjusted)`, `vce(robust)`, `vce(c
 `kernel()`, `kiefer`, `dkraay()`, `psd0`/`psda` (Newey–West and the other kernels, within panels on
 `xtset` data). fereg extensions: `vce(hc2)`/`vce(hc3)` (Stata `regress` formulas, exact leverage
 with absorbed fixed effects), `vce(crv3 clustvars)` and `vce(conley latvar lonvar, cutoff(#))`.
-See `help fereg`, `help feppml` and `help felogit`.
+`wildboot()` adds wild bootstrap tests, p-values and confidence intervals for `fereg`, `feppml`
+and `felogit` (WCR/WCU with MacKinnon–Nielsen–Webb `11`/`13`/`31`/`33`, heteroskedastic `HC1`/`HC2`/`HC3`,
+Davidson–MacKinnon WRE for IV and score bootstrap for GLMs/IV). See `help fereg`, `help feppml` and `help felogit`.
 `felogit` adds logitfe's bias corrections and APEs: `analytical`, `jackknife` (`ss1`, `ss2`, `js`,
 `sj`, `jj`, `double`, `multiple()`), `ape`, `lags()`, `ibias()`, `tbias()`, `population()` and
 `network`.
@@ -101,6 +104,7 @@ m = fereg.feols("y ~ x1 + x2 | firm + year", data=df, vcov={"CRV1": "firm"})
 iv = fereg.feols("y ~ x1 | firm + year | x2 ~ z", data=df)
 p = fereg.fepois("count ~ x1 | firm + year", data=df, vcov="hetero")
 m.summary()
+m.wildboottest("x1", reps=999).summary()
 fereg.etable([m, iv, p], type="md")
 m.fixef()
 
@@ -117,8 +121,9 @@ Data can be pandas or polars. The result classes (`Feols`, `Feiv`, `Fepois`, `Fe
 with `vcov_kwargs={"time_id": ..., "panel_id": ..., "lag": ...}`, at estimation or post hoc.
 fereg extensions: HC2/HC3 with fixed effects, CRV3 for IV and logit, Newey–West /
 Driscoll–Kraay for IV, and fixest's Conley estimator (`vcov="conley"`,
-`vcov_kwargs={"lat": ..., "lon": ..., "cutoff": "100km"}`). Not implemented: probit; `nid`
-variances (`NotImplementedError`); pyfixest's wild bootstrap, `ccv`, `decompose`, `ritest`,
+`vcov_kwargs={"lat": ..., "lon": ..., "cutoff": "100km"}`). `wildboottest()` / `m.wildboottest()`
+provides wild bootstrap inference across OLS, IV and GLMs (MNW `11`/`13`/`31`/`33`, WRE, score,
+CI inversion). Not implemented: probit; `nid` variances (`NotImplementedError`); `ccv`, `decompose`, `ritest`,
 plotting and DiD helpers. `Felogit.bias_corr()` and `Felogit.get_apes()` follow alpaca's
 `biasCorr()` and `getAPEs()` (pyfixest has no bias correction).
 
@@ -142,6 +147,7 @@ m  <- feols(y ~ x1 + x2 | firm + year, df, cluster = ~firm)
 iv <- feols(y ~ x1 | firm + year | x2 ~ z, df)
 p  <- fepois(count ~ x1 | firm + year, df, vcov = "hetero")
 summary(m)
+summary(boottest(m, param = "x1", B = 999))
 etable(m, iv, p)
 fixef(m)
 
@@ -159,7 +165,8 @@ clustering (`~firm`, `~firm + year`, `"twoway"`), Newey–West (`NW(2) ~ firm + 
 `NW ~ year` for a time series, or `"NW"` with `panel.id = ~firm + year`), Driscoll–Kraay
 (`DK(2) ~ year`), Conley (`conley(100) ~ lat + lon`, `conley("60mi")`) and fixest's request
 objects (`NW()`, `vcov_NW()`, `vcov_conley()`, `vcov_hetero(type = "hc3")`, ...). CRV3
-(`vcov = crv3 ~ firm`, `vcov_crv3()`) is a fereg extension with fixest's cluster correction.
+(`vcov = crv3 ~ firm`, `vcov_crv3()`) is a fereg extension with fixest's cluster correction,
+and `boottest()` provides wild bootstrap tests and confidence intervals across OLS, IV and GLMs.
 Not implemented: `fixef.rm = "infinite_coef"`, panel operators `l()`/`f()`/`d()`, `mvsw()`, the
 `.[]`/`..ctrl` formula macros, and variances given as functions or matrices. `fixef.tol` and
 `fixef.iter` are the settings of fereg's solver (defaults 1e-8 and 16000), which stops on a

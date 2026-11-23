@@ -24,7 +24,7 @@ mod stock_yogo;
 use rayon::prelude::*;
 
 use crate::absorber::SolveOpts;
-use crate::api::{Bandwidth, ConleyVce, Ctx, EstResult, KernelVce, Layout, NamedMat, Psd, Spec, Vce};
+use crate::api::{Bandwidth, ConleyVce, Ctx, EstResult, KernelVce, Layout, NamedMat, Psd, Spec, Vce, WeightKind};
 use crate::crv3::{JkModel, JkProblem};
 use crate::hac::{self, Kernel};
 use crate::leverage::FeCols;
@@ -297,6 +297,31 @@ impl Session {
     /// inst...]`). e(b) is ordered endog then exog (ivreghdfe), without a constant;
     /// [`EstResult::status`] follows the layout order (exog, endog, inst).
     pub fn iv(&mut self, rows: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx) -> Result<EstResult, RfError> {
+        self.iv_with_opt_wb(rows, lay, s, None, ctx).map(|(res, _)| res)
+    }
+
+    /// 2SLS paired with wild bootstrap inference (WRE or Score).
+    pub fn iv_with_wildboot(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        s: &Spec,
+        hyp: &crate::wildboot::Hypothesis,
+        wb_spec: &crate::wildboot::WildBootSpec,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, crate::wildboot::WildBootResult), RfError> {
+        let (res, wb) = self.iv_with_opt_wb(rows, lay, s, Some((hyp, wb_spec)), ctx)?;
+        Ok((res, wb.expect("wb computed")))
+    }
+
+    fn iv_with_opt_wb(
+        &mut self,
+        rows: Vec<f64>,
+        lay: &Layout,
+        s: &Spec,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
+        ctx: &Ctx,
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>), RfError> {
         if rows.len() != self.n() * lay.ncols() {
             return Err(RfError::InvalidInput("iv: data block size differs from N*R".into()));
         }
@@ -307,10 +332,18 @@ impl Session {
             Vce::Hc2 | Vce::Hc3 => return Err(RfError::Code(198, "vce() only supports cluster, robust, and unadjusted".into())),
             _ => {}
         }
-        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.iv_in_pool(rows, lay, s, ctx, pool))?
+        par::with_pool(par::threads_for(ctx.threads, self.n()), |pool| self.iv_in_pool(rows, lay, s, wb, ctx, pool))?
     }
 
-    fn iv_in_pool(&mut self, rows_in: Vec<f64>, lay: &Layout, s: &Spec, ctx: &Ctx, pool: &Pool) -> Result<EstResult, RfError> {
+    fn iv_in_pool(
+        &mut self,
+        rows_in: Vec<f64>,
+        lay: &Layout,
+        s: &Spec,
+        wb: Option<(&crate::wildboot::Hypothesis, &crate::wildboot::WildBootSpec)>,
+        ctx: &Ctx,
+        pool: &Pool,
+    ) -> Result<(EstResult, Option<crate::wildboot::WildBootResult>), RfError> {
         let n = self.n();
         let r_in = lay.ncols();
         let (nx_in, ne, ni) = (lay.nx, lay.nendog, lay.ninst);
@@ -928,6 +961,124 @@ impl Session {
                 None => vec![f64::NAN; n],
             });
         }
-        Ok(res)
+        let wb_out = if let Some((wb_hyp, wb_spec)) = wb {
+            let hyp_kept = crate::wildboot::filter_hypothesis_by_kept(wb_hyp, &pos_x, kall)?;
+            let mut x_wb = par::alloc_vec(n * k, 0.0)?;
+            let mut z_wb = par::alloc_vec(n * l, 0.0)?;
+            let mut resid_wb = par::alloc_vec(n, 0.0)?;
+            for i in 0..n {
+                let row = &rows[i * r..(i + 1) * r];
+                let mut u = row[0];
+                for (c, &col) in xcols.iter().enumerate() {
+                    let v = row[col];
+                    x_wb[i * k + c] = v;
+                    u -= beta[c] * v;
+                }
+                resid_wb[i] = u;
+                for (d, &col) in zcols.iter().enumerate() {
+                    z_wb[i * l + d] = row[col];
+                }
+            }
+            let zwy = par::sum_chunks(pool, n, CHUNK, l * k1, |range, acc| {
+                for i in range {
+                    let wi = w.wv(i);
+                    let zr = &z_wb[i * l..(i + 1) * l];
+                    let xr = &x_wb[i * k..i * k + k1];
+                    for d in 0..l {
+                        let wz = wi * zr[d];
+                        for j in 0..k1 {
+                            acc[d * k1 + j] += wz * xr[j];
+                        }
+                    }
+                }
+            });
+            let mut pi_hat = vec![0.0; l * k1];
+            for d in 0..l {
+                for j in 0..k1 {
+                    let mut s0 = 0.0;
+                    for dd in 0..l {
+                        s0 += zzinv.at(d, dd) * zwy[dd * k1 + j];
+                    }
+                    pi_hat[d * k1 + j] = s0;
+                }
+            }
+            let mut u2_hat = par::alloc_vec(n * k1, 0.0)?;
+            for i in 0..n {
+                let zr = &z_wb[i * l..(i + 1) * l];
+                for j in 0..k1 {
+                    let mut fit = 0.0;
+                    for d in 0..l {
+                        fit += zr[d] * pi_hat[d * k1 + j];
+                    }
+                    u2_hat[i * k1 + j] = x_wb[i * k + j] - fit;
+                }
+            }
+            let err_clusters = if matches!(self.vce, Vce::Cluster(_) | Vce::Crv3(_)) { &self.clusters[..] } else { &[][..] };
+            let g_cl = err_clusters
+                .iter()
+                .map(|c| c.g)
+                .min()
+                .or_else(|| self.wb_cluster.as_ref().map(|c| c.g))
+                .unwrap_or(2) as f64;
+            let cl_ssc = if s.iv.small && g_cl > 1.0 { (big_n - 1.0) / (big_n - k as f64 - sdof) * g_cl / (g_cl - 1.0) } else { 1.0 };
+            let row_order_wb = row_order.to_vec();
+            let cl_setup = crate::wildboot::OwnedClusterSetup::from_dims(err_clusters, self.wb_cluster.as_ref(), &row_order_wb, cl_ssc, false, pool)?;
+            let cl_cfg = cl_setup.as_ref().map(crate::wildboot::OwnedClusterSetup::as_config);
+            let ssc_hetero = if s.iv.small { big_n / nk } else { big_n / (big_n - dofm) };
+            let synth_const: Vec<crate::session::Term> = if self.terms.is_empty() && !skip_absorber {
+                vec![crate::session::Term {
+                    factors: Vec::new(),
+                    codes: vec![0u32; n],
+                    g: 1,
+                    intercept: true,
+                    slopes: Vec::new(),
+                    slope_vars: Vec::new(),
+                    save: false,
+                }]
+            } else {
+                Vec::new()
+            };
+            let wb_terms: &[crate::session::Term] = if skip_absorber {
+                &[]
+            } else if self.terms.is_empty() {
+                &synth_const
+            } else {
+                &self.terms
+            };
+            let wb_res = crate::wildboot::wre::run(
+                crate::wildboot::wre::IvBootInput {
+                    n,
+                    m: k1,
+                    k1: k2,
+                    l2: l1,
+                    x: &x_wb,
+                    z: &z_wb,
+                    resid: &resid_wb,
+                    beta: &beta,
+                    bread: &xpzx_inv.d,
+                    zz_inv: &zzinv.d,
+                    pi_hat: &pi_hat,
+                    u2_hat: &u2_hat,
+                    w_rows: w.wv.as_deref(),
+                    is_fweight: self.weight_kind == WeightKind::Fweight,
+                    terms: wb_terms,
+                    row_order: &row_order_wb,
+                    ssc_hetero,
+                    hyp: &hyp_kept,
+                    spec: wb_spec,
+                    cluster: cl_cfg.as_ref(),
+                    fixef_tol: s.tol,
+                    fixef_maxiter: s.maxiter,
+                },
+                (!skip_absorber).then_some(self.absorber.as_mut()),
+                ctx,
+                pool,
+            )?;
+            crate::wildboot::attach_wildboot_result(&mut res, &wb_res);
+            Some(wb_res)
+        } else {
+            None
+        };
+        Ok((res, wb_out))
     }
 }

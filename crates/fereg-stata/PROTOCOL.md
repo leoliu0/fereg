@@ -58,6 +58,8 @@ Keys:
   with Σy = 0; logit: Σy ∈ {0, count}) runs inside the singleton loop. feppml sends `sep=fe`
   only when singletons are dropped, as ppmlhdfe.
 - `absorber=fast|dense` (debug; dense = explicit-dummy reference).
+- `wb_cluster=f1[*f2]`: optional override bootstrap cluster dimension (`1`-based factor indices)
+  for wild bootstrap inference.
 
 Effects: writes 0 into touse for dropped observations (missing values, singletons, fe rule);
 local `_rf_token` names the stored session (a new prepare discards the previous one); scalars
@@ -281,3 +283,28 @@ iterated with singleton removal; only when prepare ran with `sep=none`; its
 rows get certificate 1) and ReLU rounds repeated on the remaining sample until one finds
 nothing. Scalars: `N` (prepared sample), `num_separated`, `separation_complete`,
 `relu_iterations` (summed over the rounds).
+
+#### Wild bootstrap (`wb_*` keys on `cmd=ols`, `cmd=iv`, `cmd=glm`)
+Optional wild bootstrap inference paired with the estimation call (mutually exclusive with
+`sepcheck=1` and `bc=` on `cmd=glm`).
+
+Keys (activated when `wb_q=` is present; all other `wb_*` keys are errors if `wb_q=` is absent):
+- `wb_q`: number of linear constraints `q >= 1` in `R * beta = r`.
+- `wb_R`: comma-separated row-major floats (`q * k_sent`, where `k_sent` is `nx + report_constant`
+  on OLS, `nendog + nx` on IV, `nx + 1` on GLM).
+- `wb_r`: comma-separated target values (`q` floats).
+- `wb_reps` (default 999), `wb_weights=rademacher|webb|mammen|normal` (default `rademacher`),
+  `wb_boottype=11|21|31|13|33` (default `11`), `wb_method=auto|wild|score|wre|hetero` (default
+  `auto`), `wb_null=0|1` (default `1`), `wb_pvaltype=twotailed|equal|greater|less` (default
+  `twotailed`), `wb_ci=0|1` (default `1`), `wb_level` (float in `(0, 100)`, default `95`),
+  `wb_seed` (u64, default `0`), `wb_tol` (float > 0, default `1e-6`), `wb_maxiter` (int >= 1,
+  default `40`).
+- `wb_ci_mat`: optional pre-allocated `1 x 2` Stata matrix name filled when `q == 1` and CI is
+  computed.
+- `wb_savet`: optional pre-allocated `mr x 1` (`mr >= reps_written`) Stata matrix name filled with
+  the bootstrap test-statistic draws (trailing rows set to missing).
+
+Returned scalars (`__rf_*`): `wb_stat`, `wb_p`, `wb_reps`, `wb_reps_feasible`, `wb_q`,
+`wb_full_enum`, `wb_impose_null`, `wb_ssc`, and optionally `wb_n_clust`, `wb_point`, `wb_se`,
+`wb_ci_lo`, `wb_ci_hi`. Returned locals (`_rf_*`): `wb_method`, `wb_boottype`, `wb_weights`,
+`wb_pvaltype`, `wb_stattype`.

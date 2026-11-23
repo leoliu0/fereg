@@ -15,7 +15,7 @@
 use fereg_core::{EstResult, Family, GlmCollinear, GlmConvention, GlmOptions, Guess, Layout, RfError, Separation, Spec};
 
 use crate::args::{self, Args};
-use crate::{Phases, bc, check_nvars, est, io, with_ctx};
+use crate::{Phases, bc, check_nvars, est, io, wb, with_ctx};
 
 fn parse_separation(s: &str) -> Result<Separation, RfError> {
     let mut sep = Separation::default();
@@ -78,8 +78,15 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
         ..Spec::default()
     };
     let bc = bc::keys(a, family)?;
+    let wb_req = wb::parse(a)?;
     if bc.is_some() && sepcheck {
         return Err(RfError::InvalidInput("fereg plugin: bc= and sepcheck=1 exclude each other".into()));
+    }
+    if wb_req.is_some() && sepcheck {
+        return Err(RfError::InvalidInput("fereg plugin: wb_q= and sepcheck=1 exclude each other".into()));
+    }
+    if wb_req.is_some() && bc.is_some() {
+        return Err(RfError::InvalidInput("fereg plugin: wb_q= and bc= exclude each other".into()));
     }
     a.finish()?;
     let lay = Layout::ols(nx);
@@ -122,9 +129,18 @@ pub fn glm(a: &Args) -> Result<(), RfError> {
             return Ok(());
         }
         let Some(bk) = &bc else {
-            let res = stored.session.glm(rows, &lay, offset, &spec, &g, ctx)?;
+            let (res, wb_out) = match &wb_req {
+                Some(req) => {
+                    let (r, w) = stored.session.glm_with_wildboot(rows, &lay, offset, &spec, &g, &req.hyp, &req.spec, ctx)?;
+                    (r, Some(w))
+                }
+                None => (stored.session.glm(rows, &lay, offset, &spec, &g, ctx)?, None),
+            };
             ph.mark("glm: estimate");
             est::finish(&res, &k, &stored, before_out)?;
+            if let (Some(req), Some(w)) = (&wb_req, &wb_out) {
+                wb::store_extra(w, req)?;
+            }
             ph.mark("glm: store");
             return Ok(());
         };

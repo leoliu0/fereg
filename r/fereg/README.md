@@ -18,6 +18,7 @@ lg <- feglm(default ~ x1 | firm, df, family = "logit")
 summary(m)
 etable(m, iv, p)
 fixef(m)
+summary(boottest(m, param = "x1", B = 999))
 ```
 
 Supported: OLS, IV/2SLS (several endogenous regressors), Poisson, logit; any number of fixed
@@ -35,6 +36,12 @@ objects (`NW()`, `DK()`, `conley()`, `vcov_NW()`, `vcov_DK()`, `vcov_conley()`, 
 `vcov_cluster()`). CRV3 (`vcov = crv3 ~ g`, `vcov_crv3()`) is a fereg extension (fixest has no
 CRV3): the leave-one-cluster-out jackknife with fixest's cluster small-sample correction;
 after estimation it re-estimates the model.
+
+Wild bootstrap inference (`boottest(fit, param = ...)` / `boottest(fit, R = ..., r = ...)`)
+covers clustered OLS (WCR/WCU, MacKinnon–Nielsen–Webb `11`/`13`/`31`/`33`, exact non-nested
+HDFE projection, `bootcluster` overrides, full enumeration, and CI inversion), unclustered
+heteroskedastic OLS (`11`/`21`/`31`/`13`/`33`), IV/2SLS (Davidson–MacKinnon WRE and score),
+and Poisson/logit GLMs (wild score bootstrap).
 
 Fixed-effects logit: incidental-parameter bias correction and average partial effects with
 alpaca 0.3.5's interface. `biasCorr(fit, L = 0, panel.structure = "classic")` applies the

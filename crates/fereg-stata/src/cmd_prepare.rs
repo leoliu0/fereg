@@ -22,6 +22,7 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
     let factype = a.str_or("factype", "");
     let absorb = args::parse_absorb(a.str_req("absorb")?, nfac, nslope)?;
     let vce = args::parse_vce(a, nfac, nslope, ncoord)?;
+    let wb_cluster = args::parse_wb_cluster(a, nfac)?;
     // Conley coordinates follow the slope variables and are read as such.
     let nslope = nslope + ncoord;
     let wtype = args::parse_wtype(a.str_or("wtype", "none"))?;
@@ -158,7 +159,17 @@ pub fn prepare(a: &Args) -> Result<(), RfError> {
             y_for_sep: y_sep.as_deref(),
             sep_fe,
         };
-        let session = Session::prepare_with(prep, ctx, kind)?;
+        let mut session = Session::prepare_with(prep, ctx, kind)?;
+        if let Some(bc_idx) = wb_cluster {
+            let bc_vals: Vec<FactorValues> = bc_idx
+                .iter()
+                .map(|&f| match &raw[f] {
+                    RawFactor::Num(v) => FactorValues::Num(v),
+                    RawFactor::Str(b, o) => FactorValues::Str { bytes: b, offsets: o },
+                })
+                .collect();
+            session.set_wb_cluster(&bc_vals, ctx)?;
+        }
         drop(raw);
         ph.mark("prepare: session");
 

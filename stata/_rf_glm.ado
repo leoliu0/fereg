@@ -31,6 +31,7 @@ program _rf_glm, eclass
 		TAGSEP(name) ZVARname(name)
 		ANalytical JACKknife APE SS1 SS2 JS SJ JJ DOUBLE MULtiple(integer 0) Individuals Time
 		LAGS(integer 0) IBIAS(string) TBIAS(string) POPulation(string) NETwork
+		WILDboot(string asis)
 		* ] ;
 	#delimit cr
 	* absorber(fast|dense) is an undocumented debugging option (dense = explicit-dummy reference)
@@ -263,6 +264,35 @@ program _rf_glm, eclass
 		di as err "warning: keeping singleton groups will keep fixed effects that cause separation"
 	}
 
+	if (`"`wildboot'"' != "") {
+		if ("`bc'" != "" | `is_tagsep') {
+			di as err "wildboot() cannot be combined with bias correction, ape, or tagsep()"
+			exit 198
+		}
+		if ("`vcetype'" == "conley" | "`vcetype'" == "dkraay" | `hac') {
+			di as err "wildboot() is not supported with dkraay, conley, or kernel/HAC variances"
+			exit 198
+		}
+		_rf_parse_wildboot, step(pre) raw(`"`wildboot'"')
+		local wb_spec `"`r(spec)'"'
+		local wb_rmat "`r(rmat)'"
+		local wb_rvec "`r(rvec)'"
+		local wb_weights "`r(weights)'"
+		local wb_boottype "`r(boottype)'"
+		local wb_method "`r(method)'"
+		local wb_pvaltype "`r(pvaltype)'"
+		local wb_seed "`r(seed)'"
+		local wb_savet "`r(savet)'"
+		local wb_bc_vars "`r(bc_vars)'"
+		local wb_bootcluster "`r(bootcluster)'"
+		local wb_reps = r(reps)
+		local wb_imposenull = r(imposenull)
+		local wb_wantci = r(wantci)
+		local wb_level = r(level)
+		local wb_tol = r(tol)
+		local wb_maxiter = r(maxiter)
+	}
+
 // --------------------------------------------------------------------------
 // Sample
 // --------------------------------------------------------------------------
@@ -272,7 +302,7 @@ program _rf_glm, eclass
 	* offset() the model and cluster variables are marked out here first, since the exposure
 	* check runs over that sample.
 	if ("`exposure'`offset'" != "") {
-		local varlist `depvar' `indepvars' `base_clustervars' `tvar' `ivar' `conley_lat' `conley_lon'
+		local varlist `depvar' `indepvars' `base_clustervars' `tvar' `ivar' `conley_lat' `conley_lon' `wb_bc_vars'
 		marksample touse, strok
 	}
 	else marksample touse, novarlist
@@ -344,7 +374,7 @@ program _rf_glm, eclass
 	local nbc : word count `bcvars'
 
 	local factors `absfactors'
-	foreach v in `base_clustervars' `tvar' `ivar' {
+	foreach v in `base_clustervars' `tvar' `ivar' `wb_bc_vars' {
 		if (!`: list v in factors') local factors `factors' `v'
 	}
 	local nfac : word count `factors'
@@ -411,6 +441,14 @@ program _rf_glm, eclass
 	local args `""nfac=`nfac'" "nslope=`nslope'" "nmodel=`nmodel'" "absorb=`abskey'" "wtype=`wtype'" "singletons=`drop_singletons'" "family=`family'" "sep=`=cond(`sep_fe', "fe", "none")'""'
 	local args `"`args' `rf_vceargs'"'
 	if (`nfac' > 0) local args `"`args' "factype=`factype'""'
+	if ("`wb_bc_vars'" != "") {
+		local wb_clpos
+		foreach v of local wb_bc_vars {
+			local k : list posof "`v'" in factors
+			local wb_clpos = cond("`wb_clpos'" == "", "`k'", "`wb_clpos'*`k'")
+		}
+		local args `"`args' "wb_cluster=`wb_clpos'""'
+	}
 	* No if, in, weight, exposure, offset or markout: touse is 1 everywhere and the plugin does
 	* not read it
 	if (`"`if'`in'`weight'`exposure'`offset'`rf_markvars'`bc'"' == "") local args `"`args' "sample=all""'
@@ -629,7 +667,21 @@ program _rf_glm, eclass
 		}
 		if (`bc_multiple' > 0) local args `"`args' "multiple=`bc_multiple'" "perm=`bc_perm'""'
 	}
+	tempname wb_cimat
+	if (`"`wildboot'"' != "") {
+		_rf_parse_wildboot, step(hyp) spec(`"`wb_spec'"') rmat(`"`wb_rmat'"') rvec(`"`wb_rvec'"') ///
+			fullnames(`"`fullvarlist' _cons"') sentmask(`"`mask' 1"') ///
+			reps(`wb_reps') weights(`wb_weights') boottype(`wb_boottype') method(`wb_method') ///
+			imposenull(`wb_imposenull') pvaltype(`wb_pvaltype') wantci(`wb_wantci') level(`wb_level') ///
+			seed(`wb_seed') tol(`wb_tol') maxiter(`wb_maxiter') savet(`"`wb_savet'"') cimat(`wb_cimat')
+		local args `"`args' `r(args)'"'
+	}
 	local _rf_status
+	local _rf_wb_method
+	local _rf_wb_boottype
+	local _rf_wb_weights
+	local _rf_wb_pvaltype
+	local _rf_wb_stattype
 	capture noisily _rf_load `yvar' `xvars' `offvar' `bcvars' `touse' `outvars', glm `args' `common'
 	if (_rc) {
 		local rc = _rc
@@ -825,6 +877,11 @@ program _rf_glm, eclass
 		foreach t in title title1 title2 title3 {
 			ereturn local bc`t' `"`bc_`t''"'
 		}
+	}
+	if (`"`wildboot'"' != "") {
+		_rf_wb_post, level(`wb_level') bootcluster(`wb_bootcluster') cimat(`wb_cimat') savet(`wb_savet') ///
+			method(`_rf_wb_method') boottype(`_rf_wb_boottype') weights(`_rf_wb_weights') ///
+			pvaltype(`_rf_wb_pvaltype') stattype(`_rf_wb_stattype')
 	}
 
 	if ("`d'" != "") label variable `d' "Sum of fixed effects"
